@@ -1224,6 +1224,8 @@ if (process.argv.includes("--tax-summary")) {
           pnl: t.pnlPct ? `${t.pnlPct >= 0 ? "+" : ""}${t.pnlPct.toFixed(2)}%` : null,
           decision: t.claudeAnalysis?.action || (t.shouldExit ? "EXIT" : "HOLD"),
           placed: t.orderPlaced,
+          blockedBy: !t.orderPlaced && t.conditions ? t.conditions.filter(c => !c.pass).map(c => c.label) : undefined,
+          claudeReason: t.claudeAnalysis?.reasoning || undefined,
         })),
       };
       res.writeHead(200, { "Content-Type": "application/json" });
