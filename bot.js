@@ -74,6 +74,7 @@ function checkOnboarding() {
 
 const CONFIG = {
   symbols: (process.env.SYMBOLS || process.env.SYMBOL || "SUIUSDT,ARBUSDT,NEARUSDT,LINKUSDT,OPUSDT,TIAUSDT,APTUSDT,SOLUSDT,AXSUSDT,ICPUSDT,ETCUSDT,LDOUSDT,IMXUSDT,KAVAUSDT,VETUSDT")
+    .replace(/^SYMBOLS=/i, "")
     .split(",")
     .map((s) => s.trim().toUpperCase()),
   timeframe: process.env.TIMEFRAME || "4H",
