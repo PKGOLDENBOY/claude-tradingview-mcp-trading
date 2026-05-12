@@ -400,10 +400,10 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
     // 4. Not overextended from VWAP
     const distFromVWAP = Math.abs((price - vwap) / vwap) * 100;
     check(
-      "Price within 1.5% of VWAP (not overextended)",
-      "< 1.5%",
+      "Price within 2.5% of VWAP (not overextended)",
+      "< 2.5%",
       `${distFromVWAP.toFixed(2)}%`,
-      distFromVWAP < 1.5,
+      distFromVWAP < 2.5,
     );
 
     // 5. EMA(8) above EMA(21) — confirmed uptrend on entry timeframe
@@ -421,24 +421,14 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
       console.log(`  ℹ️  Trend context (not a hard gate): ${bullTrend4h ? "✅ bullish" : "⚠️  bearish — Claude must be 90%+ confident"}`);
     }
 
-    // 7. Volume confirmation — real buying conviction
+    // 7. Volume — soft signal only, Claude weighs it
     if (vol) {
-      check(
-        "Volume above average (conviction)",
-        "> avg",
-        `${(vol.current / vol.avg * 100).toFixed(0)}%`,
-        vol.aboveAvg,
-      );
+      console.log(`  ℹ️  Volume: ${vol.aboveAvg ? "✅ above avg" : "⚠️ below avg"} (${(vol.current / vol.avg * 100).toFixed(0)}% of avg) — not a hard block`);
     }
 
-    // 8. ADX — only trade in trending markets, skip choppy sideways action
+    // 8. ADX — soft signal only, Claude weighs it
     if (adx !== null) {
-      check(
-        `ADX > 25 (trending market, not choppy) | +DI ${adx.plusDI.toFixed(1)} vs -DI ${adx.minusDI.toFixed(1)}`,
-        "> 25",
-        adx.adx.toFixed(2),
-        adx.trending,
-      );
+      console.log(`  ℹ️  ADX: ${adx.adx.toFixed(2)} (${adx.trending ? "✅ trending" : "⚠️ choppy"}) +DI ${adx.plusDI.toFixed(1)} -DI ${adx.minusDI.toFixed(1)} — not a hard block`);
     }
   } else if (bearishBias) {
     console.log("  Bias: BEARISH — checking short entry conditions\n");
@@ -466,19 +456,20 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
 
     const distFromVWAP = Math.abs((price - vwap) / vwap) * 100;
     check(
-      "Price within 1.5% of VWAP (not overextended)",
-      "< 1.5%",
+      "Price within 2.5% of VWAP (not overextended)",
+      "< 2.5%",
       `${distFromVWAP.toFixed(2)}%`,
-      distFromVWAP < 1.5,
+      distFromVWAP < 2.5,
     );
   } else {
-    console.log("  Bias: NEUTRAL — no clear direction. No trade.\n");
-    results.push({
-      label: "Market bias",
-      required: "Bullish or bearish",
-      actual: "Neutral",
-      pass: false,
-    });
+    // Neutral bias — allow entry only if deeply oversold (RSI < 25), Claude decides
+    if (rsi3 !== null && rsi3 < 25) {
+      console.log(`  Bias: NEUTRAL but RSI(3)=${rsi3.toFixed(1)} deeply oversold — passing to Claude\n`);
+      check("RSI(3) deeply oversold (< 25) in neutral market", "< 25", rsi3.toFixed(2), true);
+    } else {
+      console.log("  Bias: NEUTRAL — no clear direction, RSI not oversold enough. No trade.\n");
+      results.push({ label: "Market bias", required: "Bullish/bearish or RSI < 25", actual: "Neutral", pass: false });
+    }
   }
 
   const allPass = results.every((r) => r.pass);
