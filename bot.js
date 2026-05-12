@@ -78,7 +78,7 @@ const BACKTEST = existsSync("backtest_results.json")
 // ─── Config ────────────────────────────────────────────────────────────────
 
 const CONFIG = {
-  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "SUIUSDT,ARBUSDT,NEARUSDT,LINKUSDT,OPUSDT,TIAUSDT,APTUSDT,AXSUSDT,ICPUSDT,ETCUSDT,LDOUSDT,IMXUSDT,KAVAUSDT,VETUSDT,ORDIUSDT,INJUSDT,PENDLEUSDT,ZECUSDT,GALAUSDT")
+  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "NEARUSDT,ETCUSDT,LDOUSDT,TIAUSDT,OPUSDT,ICPUSDT,APTUSDT,IMXUSDT,LINKUSDT,ORDIUSDT,INJUSDT,PENDLEUSDT,ZECUSDT,GALAUSDT,DYMUSDT,EGLDUSDT,ZILUSDT,JUPUSDT,NOTUSDT")
     .replace(/^SYMBOLS=/i, "")
     .split(",")
     .map((s) => s.trim().toUpperCase()),
@@ -340,6 +340,68 @@ function calcRSI(closes, period = 14) {
   return 100 - 100 / (1 + rs);
 }
 
+// Wilder-smoothed RSI series for StochRSI accuracy
+function calcRSISeries(closes, period = 14) {
+  if (closes.length < period + 2) return [];
+  let avgGain = 0, avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d > 0) avgGain += d; else avgLoss -= d;
+  }
+  avgGain /= period; avgLoss /= period;
+  const series = [avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss)];
+  for (let i = period + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + (d > 0 ? d : 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + (d < 0 ? -d : 0)) / period;
+    series.push(avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss));
+  }
+  return series;
+}
+
+// StochRSI(14,3) — stochastic of RSI over a 3-bar window
+function calcStochRSI(closes) {
+  const rsiSeries = calcRSISeries(closes, 14);
+  if (rsiSeries.length < 3) return null;
+  const window = rsiSeries.slice(-3);
+  const minR = Math.min(...window), maxR = Math.max(...window);
+  const range = maxR - minR;
+  const k = range === 0 ? 50 : ((window[window.length - 1] - minR) / range) * 100;
+  return { k, oversold: k < 20, overbought: k > 80 };
+}
+
+// ATR(14) — average true range
+function calcATR(candles, period = 14) {
+  if (candles.length < period + 1) return null;
+  const recent = candles.slice(-(period + 1));
+  let sum = 0;
+  for (let i = 1; i < recent.length; i++) {
+    const { high, low } = recent[i];
+    const pC = recent[i - 1].close;
+    sum += Math.max(high - low, Math.abs(high - pC), Math.abs(low - pC));
+  }
+  return sum / period;
+}
+
+// Bullish divergence: price lower low + RSI(3) higher low
+function detectBullishDivergence(candles) {
+  if (candles.length < 20) return false;
+  const recent = candles.slice(-20);
+  const lows = recent.map(c => c.low);
+  const closes = recent.map(c => c.close);
+  const valleys = [];
+  for (let i = 2; i < recent.length - 2; i++) {
+    if (lows[i] < lows[i-1] && lows[i] < lows[i-2] && lows[i] < lows[i+1] && lows[i] < lows[i+2])
+      valleys.push(i);
+  }
+  if (valleys.length < 2) return false;
+  const prev = valleys[valleys.length - 2], curr = valleys[valleys.length - 1];
+  if (lows[curr] >= lows[prev]) return false;
+  const rsiPrev = calcRSI(closes.slice(0, prev + 1), 3);
+  const rsiCurr = calcRSI(closes.slice(0, curr + 1), 3);
+  return rsiPrev !== null && rsiCurr !== null && rsiCurr > rsiPrev;
+}
+
 // VWAP — rolling 20-bar, stays close to current price action
 function calcVWAP(candles) {
   const window = candles.slice(-20);
@@ -359,7 +421,7 @@ function calcVolume(candles) {
 
 // ─── Safety Check ───────────────────────────────────────────────────────────
 
-function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol = null, ema21 = null, bullTrend4h = null, adx = null) {
+function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol = null, ema21 = null, bullTrend4h = null, adx = null, stochRsi = null, divergence = false, bb = null) {
   const results = [];
 
   const check = (label, required, actual, pass) => {
@@ -428,13 +490,42 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
 
     // 7. Volume — soft signal only, Claude weighs it
     if (vol) {
-      console.log(`  ℹ️  Volume: ${vol.aboveAvg ? "✅ above avg" : "⚠️ below avg"} (${(vol.current / vol.avg * 100).toFixed(0)}% of avg) — not a hard block`);
+      const volRatio = (vol.current / vol.avg).toFixed(1);
+      console.log(`  ℹ️  Volume: ${vol.aboveAvg ? "✅ above avg" : "⚠️ below avg"} (${volRatio}x avg) — not a hard block`);
     }
 
-    // 8. ADX — soft signal only, Claude weighs it
+    // 8. ADX — soft signal only
     if (adx !== null) {
-      console.log(`  ℹ️  ADX: ${adx.adx.toFixed(2)} (${adx.trending ? "✅ trending" : "⚠️ choppy"}) +DI ${adx.plusDI.toFixed(1)} -DI ${adx.minusDI.toFixed(1)} — not a hard block`);
+      console.log(`  ℹ️  ADX: ${adx.adx.toFixed(2)} (${adx.trending ? "✅ trending" : "⚠️ choppy"}) — not a hard block`);
     }
+
+    // 9. StochRSI — v2 confirmation signal
+    if (stochRsi !== null) {
+      console.log(`  ℹ️  StochRSI K=${stochRsi.k.toFixed(1)}: ${stochRsi.oversold ? "✅ oversold (<20)" : stochRsi.overbought ? "⚠️ overbought (>80)" : "neutral"}`);
+    }
+
+    // 10. Bullish divergence
+    if (divergence) {
+      console.log(`  ✅ Bullish divergence detected — price lower low, RSI higher low`);
+    }
+
+    // 11. BB position
+    if (bb !== null) {
+      console.log(`  ℹ️  BB%: ${bb.pct.toFixed(2)} (${bb.pct < 0.2 ? "✅ near lower band" : bb.pct > 0.8 ? "⚠️ near upper band" : "mid-range"})`);
+    }
+
+    // v2 entry score summary
+    let score = 0;
+    const scoreSignals = [];
+    if (rsi3 < 12) { score += 3; scoreSignals.push("RSI extreme"); }
+    else if (rsi3 < 20) { score += 2; scoreSignals.push("RSI very low"); }
+    else if (rsi3 < 28) { score += 1; scoreSignals.push("RSI low"); }
+    if (bb && bb.pct < 0.15) { score += 2; scoreSignals.push("BB% extreme"); }
+    else if (bb && bb.pct < 0.35) { score += 1; scoreSignals.push("BB% low"); }
+    if (stochRsi?.oversold) { score += 2; scoreSignals.push("StochRSI oversold"); }
+    if (vol && vol.current / vol.avg >= 1.5) { score += 1; scoreSignals.push("vol surge"); }
+    if (divergence) { score += 3; scoreSignals.push("divergence!"); }
+    console.log(`  ℹ️  v2 Entry Score: ${score}/2+ needed — [${scoreSignals.join(", ") || "none"}]`);
   } else if (bearishBias) {
     console.log("  Bias: BEARISH — checking short entry conditions\n");
 
@@ -483,31 +574,36 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
 
 // ─── Exit Conditions ─────────────────────────────────────────────────────────
 
-function checkExitConditions(position, price, ema8, vwap, rsi3) {
+function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, stochRsi = null, bb = null) {
   const reasons = [];
   const pnlPct = ((price - position.entryPrice) / position.entryPrice) * 100;
 
-  // Update trailing high watermark
+  // ATR-based trailing stop (1.5x ATR, capped 1.5%–3%)
+  const atr = candles ? calcATR(candles) : null;
   const newHigh = Math.max(price, position.highWatermark || position.entryPrice);
-  const trailingStop = newHigh * 0.98; // 2% trail below peak
-  const trailingPct = ((price - newHigh) / newHigh) * 100;
+  const trailPct = atr
+    ? Math.min(Math.max(1.5 * atr / newHigh, 0.015), 0.03)
+    : 0.02;
+  const trailingStop = newHigh * (1 - trailPct);
 
-  // Break-even stop — once up 1%, floor rises to entry price (can't lose a winning trade)
+  // Break-even floor — once up 1%, stop floors at entry price
   const breakEvenActive = newHigh >= position.entryPrice * 1.01;
   const effectiveStop = breakEvenActive ? Math.max(trailingStop, position.entryPrice) : trailingStop;
 
   console.log("\n── Exit Check ───────────────────────────────────────────\n");
   console.log(`  Open LONG from $${position.entryPrice.toFixed(2)} | Now: $${price.toFixed(2)} | P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`);
-  console.log(`  Peak: $${newHigh.toFixed(2)} | Stop: $${effectiveStop.toFixed(2)} | ${breakEvenActive ? "🔒 Break-even active" : "⏳ Waiting for +1%"}\n`);
+  console.log(`  Peak: $${newHigh.toFixed(2)} | Stop: $${effectiveStop.toFixed(2)} (ATR ${(trailPct*100).toFixed(1)}%) | ${breakEvenActive ? "🔒 Break-even active" : "⏳ Waiting for +1%"}\n`);
 
   const check = (label, condition) => {
     console.log(`  ${condition ? "🔴" : "✅"} ${label}`);
     if (condition) reasons.push(label);
   };
 
-  check(`RSI(3) overbought > 70 — take profit | Actual: ${rsi3.toFixed(2)}`, rsi3 > 70);
+  check(`RSI(3) overbought > 70 | Actual: ${rsi3.toFixed(2)}`, rsi3 > 70);
+  if (stochRsi) check(`StochRSI overbought > 80 | K=${stochRsi.k.toFixed(1)}`, stochRsi.overbought);
+  if (bb) check(`BB% > 0.85 (at upper band) | BB%=${bb.pct.toFixed(2)}`, bb.pct > 0.85);
   check(`Trend reversed — price below VWAP and EMA(8)`, price < vwap && price < ema8);
-  check(`Stop hit — $${effectiveStop.toFixed(2)} (${breakEvenActive ? "break-even floor" : "2% trailing"})`, price < effectiveStop);
+  check(`ATR stop hit — $${effectiveStop.toFixed(2)} (${breakEvenActive ? "break-even floor" : `${(trailPct*100).toFixed(1)}% trail`})`, price < effectiveStop);
 
   return { shouldExit: reasons.length > 0, reasons, newHigh };
 }
@@ -967,11 +1063,13 @@ async function run(tvSignal = null, symbol = null) {
   const bullTrendConfirmed = bullTrend1h || bullTrend4h;
 
   // Advanced indicators
-  const macd     = calcMACD(closes);
-  const bb       = calcBollingerBands(closes);
-  const adx      = calcADX(candles);
-  const patterns = detectCandlePatterns(candles);
-  const sr       = calcSupportResistance(candles);
+  const macd       = calcMACD(closes);
+  const bb         = calcBollingerBands(closes);
+  const adx        = calcADX(candles);
+  const patterns   = detectCandlePatterns(candles);
+  const sr         = calcSupportResistance(candles);
+  const stochRsi   = calcStochRSI(closes);
+  const divergence = detectBullishDivergence(candles);
 
   console.log(`  EMA(8):   $${ema8.toFixed(2)} | EMA(21): $${ema21.toFixed(2)} | ${ema8 > ema21 ? "✅ entry TF uptrend" : "🔴 entry TF downtrend"}`);
   console.log(`  1H trend: EMA(8) $${ema8_1h.toFixed(2)} vs EMA(21) $${ema21_1h.toFixed(2)} | ${bullTrend1h ? "✅ 1H uptrend" : "🔴 1H downtrend"}`);
@@ -982,6 +1080,8 @@ async function run(tvSignal = null, symbol = null) {
   console.log(`  MACD:     ${macd.bullish ? "✅ bullish" : "🔴 bearish"} | hist ${macd.histogram.toFixed(4)}`);
   console.log(`  Bollinger: BB% ${(bb.pct * 100).toFixed(1)}% | width ${bb.width.toFixed(2)}% | ${bb.pct < 0.2 ? "⬇️ near lower band" : bb.pct > 0.8 ? "⬆️ near upper band" : "↔️ mid-range"}`);
   console.log(`  ADX:      ${adx ? `${adx.adx.toFixed(2)} (${adx.trending ? "✅ trending" : "⚠️ choppy"}) | +DI ${adx.plusDI.toFixed(1)} -DI ${adx.minusDI.toFixed(1)}` : "N/A"}`);
+  console.log(`  StochRSI: K=${stochRsi ? stochRsi.k.toFixed(1) : "N/A"} | ${stochRsi?.oversold ? "✅ oversold" : stochRsi?.overbought ? "⚠️ overbought" : "neutral"}`);
+  console.log(`  Divergence: ${divergence ? "✅ Bullish divergence detected!" : "none"}`);
   console.log(`  Patterns: ${patterns.length ? patterns.join(", ") : "None detected"}`);
   console.log(`  S/R:      Support $${sr.nearestSupport?.toFixed(2) ?? "?"} (${sr.distToSupport?.toFixed(2) ?? "?"}% below) | Resistance $${sr.nearestResistance?.toFixed(2) ?? "?"} (${sr.distToResistance?.toFixed(2) ?? "?"}% above)`);
 
@@ -1015,7 +1115,7 @@ async function run(tvSignal = null, symbol = null) {
 
   if (position && position.open) {
     // ── EXIT FLOW ──────────────────────────────────────────────────────────
-    const { shouldExit, reasons, newHigh } = checkExitConditions(position, price, ema8, vwap, rsi3);
+    const { shouldExit, reasons, newHigh } = checkExitConditions(position, price, ema8, vwap, rsi3, candles, stochRsi, bb);
     // Update high watermark for trailing stop
     if (newHigh > (position.highWatermark || 0)) {
       log.positions[symbol] = { ...position, highWatermark: newHigh };
@@ -1123,7 +1223,7 @@ async function run(tvSignal = null, symbol = null) {
 
   } else {
     // ── ENTRY FLOW ──────────────────────────────────────────────────────────
-    const { results, allPass: rulesPass } = runSafetyCheck(price, ema8, vwap, rsi3, rules, adaptive.rsiThreshold, vol, ema21, bullTrendConfirmed, adx);
+    const { results, allPass: rulesPass } = runSafetyCheck(price, ema8, vwap, rsi3, rules, adaptive.rsiThreshold, vol, ema21, bullTrendConfirmed, adx, stochRsi, divergence, bb);
 
     let claudeAnalysis = null;
     let allPass = rulesPass;
@@ -1252,7 +1352,7 @@ if (process.argv.includes("--tax-summary")) {
       const dailyProfit = checkDailyProfitTarget(log);
       const status = {
         time: new Date().toISOString(),
-        version: "v3-15m",
+        version: "v4-stochrsi-atr",
         timeframe: CONFIG.timeframe,
         mode: CONFIG.paperTrading ? "PAPER" : "LIVE",
         symbols: CONFIG.symbols,
