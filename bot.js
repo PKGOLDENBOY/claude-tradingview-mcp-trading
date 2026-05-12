@@ -78,7 +78,7 @@ const BACKTEST = existsSync("backtest_results.json")
 // ─── Config ────────────────────────────────────────────────────────────────
 
 const CONFIG = {
-  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "SUIUSDT,ARBUSDT,NEARUSDT,LINKUSDT,OPUSDT,TIAUSDT,APTUSDT,SOLUSDT,AXSUSDT,ICPUSDT,ETCUSDT,LDOUSDT,IMXUSDT,KAVAUSDT,VETUSDT")
+  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "SUIUSDT,ARBUSDT,NEARUSDT,LINKUSDT,OPUSDT,TIAUSDT,APTUSDT,AXSUSDT,ICPUSDT,ETCUSDT,LDOUSDT,IMXUSDT,KAVAUSDT,VETUSDT,ORDIUSDT,INJUSDT,PENDLEUSDT,ZECUSDT,GALAUSDT")
     .replace(/^SYMBOLS=/i, "")
     .split(",")
     .map((s) => s.trim().toUpperCase()),
