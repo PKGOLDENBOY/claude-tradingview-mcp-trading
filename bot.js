@@ -77,7 +77,7 @@ const CONFIG = {
     .replace(/^SYMBOLS=/i, "")
     .split(",")
     .map((s) => s.trim().toUpperCase()),
-  timeframe: process.env.TIMEFRAME || "4H",
+  timeframe: process.env.TIMEFRAME || "15m",
   portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD || "1000"),
   maxTradeSizePct: (() => { const v = process.env.MAX_TRADE_SIZE_USD || "25%"; return v.trim().endsWith("%") ? parseFloat(v) / 100 : null; })(),
   maxTradeSizeUSD: (() => { const v = process.env.MAX_TRADE_SIZE_USD || "25%"; return v.trim().endsWith("%") ? null : parseFloat(v); })(),
