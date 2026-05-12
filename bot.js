@@ -988,8 +988,22 @@ async function run(tvSignal = null, symbol = null) {
 
   // Load strategy
   const rules = JSON.parse(readFileSync("rules.json", "utf8"));
-  console.log(`\nStrategy: ${rules.strategy.name}`);
-  console.log(`Symbol: ${symbol} | Timeframe: ${CONFIG.timeframe}`);
+
+  // Per-coin timeframe — use backtest optimal TF if available, else global default
+  const bt = BACKTEST[symbol];
+  const entryTF = bt?.timeframe || CONFIG.timeframe;
+  // Bar limits per TF so we always cover ~500 1H-equivalent bars of history
+  const TF_LIMITS = { "5m": 2000, "15m": 1000, "30m": 800, "1H": 500, "4H": 200 };
+  const entryBars = TF_LIMITS[entryTF] || 500;
+
+  // Per-coin RSI threshold — tighten for coins with low win rates, loosen for high performers
+  const coinWinRate = bt?.winRate ?? null;
+  const coinRsiThreshold = coinWinRate !== null
+    ? (coinWinRate >= 70 ? 35 : coinWinRate >= 55 ? 30 : 25)  // high performers get looser gate
+    : 30;
+
+  console.log(`\nStrategy: ${rules.strategy.name} v4`);
+  console.log(`Symbol: ${symbol} | TF: ${entryTF}${bt ? ` (backtest: WR ${bt.winRate}%, PF ${bt.profitFactor}, RSI gate <${coinRsiThreshold})` : " (default)"}`);
 
   // Load log and check daily limits
   const log = loadLog();
@@ -1029,11 +1043,11 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
-  // Fetch candle data — entry TF + 1H + 4H for trend confirmation
+  // Fetch candle data — per-coin optimal TF + 1H + 4H for trend confirmation
   console.log("\n── Fetching market data from BitGet ────────────────────\n");
   const [candles, candles1h, candles4h] = await Promise.all([
-    fetchCandles(symbol, CONFIG.timeframe, 500),
-    fetchCandles(symbol, "1H", 100),
+    fetchCandles(symbol, entryTF, entryBars),
+    fetchCandles(symbol, entryTF === "1H" ? "4H" : "1H", 100),  // skip redundant fetch if entry is already 1H
     fetchCandles(symbol, "4H", 100),
   ]);
   const closes = candles.map((c) => c.close);
@@ -1223,7 +1237,9 @@ async function run(tvSignal = null, symbol = null) {
 
   } else {
     // ── ENTRY FLOW ──────────────────────────────────────────────────────────
-    const { results, allPass: rulesPass } = runSafetyCheck(price, ema8, vwap, rsi3, rules, adaptive.rsiThreshold, vol, ema21, bullTrendConfirmed, adx, stochRsi, divergence, bb);
+    // Combine adaptive mode threshold with per-coin threshold — use the stricter of the two
+    const effectiveRsiThreshold = Math.min(adaptive.rsiThreshold, coinRsiThreshold);
+    const { results, allPass: rulesPass } = runSafetyCheck(price, ema8, vwap, rsi3, rules, effectiveRsiThreshold, vol, ema21, bullTrendConfirmed, adx, stochRsi, divergence, bb);
 
     let claudeAnalysis = null;
     let allPass = rulesPass;
@@ -1352,10 +1368,14 @@ if (process.argv.includes("--tax-summary")) {
       const dailyProfit = checkDailyProfitTarget(log);
       const status = {
         time: new Date().toISOString(),
-        version: "v4-stochrsi-atr",
-        timeframe: CONFIG.timeframe,
+        version: "v5-per-coin-adaptive",
         mode: CONFIG.paperTrading ? "PAPER" : "LIVE",
         symbols: CONFIG.symbols,
+        coinConfig: CONFIG.symbols.reduce((acc, s) => {
+          const b = BACKTEST[s];
+          acc[s] = b ? `${b.timeframe} | WR ${b.winRate}% | PF ${b.profitFactor}` : `${CONFIG.timeframe} | no backtest`;
+          return acc;
+        }, {}),
         portfolio: `$${(log.portfolioValue || CONFIG.portfolioValue).toFixed(4)}`,
         dailyGoal: `$${dailyProfit.startValue.toFixed(2)} → $${(dailyProfit.startValue * 1.5).toFixed(2)} | ${dailyProfit.gainPct >= 0 ? "+" : ""}${dailyProfit.gainPct.toFixed(2)}% ${dailyProfit.targetHit ? "🏆 TARGET HIT" : ""}`,
         positions: log.positions || {},
