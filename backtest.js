@@ -27,25 +27,35 @@ const TRAIL_PCT       = 0.02;  // 2% trailing stop
 
 // ─── Market Data ─────────────────────────────────────────────────────────────
 
+const INTERVAL_MAP = { "1m":"1min","3m":"3min","5m":"5min","15m":"15min","30m":"30min","1H":"1h","4H":"4h","1D":"1day","1W":"1week" };
+
 async function fetchCandles(symbol, interval, limit) {
-  const map = { "1m":"1min","3m":"3min","5m":"5min","15m":"15min","30m":"30min","1H":"1h","4H":"4h","1D":"1day","1W":"1week" };
-  const granularity = map[interval] || "1h";
-  const url = `https://api.bitget.com/api/v2/spot/market/candles?symbol=${symbol}&granularity=${granularity}&limit=${Math.min(limit, 1000)}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const json = await res.json();
-  if (json.code !== "00000") throw new Error(json.msg);
-  // Sort ascending by time (oldest first) regardless of API return order
-  return json.data
-    .map(k => ({
+  const granularity = INTERVAL_MAP[interval] || "1h";
+  const perPage = 1000;
+  const pages = Math.ceil(limit / perPage);
+  let all = [];
+
+  for (let p = 0; p < pages; p++) {
+    const endTime = all.length > 0 ? all[0].time : undefined;
+    const url = `https://api.bitget.com/api/v2/spot/market/candles?symbol=${symbol}&granularity=${granularity}&limit=${perPage}${endTime ? `&endTime=${endTime - 1}` : ""}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    if (json.code !== "00000") throw new Error(json.msg);
+    if (!json.data || json.data.length === 0) break;
+    const batch = json.data.map(k => ({
       time:   parseInt(k[0]),
       open:   parseFloat(k[1]),
       high:   parseFloat(k[2]),
       low:    parseFloat(k[3]),
       close:  parseFloat(k[4]),
       volume: parseFloat(k[5]),
-    }))
-    .sort((a, b) => a.time - b.time);
+    })).sort((a, b) => a.time - b.time);
+    all = [...batch, ...all];
+    if (json.data.length < perPage) break;
+  }
+
+  return all.slice(-limit);
 }
 
 // ─── Indicators (identical to bot.js) ────────────────────────────────────────
@@ -322,21 +332,44 @@ function report(symbol, trades, candles) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-console.log(`\n🔬 Backtest — ${TIMEFRAME} | ${LIMIT} bars | $${TRADE_SIZE_USD}/trade | Fee: ${FEE_PCT*100}%`);
+// Multi-timeframe mode: test each TF and keep the best result per coin
+const MULTI_TF = process.argv.includes("--multi");
+const TEST_TIMEFRAMES = MULTI_TF ? ["5m", "15m", "30m", "1H"] : [TIMEFRAME];
+const TF_LIMITS = { "5m": 2000, "15m": 1000, "30m": 1000, "1H": 500, "4H": 200 };
+
+console.log(`\n🔬 Backtest — ${MULTI_TF ? "MULTI-TF (5m/15m/30m/1H)" : TIMEFRAME} | up to ${LIMIT} bars | $${TRADE_SIZE_USD}/trade | Fee: ${FEE_PCT*100}%`);
 console.log(`   Symbols: ${SYMBOLS.join(", ")}\n`);
 
 const summaries = [];
 
 for (const symbol of SYMBOLS) {
-  process.stdout.write(`Fetching ${symbol}...`);
-  try {
-    const candles = await fetchCandles(symbol, TIMEFRAME, LIMIT);
-    process.stdout.write(` ${candles.length} bars\n`);
-    const trades  = backtest(symbol, candles);
-    const summary = report(symbol, trades, candles);
-    if (summary) summaries.push(summary);
-  } catch (err) {
-    console.log(` ❌ Error: ${err.message}`);
+  let bestSummary = null;
+
+  for (const tf of TEST_TIMEFRAMES) {
+    const barLimit = MULTI_TF ? (TF_LIMITS[tf] || 500) : LIMIT;
+    process.stdout.write(`Fetching ${symbol} ${tf}...`);
+    try {
+      const candles = await fetchCandles(symbol, tf, barLimit);
+      process.stdout.write(` ${candles.length} bars`);
+      const trades  = backtest(symbol, candles);
+      const summary = report(symbol, trades, candles);
+      if (summary) {
+        summary.timeframe = tf;
+        if (!bestSummary || summary.totalPnl > bestSummary.totalPnl) {
+          bestSummary = summary;
+        }
+        process.stdout.write(` → WR ${summary.winRate}% P&L $${summary.totalPnl >= 0 ? "+" : ""}${summary.totalPnl.toFixed(4)}\n`);
+      } else {
+        process.stdout.write(` → no trades\n`);
+      }
+    } catch (err) {
+      process.stdout.write(` ❌ ${err.message}\n`);
+    }
+  }
+
+  if (bestSummary) {
+    summaries.push(bestSummary);
+    if (MULTI_TF) console.log(`  ⭐ Best TF for ${symbol}: ${bestSummary.timeframe} (WR ${bestSummary.winRate}% P&L $${bestSummary.totalPnl >= 0 ? "+" : ""}${bestSummary.totalPnl.toFixed(4)})\n`);
   }
 }
 
