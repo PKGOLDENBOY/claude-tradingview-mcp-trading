@@ -78,7 +78,8 @@ const CONFIG = {
     .map((s) => s.trim().toUpperCase()),
   timeframe: process.env.TIMEFRAME || "4H",
   portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD || "1000"),
-  maxTradeSizeUSD: parseFloat(process.env.MAX_TRADE_SIZE_USD || "100"),
+  maxTradeSizePct: (() => { const v = process.env.MAX_TRADE_SIZE_USD || "25%"; return v.trim().endsWith("%") ? parseFloat(v) / 100 : null; })(),
+  maxTradeSizeUSD: (() => { const v = process.env.MAX_TRADE_SIZE_USD || "25%"; return v.trim().endsWith("%") ? null : parseFloat(v); })(),
   maxTradesPerDay: parseInt(process.env.MAX_TRADES_PER_DAY || "3"),
   paperTrading: process.env.PAPER_TRADING !== "false",
   tradeMode: process.env.TRADE_MODE || "spot",
@@ -669,20 +670,12 @@ function checkTradeLimits(log) {
     `✅ Trades today: ${todayCount}/${CONFIG.maxTradesPerDay} — within limit`,
   );
 
-  const tradeSize = Math.min(
-    CONFIG.portfolioValue * 0.01,
-    CONFIG.maxTradeSizeUSD,
-  );
-
-  if (tradeSize > CONFIG.maxTradeSizeUSD) {
-    console.log(
-      `🚫 Trade size $${tradeSize.toFixed(2)} exceeds max $${CONFIG.maxTradeSizeUSD}`,
-    );
-    return false;
-  }
+  const portfolio = log.portfolioValue || CONFIG.portfolioValue;
+  const sizePct = CONFIG.maxTradeSizePct || 0.25;
+  const tradeSize = CONFIG.maxTradeSizeUSD ? Math.min(portfolio * sizePct, CONFIG.maxTradeSizeUSD) : portfolio * sizePct;
 
   console.log(
-    `✅ Trade size: $${tradeSize.toFixed(2)} — within max $${CONFIG.maxTradeSizeUSD}`,
+    `✅ Trade size: $${tradeSize.toFixed(2)} (${(sizePct * 100).toFixed(0)}% of $${portfolio.toFixed(2)})`,
   );
 
   return true;
@@ -990,10 +983,11 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
-  // 25% of current wallet, compounding with each win
   const currentPortfolio = log.portfolioValue || CONFIG.portfolioValue;
-  const tradeSize = currentPortfolio * 0.25 * adaptive.sizeMultiplier;
-  console.log(`\n💰 Portfolio: $${currentPortfolio.toFixed(4)} | Trade size: $${tradeSize.toFixed(4)} (25%)`);
+  const sizePct = CONFIG.maxTradeSizePct || 0.25;
+  const rawSize = currentPortfolio * sizePct * adaptive.sizeMultiplier;
+  const tradeSize = CONFIG.maxTradeSizeUSD ? Math.min(rawSize, CONFIG.maxTradeSizeUSD) : rawSize;
+  console.log(`\n💰 Portfolio: $${currentPortfolio.toFixed(4)} | Trade size: $${tradeSize.toFixed(4)} (${(sizePct * 100).toFixed(0)}%)`);
 
   // Always require 90%+ confidence — only trade very high conviction setups
   const CONFIDENCE_MIN = 90;
