@@ -416,14 +416,9 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
       );
     }
 
-    // 6. Trend alignment — 1H or 4H must be bullish
+    // 6. Trend alignment — logged for Claude but NOT a hard block
     if (bullTrend4h !== null) {
-      check(
-        "1H or 4H trend bullish",
-        "bullish",
-        bullTrend4h ? "bullish" : "bearish",
-        bullTrend4h,
-      );
+      console.log(`  ℹ️  Trend context (not a hard gate): ${bullTrend4h ? "✅ bullish" : "⚠️  bearish — Claude must be 90%+ confident"}`);
     }
 
     // 7. Volume confirmation — real buying conviction
@@ -626,7 +621,7 @@ Respond ONLY with valid JSON:
   const adxLine   = adx   ? `\n- ADX:        ${adx.adx.toFixed(2)} (${adx.trending ? "✅ trending" : "⚠️ choppy"}) | +DI ${adx.plusDI.toFixed(1)} | -DI ${adx.minusDI.toFixed(1)}` : "";
   const patternsLine = patterns?.length ? `\n- Patterns:   ${patterns.join(", ")}` : "\n- Patterns:   None detected";
   const srLine    = sr    ? `\n- Support:    ${sr.nearestSupport ? `$${sr.nearestSupport.toFixed(2)} (${sr.distToSupport?.toFixed(2)}% below)` : "not found"} | Resistance: ${sr.nearestResistance ? `$${sr.nearestResistance.toFixed(2)} (${sr.distToResistance?.toFixed(2)}% above)` : "not found"}` : "";
-  const trendLine = bullTrend4h !== undefined ? `\n- 4H trend:   ${bullTrend4h ? "✅ Bullish (EMA8 > EMA21)" : "🔴 Bearish (EMA8 < EMA21)"}` : "";
+  const trendLine = bullTrend4h !== undefined ? `\n- Trend (1H/4H): ${bullTrend4h ? "✅ Bullish — higher timeframe confirms" : "🔴 Bearish — counter-trend trade, only buy if setup is exceptional (RSI very low, strong volume, clear support). Reduce confidence by 15-20pts if uncertain."}` : "";
   const ema21Line = ema21 ? `\n- EMA(21):    $${ema21.toFixed(2)} (${ema8 > ema21 ? "✅ EMA8 above" : "🔴 EMA8 below"})` : "";
   const volLine   = vol   ? `\n- Volume:     ${vol.aboveAvg ? "✅ above avg" : "⚠️ below avg"} (${(vol.current / vol.avg * 100).toFixed(0)}% of 20-bar avg)` : "";
 
