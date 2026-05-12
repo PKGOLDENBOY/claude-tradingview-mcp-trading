@@ -1246,7 +1246,8 @@ if (process.argv.includes("--tax-summary")) {
       const dailyProfit = checkDailyProfitTarget(log);
       const status = {
         time: new Date().toISOString(),
-        version: "v2-15coins",
+        version: "v3-15m",
+        timeframe: CONFIG.timeframe,
         mode: CONFIG.paperTrading ? "PAPER" : "LIVE",
         symbols: CONFIG.symbols,
         portfolio: `$${(log.portfolioValue || CONFIG.portfolioValue).toFixed(4)}`,
