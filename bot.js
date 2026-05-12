@@ -73,7 +73,7 @@ function checkOnboarding() {
 // ─── Config ────────────────────────────────────────────────────────────────
 
 const CONFIG = {
-  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "BTCUSDT")
+  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "SUIUSDT,ARBUSDT,NEARUSDT,LINKUSDT,OPUSDT,TIAUSDT,APTUSDT,SOLUSDT,AXSUSDT,ICPUSDT,ETCUSDT,LDOUSDT,IMXUSDT,KAVAUSDT,VETUSDT")
     .split(",")
     .map((s) => s.trim().toUpperCase()),
   timeframe: process.env.TIMEFRAME || "4H",
