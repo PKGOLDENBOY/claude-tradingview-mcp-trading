@@ -70,6 +70,11 @@ function checkOnboarding() {
   );
 }
 
+// ─── Backtest results — loaded once at startup ────────────────────────────
+const BACKTEST = existsSync("backtest_results.json")
+  ? JSON.parse(readFileSync("backtest_results.json", "utf8"))
+  : {};
+
 // ─── Config ────────────────────────────────────────────────────────────────
 
 const CONFIG = {
@@ -509,9 +514,13 @@ function checkExitConditions(position, price, ema8, vwap, rsi3) {
 
 // ─── Claude AI Analysis ──────────────────────────────────────────────────────
 
-async function analyzeWithClaude(price, ema8, vwap, rsi3, recentTrades, position = null, tvSignal = null, extraIndicators = {}) {
+async function analyzeWithClaude(price, ema8, vwap, rsi3, recentTrades, position = null, tvSignal = null, extraIndicators = {}, symbol = null) {
   const hasPosition = position && position.open;
   const { ema21, macd, bb, adx, patterns, sr, bullTrend4h, vol } = extraIndicators;
+  const bt = symbol && BACKTEST[symbol];
+  const btLine = bt
+    ? `\n- Backtest history (${bt.trades} trades, ${bt.updatedAt}): WR ${bt.winRate}% | P&L $${bt.totalPnl >= 0 ? "+" : ""}${bt.totalPnl} | Avg win +${bt.avgWinPct}% / Avg loss ${bt.avgLossPct}% | Profit factor ${bt.profitFactor}`
+    : "";
 
   const systemPrompt = hasPosition
     ? `You are an expert crypto exit analyst for a spot trading bot. You hold a LONG position and must decide: EXIT (sell now) or HOLD (ride the trend).
@@ -620,7 +629,7 @@ Respond ONLY with valid JSON:
 - Price:      $${price.toFixed(2)}
 - EMA(8):     $${ema8.toFixed(2)} (${distEMA >= 0 ? "+" : ""}${distEMA.toFixed(2)}% vs price)${ema21Line}
 - VWAP:       $${vwap.toFixed(2)} (${distVWAP >= 0 ? "+" : ""}${distVWAP.toFixed(2)}% vs price)
-- RSI(3):     ${rsi3.toFixed(2)}${macdLine}${bbLine}${adxLine}${patternsLine}${srLine}${trendLine}${volLine}${positionLine}${tvLine}${winRateLine}
+- RSI(3):     ${rsi3.toFixed(2)}${macdLine}${bbLine}${adxLine}${patternsLine}${srLine}${trendLine}${volLine}${btLine}${positionLine}${tvLine}${winRateLine}
 
 Recent trade history (oldest → newest, last ${Math.min(recentTrades.length, 15)}):
 ${recentHistory || "No prior trades recorded."}
@@ -1020,7 +1029,7 @@ async function run(tvSignal = null, symbol = null) {
     if (anthropic) {
       console.log("\n── Claude AI Analysis ───────────────────────────────────\n");
       try {
-        claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, position, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h: bullTrendConfirmed, vol });
+        claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, position, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h: bullTrendConfirmed, vol }, symbol);
         finalExit = claudeAnalysis.action === "EXIT";
         console.log(`  Decision:   ${claudeAnalysis.action} (${claudeAnalysis.confidence}% confidence)`);
         console.log(`  Reasoning:  ${claudeAnalysis.reasoning}`);
@@ -1122,7 +1131,7 @@ async function run(tvSignal = null, symbol = null) {
     if (anthropic) {
       console.log("\n── Claude AI Analysis ───────────────────────────────────\n");
       try {
-        claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, null, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h: bullTrendConfirmed, vol });
+        claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, null, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h: bullTrendConfirmed, vol }, symbol);
         const meetsConfidence = claudeAnalysis.confidence >= CONFIDENCE_MIN;
         allPass = claudeAnalysis.action === "BUY" && meetsConfidence;
         console.log(`  Decision:   ${claudeAnalysis.action} (${claudeAnalysis.confidence}% confidence)`);
