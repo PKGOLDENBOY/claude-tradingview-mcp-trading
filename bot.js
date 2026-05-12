@@ -99,8 +99,17 @@ const LOG_FILE = "safety-check-log.json";
 // ─── Logging ────────────────────────────────────────────────────────────────
 
 function loadLog() {
-  if (!existsSync(LOG_FILE)) return { trades: [] };
-  return JSON.parse(readFileSync(LOG_FILE, "utf8"));
+  if (!existsSync(LOG_FILE)) return { trades: [], portfolioValue: CONFIG.portfolioValue, dayStartValue: CONFIG.portfolioValue, dayStartDate: new Date().toISOString().slice(0, 10) };
+  const log = JSON.parse(readFileSync(LOG_FILE, "utf8"));
+  // Reset day start value each new day
+  const today = new Date().toISOString().slice(0, 10);
+  if (!log.portfolioValue) log.portfolioValue = CONFIG.portfolioValue;
+  if (log.dayStartDate !== today) {
+    log.dayStartDate = today;
+    log.dayStartValue = log.portfolioValue;
+  }
+  if (!log.dayStartValue) log.dayStartValue = log.portfolioValue;
+  return log;
 }
 
 function saveLog(log) {
@@ -130,9 +139,18 @@ function checkDailyDrawdown(log) {
     (t) => t.type === "exit" && t.timestamp.startsWith(today) && t.pnlUSD !== undefined,
   );
   const totalLoss = todayExits.reduce((sum, t) => sum + Math.min(t.pnlUSD, 0), 0);
-  const drawdownPct = Math.abs(totalLoss) / CONFIG.portfolioValue * 100;
-  const limit = 5;
+  const drawdownPct = Math.abs(totalLoss) / (log.portfolioValue || CONFIG.portfolioValue) * 100;
+  const limit = 10; // 10% max daily loss
   return { drawdownPct, totalLoss, paused: drawdownPct >= limit, limit };
+}
+
+// Daily profit target — stop trading once we've hit the goal for the day
+function checkDailyProfitTarget(log) {
+  const startValue = log.dayStartValue || CONFIG.portfolioValue;
+  const currentValue = log.portfolioValue || CONFIG.portfolioValue;
+  const gainPct = ((currentValue - startValue) / startValue) * 100;
+  const target = 50; // 50% daily target — stop and protect gains
+  return { gainPct, startValue, currentValue, targetHit: gainPct >= target, target };
 }
 
 // Adaptive mode — automatically tightens strategy when losing
@@ -481,9 +499,13 @@ function checkExitConditions(position, price, ema8, vwap, rsi3) {
   const trailingStop = newHigh * 0.98; // 2% trail below peak
   const trailingPct = ((price - newHigh) / newHigh) * 100;
 
+  // Break-even stop — once up 1%, floor rises to entry price (can't lose a winning trade)
+  const breakEvenActive = newHigh >= position.entryPrice * 1.01;
+  const effectiveStop = breakEvenActive ? Math.max(trailingStop, position.entryPrice) : trailingStop;
+
   console.log("\n── Exit Check ───────────────────────────────────────────\n");
   console.log(`  Open LONG from $${position.entryPrice.toFixed(2)} | Now: $${price.toFixed(2)} | P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`);
-  console.log(`  Peak: $${newHigh.toFixed(2)} | Trailing stop: $${trailingStop.toFixed(2)} (${trailingPct.toFixed(2)}% from peak)\n`);
+  console.log(`  Peak: $${newHigh.toFixed(2)} | Stop: $${effectiveStop.toFixed(2)} | ${breakEvenActive ? "🔒 Break-even active" : "⏳ Waiting for +1%"}\n`);
 
   const check = (label, condition) => {
     console.log(`  ${condition ? "🔴" : "✅"} ${label}`);
@@ -492,7 +514,7 @@ function checkExitConditions(position, price, ema8, vwap, rsi3) {
 
   check(`RSI(3) overbought > 70 — take profit | Actual: ${rsi3.toFixed(2)}`, rsi3 > 70);
   check(`Trend reversed — price below VWAP and EMA(8)`, price < vwap && price < ema8);
-  check(`Trailing stop hit — dropped 2% from peak $${newHigh.toFixed(2)}`, price < trailingStop);
+  check(`Stop hit — $${effectiveStop.toFixed(2)} (${breakEvenActive ? "break-even floor" : "2% trailing"})`, price < effectiveStop);
 
   return { shouldExit: reasons.length > 0, reasons, newHigh };
 }
@@ -892,7 +914,16 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
-  // Drawdown stop — pause all trading if down 5% on the day
+  // Daily profit target — lock in gains, stop trading for the day once hit
+  const dailyProfit = checkDailyProfitTarget(log);
+  console.log(`\n🎯 Daily goal: $${dailyProfit.startValue.toFixed(2)} → $${(dailyProfit.startValue * 1.5).toFixed(2)} (+50%) | Current: $${dailyProfit.currentValue.toFixed(2)} (${dailyProfit.gainPct >= 0 ? "+" : ""}${dailyProfit.gainPct.toFixed(2)}%)`);
+  if (dailyProfit.targetHit) {
+    console.log(`\n🏆 DAILY TARGET HIT — up ${dailyProfit.gainPct.toFixed(2)}% today! Protecting profits, done for the day.`);
+    console.log("═══════════════════════════════════════════════════════════\n");
+    return;
+  }
+
+  // Drawdown stop — pause all trading if down 10% on the day
   const drawdown = checkDailyDrawdown(log);
   if (drawdown.paused) {
     console.log(`\n🛑 DRAWDOWN STOP — down ${drawdown.drawdownPct.toFixed(2)}% today ($${Math.abs(drawdown.totalLoss).toFixed(4)} lost)`);
@@ -959,7 +990,13 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
-  const tradeSize = Math.min(CONFIG.portfolioValue * 0.01, CONFIG.maxTradeSizeUSD) * adaptive.sizeMultiplier;
+  // 25% of current wallet, compounding with each win
+  const currentPortfolio = log.portfolioValue || CONFIG.portfolioValue;
+  const tradeSize = currentPortfolio * 0.25 * adaptive.sizeMultiplier;
+  console.log(`\n💰 Portfolio: $${currentPortfolio.toFixed(4)} | Trade size: $${tradeSize.toFixed(4)} (25%)`);
+
+  // Always require 90%+ confidence — only trade very high conviction setups
+  const CONFIDENCE_MIN = 90;
   const position = (log.positions || {})[symbol] || null;
 
   // TradingView SELL with no position, or BUY with position already open — nothing to do
@@ -1057,6 +1094,9 @@ async function run(tvSignal = null, symbol = null) {
         logEntry.orderPlaced = true;
         logEntry.orderId = `PAPER-SELL-${Date.now()}`;
         log.positions = { ...(log.positions || {}), [symbol]: null };
+        // Compound portfolio value
+        log.portfolioValue = (log.portfolioValue || CONFIG.portfolioValue) + pnlUSD;
+        console.log(`💰 Portfolio updated: $${log.portfolioValue.toFixed(4)} (${pnlUSD >= 0 ? "+" : ""}$${pnlUSD.toFixed(4)})`);
       } else {
         console.log(`\n🔴 PLACING LIVE SELL — ${position.quantity} ${symbol}`);
         try {
@@ -1064,7 +1104,10 @@ async function run(tvSignal = null, symbol = null) {
           logEntry.orderPlaced = true;
           logEntry.orderId = order.orderId;
           log.positions = { ...(log.positions || {}), [symbol]: null };
+          // Compound portfolio value
+          log.portfolioValue = (log.portfolioValue || CONFIG.portfolioValue) + pnlUSD;
           console.log(`✅ SELL ORDER PLACED — ${order.orderId}`);
+          console.log(`💰 Portfolio updated: $${log.portfolioValue.toFixed(4)} (${pnlUSD >= 0 ? "+" : ""}$${pnlUSD.toFixed(4)})`);
         } catch (err) {
           console.log(`❌ SELL ORDER FAILED — ${err.message}`);
           logEntry.error = err.message;
@@ -1088,10 +1131,10 @@ async function run(tvSignal = null, symbol = null) {
       console.log("\n── Claude AI Analysis ───────────────────────────────────\n");
       try {
         claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, null, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h, vol });
-        const meetsConfidence = claudeAnalysis.confidence >= adaptive.confidenceMin;
+        const meetsConfidence = claudeAnalysis.confidence >= CONFIDENCE_MIN;
         allPass = claudeAnalysis.action === "BUY" && meetsConfidence;
         console.log(`  Decision:   ${claudeAnalysis.action} (${claudeAnalysis.confidence}% confidence)`);
-        if (adaptive.confidenceMin > 0) console.log(`  Min confidence required: ${adaptive.confidenceMin}% (${adaptive.mode} mode)`);
+        console.log(`  Min confidence required: ${CONFIDENCE_MIN}% (high-conviction mode)`);
         console.log(`  Reasoning:  ${claudeAnalysis.reasoning}`);
         if (claudeAnalysis.key_factors?.length) {
           claudeAnalysis.key_factors.forEach((f) => console.log(`  • ${f}`));
@@ -1099,7 +1142,7 @@ async function run(tvSignal = null, symbol = null) {
         if (claudeAnalysis.price_target) console.log(`  Target:     $${claudeAnalysis.price_target}`);
         if (claudeAnalysis.stop_suggestion) console.log(`  Stop:       $${claudeAnalysis.stop_suggestion}`);
         if (!meetsConfidence && claudeAnalysis.action === "BUY") {
-          console.log(`\n  ⚠️  BUY blocked — confidence ${claudeAnalysis.confidence}% below ${adaptive.confidenceMin}% minimum (${adaptive.mode} mode)`);
+          console.log(`\n  ⚠️  BUY blocked — confidence ${claudeAnalysis.confidence}% below ${CONFIDENCE_MIN}% minimum`);
         }
         if (allPass !== rulesPass) {
           console.log(`\n  ⚡ Override: rules said ${rulesPass ? "PASS" : "BLOCK"} — Claude says ${claudeAnalysis.action}`);
@@ -1205,10 +1248,13 @@ if (process.argv.includes("--tax-summary")) {
       const winRate = calcWinRate(log.trades, 10);
       const drawdown = checkDailyDrawdown(log);
       const adaptive = getAdaptiveMode(log.trades);
+      const dailyProfit = checkDailyProfitTarget(log);
       const status = {
         time: new Date().toISOString(),
         mode: CONFIG.paperTrading ? "PAPER" : "LIVE",
         symbols: CONFIG.symbols,
+        portfolio: `$${(log.portfolioValue || CONFIG.portfolioValue).toFixed(4)}`,
+        dailyGoal: `$${dailyProfit.startValue.toFixed(2)} → $${(dailyProfit.startValue * 1.5).toFixed(2)} | ${dailyProfit.gainPct >= 0 ? "+" : ""}${dailyProfit.gainPct.toFixed(2)}% ${dailyProfit.targetHit ? "🏆 TARGET HIT" : ""}`,
         positions: log.positions || {},
         todayTrades: todayTrades.length,
         todayPnl: `$${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)}`,
