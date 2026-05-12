@@ -416,10 +416,10 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
       );
     }
 
-    // 6. 4H trend alignment — don't fight the bigger trend
+    // 6. Trend alignment — 1H or 4H must be bullish
     if (bullTrend4h !== null) {
       check(
-        "4H trend bullish (EMA8 > EMA21 on 4H)",
+        "1H or 4H trend bullish",
         "bullish",
         bullTrend4h ? "bullish" : "bearish",
         bullTrend4h,
@@ -938,28 +938,38 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
-  // Fetch candle data — 1H for entries + 4H for trend confirmation
+  // Fetch candle data — entry TF + 1H + 4H for trend confirmation
   console.log("\n── Fetching market data from BitGet ────────────────────\n");
-  const [candles, candles4h] = await Promise.all([
+  const [candles, candles1h, candles4h] = await Promise.all([
     fetchCandles(symbol, CONFIG.timeframe, 500),
+    fetchCandles(symbol, "1H", 100),
     fetchCandles(symbol, "4H", 100),
   ]);
   const closes = candles.map((c) => c.close);
+  const closes1h = candles1h.map((c) => c.close);
   const closes4h = candles4h.map((c) => c.close);
   const price = closes[closes.length - 1];
   console.log(`  Current price: $${price.toFixed(2)}`);
 
-  // 1H indicators
+  // Entry TF indicators
   const ema8  = calcEMA(closes, 8);
   const ema21 = calcEMA(closes, 21);
   const vwap  = calcVWAP(candles);
   const rsi3  = calcRSI(closes, 3);
   const vol   = calcVolume(candles);
 
+  // 1H trend confirmation
+  const ema8_1h  = calcEMA(closes1h, 8);
+  const ema21_1h = calcEMA(closes1h, 21);
+  const bullTrend1h = ema8_1h > ema21_1h;
+
   // 4H trend confirmation
   const ema8_4h  = calcEMA(closes4h, 8);
   const ema21_4h = calcEMA(closes4h, 21);
   const bullTrend4h = ema8_4h > ema21_4h;
+
+  // Pass if either 1H or 4H is bullish
+  const bullTrendConfirmed = bullTrend1h || bullTrend4h;
 
   // Advanced indicators
   const macd     = calcMACD(closes);
@@ -968,7 +978,8 @@ async function run(tvSignal = null, symbol = null) {
   const patterns = detectCandlePatterns(candles);
   const sr       = calcSupportResistance(candles);
 
-  console.log(`  EMA(8):   $${ema8.toFixed(2)} | EMA(21): $${ema21.toFixed(2)} | ${ema8 > ema21 ? "✅ 1H uptrend" : "🔴 1H downtrend"}`);
+  console.log(`  EMA(8):   $${ema8.toFixed(2)} | EMA(21): $${ema21.toFixed(2)} | ${ema8 > ema21 ? "✅ entry TF uptrend" : "🔴 entry TF downtrend"}`);
+  console.log(`  1H trend: EMA(8) $${ema8_1h.toFixed(2)} vs EMA(21) $${ema21_1h.toFixed(2)} | ${bullTrend1h ? "✅ 1H uptrend" : "🔴 1H downtrend"}`);
   console.log(`  4H trend: EMA(8) $${ema8_4h.toFixed(2)} vs EMA(21) $${ema21_4h.toFixed(2)} | ${bullTrend4h ? "✅ 4H uptrend" : "🔴 4H downtrend"}`);
   console.log(`  VWAP:     $${vwap ? vwap.toFixed(2) : "N/A"}`);
   console.log(`  RSI(3):   ${rsi3 ? rsi3.toFixed(2) : "N/A"}`);
@@ -1023,7 +1034,7 @@ async function run(tvSignal = null, symbol = null) {
     if (anthropic) {
       console.log("\n── Claude AI Analysis ───────────────────────────────────\n");
       try {
-        claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, position, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h, vol });
+        claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, position, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h: bullTrendConfirmed, vol });
         finalExit = claudeAnalysis.action === "EXIT";
         console.log(`  Decision:   ${claudeAnalysis.action} (${claudeAnalysis.confidence}% confidence)`);
         console.log(`  Reasoning:  ${claudeAnalysis.reasoning}`);
@@ -1117,7 +1128,7 @@ async function run(tvSignal = null, symbol = null) {
 
   } else {
     // ── ENTRY FLOW ──────────────────────────────────────────────────────────
-    const { results, allPass: rulesPass } = runSafetyCheck(price, ema8, vwap, rsi3, rules, adaptive.rsiThreshold, vol, ema21, bullTrend4h, adx);
+    const { results, allPass: rulesPass } = runSafetyCheck(price, ema8, vwap, rsi3, rules, adaptive.rsiThreshold, vol, ema21, bullTrendConfirmed, adx);
 
     let claudeAnalysis = null;
     let allPass = rulesPass;
@@ -1125,7 +1136,7 @@ async function run(tvSignal = null, symbol = null) {
     if (anthropic) {
       console.log("\n── Claude AI Analysis ───────────────────────────────────\n");
       try {
-        claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, null, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h, vol });
+        claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, null, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h: bullTrendConfirmed, vol });
         const meetsConfidence = claudeAnalysis.confidence >= CONFIDENCE_MIN;
         allPass = claudeAnalysis.action === "BUY" && meetsConfidence;
         console.log(`  Decision:   ${claudeAnalysis.action} (${claudeAnalysis.confidence}% confidence)`);
