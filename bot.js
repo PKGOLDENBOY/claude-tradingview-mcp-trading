@@ -2103,6 +2103,26 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
 
+    // Correlation block — don't hold two coins that move together (doubles risk, not returns)
+    // When the market dips, correlated coins all dump simultaneously — max 1 per group
+    const CORRELATION_GROUPS = [
+      ["BTCUSDT", "ETHUSDT"],
+      ["SOLUSDT", "AVAXUSDT", "NEARUSDT", "ADAUSDT", "DOTUSDT", "INJUSDT", "APTUSDT", "OPUSDT"],
+      ["LINKUSDT", "UNIUSDT", "AAVEUSDT", "SUSHIUSDT", "LDOUSDT"],
+      ["AXSUSDT", "SANDUSDT", "MANAUSDT"],
+      ["BNBUSDT", "KAVAUSDT"],
+    ];
+    const myCorrelGroup = CORRELATION_GROUPS.find(g => g.includes(symbol));
+    if (myCorrelGroup) {
+      const heldSymbols = openPositions.map(([s]) => s);
+      const correlatedHeld = heldSymbols.filter(s => myCorrelGroup.includes(s));
+      if (correlatedHeld.length > 0) {
+        console.log(`🚫 CORRELATION BLOCK — already holding ${correlatedHeld.join(", ")} (same group as ${symbol}). They move together — max 1 per group.`);
+        console.log("═══════════════════════════════════════════════════════════\n");
+        return;
+      }
+    }
+
     // Fix 3: Consecutive loss streak — 3 losses in a row = 4 hour pause
     const recentExits = log.trades.filter(t => t.type === "exit" && t.orderPlaced && t.pnlPct !== undefined).slice(-3);
     if (recentExits.length === 3 && recentExits.every(t => t.pnlPct < 0)) {
@@ -2441,13 +2461,29 @@ async function run(tvSignal = null, symbol = null) {
         console.log(`🔔🔔🔔\n`);
       }
 
-      if (CONFIG.paperTrading) {
+      // Slippage guard — re-fetch price right before execution.
+      // If market moved >0.3% since we made the decision, the setup has changed — abort.
+      let slippageOk = true;
+      try {
+        const freshCandles = await fetchCandles(symbol, "1m", 2);
+        const freshPrice = freshCandles?.[freshCandles.length - 1]?.close ?? price;
+        const slippage = Math.abs(freshPrice - price) / price * 100;
+        if (slippage > 0.3) {
+          console.log(`\n🚫 SLIPPAGE BLOCK — price moved ${slippage.toFixed(2)}% since decision ($${price.toFixed(4)} → $${freshPrice.toFixed(4)}). Setup changed — entry cancelled.`);
+          console.log("═══════════════════════════════════════════════════════════\n");
+          slippageOk = false;
+        } else {
+          console.log(`  ✅ Slippage: ${slippage.toFixed(3)}% (< 0.3% — price stable, executing)`);
+        }
+      } catch { /* non-critical — proceed on fetch failure */ }
+
+      if (slippageOk && CONFIG.paperTrading) {
         console.log(`\n📋 PAPER TRADE — would buy ${symbol} ~$${finalTradeSize.toFixed(2)} at market`);
         console.log(`   (Set PAPER_TRADING=false in .env to place real orders)`);
         logEntry.orderPlaced = true;
         logEntry.orderId = `PAPER-${Date.now()}`;
         log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (finalTradeSize / price).toFixed(6), orderId: logEntry.orderId, entryType, bearMarket: bullTrendWeekly === false } };
-      } else {
+      } else if (slippageOk) {
         console.log(`\n🔴 PLACING LIVE ORDER — $${finalTradeSize.toFixed(2)} BUY ${symbol}`);
         try {
           const order = await placeBitGetOrder(symbol, "buy", finalTradeSize, price);
@@ -2593,7 +2629,20 @@ if (process.argv.includes("--tax-summary")) {
   // Swap to fresh top movers every 4 hours
   setInterval(refreshTopMovers, 4 * 60 * 60 * 1000);
 
-  // Check all symbols every 5 minutes
+  // Fast exit monitor — check open positions every 60 seconds
+  // Stops and partial TPs execute up to 4 minutes earlier than the 5-min entry scan
+  setInterval(async () => {
+    const log = loadLog();
+    const openSymbols = Object.entries(log.positions || {})
+      .filter(([, p]) => p && p.open)
+      .map(([sym]) => sym);
+    if (openSymbols.length === 0) return;
+    for (const sym of openSymbols) {
+      await run(null, sym).catch((err) => console.error(`Exit monitor ${sym} error:`, err));
+    }
+  }, 60 * 1000);
+
+  // Check all symbols every 5 minutes (entry scan + exit check)
   setInterval(async () => {
     for (const sym of CONFIG.symbols) {
       await run(null, sym).catch((err) => console.error(`Poll ${sym} error:`, err));
