@@ -112,6 +112,24 @@ const anthropic = process.env.ANTHROPIC_API_KEY
 
 const LOG_FILE = "safety-check-log.json";
 
+// ─── Swing Trading Config ────────────────────────────────────────────────────
+const SWING_ENABLED = process.env.SWING_TRADING !== "false"; // on by default
+const SWING = {
+  tf: "4H",
+  bars: 200,              // ~33 days of 4H bars
+  rsi3Gate: 35,           // 4H RSI(3) must be below this
+  rsi14Gate: 45,          // OR 4H RSI(14) below this (medium-term oversold)
+  takeProfit: 0.08,       // 8% target
+  stopLoss: 0.04,         // 4% hard stop
+  atrMult: 3.0,           // wider ATR trail than scalp
+  partialAt: 0.05,        // take 30% off at +5%
+  partialQty: 0.30,
+  maxHoldH: 120,          // 5 days max
+  sizePct: 0.20,          // 20% of portfolio per swing
+  maxOpen: 2,             // max concurrent swing positions
+  entryBlockH: [22, 6],   // no entries 22:00–06:00 UTC
+};
+
 // ─── Logging ────────────────────────────────────────────────────────────────
 
 function loadLog() {
@@ -2841,6 +2859,176 @@ if (process.argv.includes("--tax-summary")) {
     res.end("Not found");
   });
 
+  // ─── Swing Trading ──────────────────────────────────────────────────────────
+
+  async function runSwing(symbol) {
+    if (!SWING_ENABLED) return;
+
+    const PERM_EXCLUDE = ["ARBUSDT", "VIRTUALUSDT", "SUIUSDT"];
+    if (PERM_EXCLUDE.includes(symbol)) return;
+
+    const log = loadLog();
+    const swingPos = (log.swingPositions || {})[symbol] || null;
+    const openSwingCount = Object.values(log.swingPositions || {}).filter(p => p && p.open).length;
+
+    let candles;
+    try {
+      candles = await fetchCandles(symbol, SWING.tf, SWING.bars);
+    } catch { return; }
+    if (!candles || candles.length < 50) return;
+
+    const closes = candles.map(c => c.close);
+    const price   = candles[candles.length - 1].close;
+    const rsi3    = calcRSI(closes, 3);
+    const rsi14   = calcRSI(closes, 14);
+    const vwap    = calcVWAP(candles);
+    const ema8    = calcEMA(closes, 8);
+    const ema21   = calcEMA(closes, 21);
+    const macd    = calcMACD(closes);
+    const adx     = calcADX(candles.slice(-30));
+    const vol     = calcVolume(candles);
+    const obv     = calcOBV(candles);
+    const atr     = calcATR(candles.slice(-20));
+    const dblBtm  = detectDoubleBottom(candles);
+
+    if (rsi3 === null || vwap === null || atr === null) return;
+
+    // ── Manage open swing position ───────────────────────────────────────────
+    if (swingPos && swingPos.open) {
+      const pnlPct = ((price - swingPos.entryPrice) / swingPos.entryPrice) * 100;
+      const holdH  = (Date.now() - new Date(swingPos.entryTime).getTime()) / 3600000;
+      const peak   = Math.max(swingPos.highWatermark || swingPos.entryPrice, price);
+
+      // Update watermark
+      if (peak > (swingPos.highWatermark || 0)) {
+        swingPos.highWatermark = peak;
+        log.swingPositions[symbol] = swingPos;
+        saveLog(log);
+      }
+
+      // Partial exit at +5%
+      if (!swingPos.partialExitDone && pnlPct >= SWING.partialAt * 100) {
+        const partialQty = parseFloat(swingPos.quantity) * SWING.partialQty;
+        console.log(`\n📈 SWING PARTIAL TP — ${symbol} +${pnlPct.toFixed(2)}% | selling 30%`);
+        if (!CONFIG.paperTrading) {
+          try { await placeBitGetOrder(symbol, "sell", null, price, partialQty.toFixed(6)); }
+          catch (e) { console.log(`  ⚠️ Partial failed: ${e.message}`); }
+        }
+        swingPos.quantity = (parseFloat(swingPos.quantity) - partialQty).toFixed(6);
+        swingPos.partialExitDone = true;
+        log.swingPositions[symbol] = swingPos;
+        saveLog(log);
+      }
+
+      // Stepped profit lock on ATR trail
+      let trail = peak - SWING.atrMult * atr;
+      if (pnlPct >= 12) trail = Math.max(trail, swingPos.entryPrice * 1.08);
+      else if (pnlPct >= 8) trail = Math.max(trail, swingPos.entryPrice * 1.05);
+      else if (pnlPct >= 5) trail = Math.max(trail, swingPos.entryPrice * 1.02);
+      else if (pnlPct >= 3) trail = Math.max(trail, swingPos.entryPrice * 1.00);
+
+      // Exit reasons
+      const exitReasons = [];
+      if (pnlPct < -SWING.stopLoss * 100) exitReasons.push(`Stop-loss ${pnlPct.toFixed(2)}%`);
+      if (price < trail && pnlPct > 0)     exitReasons.push(`ATR trail $${trail.toFixed(4)}`);
+      if (rsi3 !== null && rsi3 > 80)       exitReasons.push(`RSI(3) overbought ${rsi3.toFixed(1)}`);
+      if (holdH > SWING.maxHoldH)           exitReasons.push(`Max hold ${holdH.toFixed(0)}h`);
+      if (macd && !macd.bullish && pnlPct > 2) exitReasons.push(`MACD bearish cross at +${pnlPct.toFixed(1)}%`);
+
+      if (exitReasons.length > 0) {
+        const pnlUSD = (price - swingPos.entryPrice) * parseFloat(swingPos.quantity);
+        console.log(`\n📈 SWING EXIT — ${symbol} | ${exitReasons.join(" | ")}`);
+        console.log(`   P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% ($${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(4)}) | Held ${holdH.toFixed(1)}h`);
+
+        if (!CONFIG.paperTrading) {
+          try { await placeBitGetOrder(symbol, "sell", null, price, swingPos.quantity); }
+          catch (e) { console.log(`❌ SWING SELL FAILED — ${e.message}`); return; }
+        } else {
+          console.log(`📋 PAPER SWING SELL — ${swingPos.quantity} ${symbol} @ $${price.toFixed(4)}`);
+        }
+
+        const exitEntry = {
+          timestamp: new Date().toISOString(), type: "exit", symbol,
+          timeframe: SWING.tf, price, pnlPct, pnlUSD,
+          reasons: exitReasons, orderPlaced: true,
+          paperTrading: CONFIG.paperTrading, tradeType: "swing",
+        };
+        log.swingPositions[symbol] = { ...swingPos, open: false };
+        log.portfolioValue = (log.portfolioValue || CONFIG.portfolioValue) + pnlUSD;
+        log.trades.push(exitEntry);
+        saveLog(log);
+        writeTradeCsv(exitEntry);
+      }
+      return;
+    }
+
+    // ── Entry check ─────────────────────────────────────────────────────────
+    if (openSwingCount >= SWING.maxOpen) return;
+
+    // Off-hours block
+    const utcH = new Date().getUTCHours();
+    if (utcH >= SWING.entryBlockH[0] || utcH < SWING.entryBlockH[1]) return;
+
+    // Core entry conditions
+    const bullish    = price > vwap && ema8 > ema21;
+    const oversold   = rsi3 < SWING.rsi3Gate || (rsi14 !== null && rsi14 < SWING.rsi14Gate);
+    const noOBVDiv   = !obv.bearDivergence;
+    const rrOk       = (SWING.takeProfit * price) / (SWING.stopLoss * price) >= 2;
+
+    if (!bullish || !oversold || !noOBVDiv || !rrOk) return;
+
+    // Score extra signals
+    let score = 0;
+    if (adx && adx.adx > 25)         score++;
+    if (vol && vol.aboveAvg)          score++;
+    if (macd && macd.bullish)         score++;
+    if (dblBtm && dblBtm.detected)   score += dblBtm.strongConfirmation ? 2 : 1;
+    if (rsi3 < 20)                    score++;
+
+    if (score < 2) return; // need at least 2 extra confirmations
+
+    const portfolio  = log.portfolioValue || CONFIG.portfolioValue;
+    const swingSize  = portfolio * SWING.sizePct;
+
+    console.log(`\n📈 SWING ENTRY — ${symbol} | 4H RSI(3):${rsi3.toFixed(1)} RSI(14):${rsi14?.toFixed(1)} | Score:${score}/5`);
+    console.log(`   VWAP:$${vwap.toFixed(4)} EMA8:$${ema8.toFixed(4)} Price:$${price.toFixed(4)}`);
+    console.log(`   TP: +${SWING.takeProfit * 100}% | Stop: -${SWING.stopLoss * 100}% | Size: $${swingSize.toFixed(2)}`);
+    if (dblBtm?.detected) console.log(`   🔔 Double bottom${dblBtm.strongConfirmation ? " + RSI divergence" : ""}`);
+
+    let qty = swingSize / price;
+    let orderId = `PAPER-SWING-${Date.now()}`;
+
+    if (!CONFIG.paperTrading) {
+      try {
+        const order = await placeBitGetOrder(symbol, "buy", swingSize, price);
+        qty = order.confirmedQty ?? qty;
+        orderId = order.orderId;
+        console.log(`✅ SWING ORDER PLACED — ${orderId} | qty:${qty.toFixed(6)}`);
+      } catch (e) {
+        console.log(`❌ SWING ORDER FAILED — ${e.message}`);
+        return;
+      }
+    } else {
+      console.log(`📋 PAPER SWING BUY — $${swingSize.toFixed(2)} ${symbol} @ $${price.toFixed(4)}`);
+    }
+
+    log.swingPositions = { ...(log.swingPositions || {}), [symbol]: {
+      open: true, side: "long", entryPrice: price, highWatermark: price,
+      entryTime: new Date().toISOString(), quantity: qty.toFixed(6),
+      orderId, tradeType: "swing", partialExitDone: false,
+    }};
+
+    const entryLog = {
+      timestamp: new Date().toISOString(), type: "entry", symbol,
+      timeframe: SWING.tf, price, tradeSize: swingSize,
+      indicators: { rsi3, rsi14, vwap, ema8, ema21, adx: adx?.adx },
+      score, orderPlaced: true, paperTrading: CONFIG.paperTrading, tradeType: "swing",
+    };
+    log.trades.push(entryLog);
+    saveLog(log);
+    writeTradeCsv(entryLog);
+  }
+
   server.listen(PORT, () => {
     console.log(`\n🌐 Webhook server listening on port ${PORT}`);
     console.log(`   Symbols:     ${CONFIG.symbols.join(", ")}`);
@@ -2852,6 +3040,13 @@ if (process.argv.includes("--tax-summary")) {
       startPriceStream(CONFIG.symbols);
       for (const sym of CONFIG.symbols) {
         await run(null, sym).catch((err) => console.error(`Startup ${sym} error:`, err));
+      }
+      // Initial swing scan
+      if (SWING_ENABLED) {
+        console.log("\n📈 Initial swing scan...");
+        for (const sym of CONFIG.symbols) {
+          await runSwing(sym).catch((err) => console.error(`Swing startup ${sym} error:`, err));
+        }
       }
     })();
   });
@@ -2865,8 +3060,7 @@ if (process.argv.includes("--tax-summary")) {
   // WebSocket hard-stop checker — fires every 5 seconds using live streamed prices
   setInterval(checkLiveHardStops, 5000);
 
-  // Fast exit monitor — check open positions every 60 seconds
-  // Stops and partial TPs execute up to 4 minutes earlier than the 5-min entry scan
+  // Fast exit monitor — check open scalp positions every 60 seconds
   setInterval(async () => {
     const log = loadLog();
     const openSymbols = Object.entries(log.positions || {})
@@ -2878,7 +3072,30 @@ if (process.argv.includes("--tax-summary")) {
     }
   }, 60 * 1000);
 
-  // Check all symbols every 5 minutes (entry scan + exit check)
+  // Swing exit monitor — check open swing positions every 30 minutes
+  setInterval(async () => {
+    if (!SWING_ENABLED) return;
+    const log = loadLog();
+    const openSwings = Object.entries(log.swingPositions || {})
+      .filter(([, p]) => p && p.open)
+      .map(([sym]) => sym);
+    if (openSwings.length === 0) return;
+    console.log(`\n📈 Swing exit check — ${openSwings.join(", ")}`);
+    for (const sym of openSwings) {
+      await runSwing(sym).catch((err) => console.error(`Swing exit ${sym} error:`, err));
+    }
+  }, 30 * 60 * 1000);
+
+  // Swing entry scan — every 4 hours (aligned with 4H candle closes)
+  setInterval(async () => {
+    if (!SWING_ENABLED) return;
+    console.log("\n📈 Swing entry scan (4H)...");
+    for (const sym of CONFIG.symbols) {
+      await runSwing(sym).catch((err) => console.error(`Swing scan ${sym} error:`, err));
+    }
+  }, 4 * 60 * 60 * 1000);
+
+  // Check all symbols every 5 minutes (scalp entry scan + exit check)
   setInterval(async () => {
     for (const sym of CONFIG.symbols) {
       await run(null, sym).catch((err) => console.error(`Poll ${sym} error:`, err));
