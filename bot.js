@@ -81,7 +81,7 @@ const WATCHLIST = (process.env.WATCHLIST || "")
   .split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
 
 const CONFIG = {
-  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "SOLUSDT,LINKUSDT,AVAXUSDT,NEARUSDT,INJUSDT,OPUSDT,APTUSDT,ARBUSDT,LDOUSDT,ORDIUSDT")
+  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "KAVAUSDT,ZECUSDT,NEARUSDT,BNBUSDT,LINKUSDT,SOLUSDT,AXSUSDT,ADAUSDT,DOTUSDT,INJUSDT")
     .replace(/^SYMBOLS=/i, "")
     .split(",")
     .map((s) => s.trim().toUpperCase()),
@@ -1830,14 +1830,22 @@ async function run(tvSignal = null, symbol = null) {
       }
     } catch { /* non-critical */ }
 
-    // Upgrade 2: Auto-blacklist — skip coins with 3+ losses in the last 7 days
+    // Permanent exclusion — coins with proven negative edge across all live trades
+    const PERMANENT_EXCLUDE = ["ARBUSDT", "VIRTUALUSDT", "SUIUSDT"];
+    if (PERMANENT_EXCLUDE.includes(symbol)) {
+      console.log(`🚫 EXCLUDED — ${symbol} has a proven negative edge in live trading. Skipping permanently.`);
+      console.log("═══════════════════════════════════════════════════════════\n");
+      return;
+    }
+
+    // Upgrade 2: Auto-blacklist — skip coins with 2+ losses in the last 7 days
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     const recentLossesOnCoin = log.trades.filter(t =>
       t.type === "exit" && t.symbol === symbol && t.orderPlaced &&
-      t.pnlPct !== undefined && t.pnlPct < -1 && t.timestamp > sevenDaysAgo
+      t.pnlPct !== undefined && t.pnlPct < -0.5 && t.timestamp > sevenDaysAgo
     ).length;
-    if (recentLossesOnCoin >= 3) {
-      console.log(`🚫 AUTO-BLACKLIST — ${symbol} has ${recentLossesOnCoin} losses in the last 7 days. Skipping.`);
+    if (recentLossesOnCoin >= 2) {
+      console.log(`🚫 AUTO-BLACKLIST — ${symbol} has ${recentLossesOnCoin} losses (< -0.5%) in the last 7 days. Skipping.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
