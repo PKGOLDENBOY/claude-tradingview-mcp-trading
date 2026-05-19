@@ -143,7 +143,8 @@ function calcWinRate(trades, n = 10) {
   const closed = trades.filter((t) => t.type === "exit" && t.pnlPct !== undefined && t.orderPlaced === true);
   const recent = closed.slice(-n);
   if (recent.length < 5) return null; // not enough history (min 5 trades for statistical validity)
-  const wins = recent.filter((t) => t.pnlPct > 0).length;
+  // Count wins as > 0.25% net — filters out trades that were "positive" but lost money after fees (0.2% round-trip)
+  const wins = recent.filter((t) => t.pnlPct > 0.25).length;
   return { winRate: wins / recent.length, sample: recent.length, wins };
 }
 
@@ -960,14 +961,18 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     return { shouldExit: true, reasons: [`Emergency stop — loss exceeded -8% | Actual: ${pnlPct.toFixed(2)}%`], newHigh: position.highWatermark || position.entryPrice };
   }
 
-  // ATR-based trailing stop (2x ATR, capped 2%–5%)
+  // ATR-based trailing stop (1.5x ATR, capped 1.5%–3.5%)
   const atr = candles ? calcATR(candles) : null;
   const newHigh = Math.max(price, position.highWatermark || position.entryPrice);
   const baseTrailPct = atr
-    ? Math.min(Math.max(2.0 * atr / newHigh, 0.02), 0.05)
-    : 0.03;
-  // Profit lock — once up 3%, tighten trail to 1% to protect gains
-  const trailPct = pnlPct >= 3.0 ? Math.min(baseTrailPct, 0.01) : baseTrailPct;
+    ? Math.min(Math.max(1.5 * atr / newHigh, 0.015), 0.035)
+    : 0.025;
+  // Stepped profit lock — tighten trail progressively as gains grow
+  const trailPct =
+    pnlPct >= 4.0 ? Math.min(baseTrailPct, 0.005) :  // +4%: lock to 0.5% trail
+    pnlPct >= 2.5 ? Math.min(baseTrailPct, 0.01)  :  // +2.5%: lock to 1% trail
+    pnlPct >= 1.5 ? Math.min(baseTrailPct, 0.02)  :  // +1.5%: lock to 2% trail
+    baseTrailPct;
   const trailingStop = newHigh * (1 - trailPct);
 
   // Break-even floor — once up 1.5%, stop floors at entry price
@@ -1011,8 +1016,8 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     const slPrice = position.entryPrice * (1 - slPct);
     check(`Stop-loss hit — $${slPrice.toFixed(4)} (-${(slPct*100).toFixed(0)}%${position.bearMarket ? " bear market" : ""})`, price <= slPrice);
 
-    // RSI extreme overbought — only exit when momentum is fully exhausted
-    check(`RSI(3) extremely overbought > 85 | Actual: ${rsi3.toFixed(2)}`, rsi3 > 85);
+    // RSI overbought — exit before momentum fully exhausts (captures more of the move)
+    check(`RSI(3) overbought > 80 | Actual: ${rsi3.toFixed(2)}`, rsi3 > 80);
     // StochRSI exit requires confirmation — don't exit on StochRSI alone if P&L < 1% (let winners run)
     if (stochRsi) {
       const stochExitOk = stochRsi.overbought && (pnlPct >= 1.0 || rsi3 > 70 || (sr?.nearResistance ?? false));
@@ -1029,22 +1034,28 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
       } else if (distToRes !== null && distToRes > 5) {
         snapRsiExit = 70; snapLabel = `RSI(3) > 70 — room to run (resistance ${distToRes.toFixed(1)}% away), holding longer`;
       } else {
-        snapRsiExit = 60; snapLabel = `RSI(3) recovered above 60 — snap-back complete`;
+        snapRsiExit = 55; snapLabel = `RSI(3) recovered above 55 — snap-back complete`;
       }
       check(snapLabel, rsi3 > snapRsiExit);
     } else {
-      // Exit when VWAP lost AND MACD confirms bearish momentum — prevents false exits on brief dips
-      const macdBearish = !macd || macd.histogram < 0;
-      check(`Trend reversed — price below VWAP ${macdBearish && macd ? "with bearish MACD" : ""}`, price < vwap && macdBearish);
+      // Failed bounce — entered expecting snap-back but price kept falling with bearish momentum
+      if (pnlPct < -1.5 && macd && !macd.bullish) {
+        check(`Failed bounce — down ${pnlPct.toFixed(2)}% with bearish MACD (cut loss early)`, true);
+      }
+      // Exit when VWAP is meaningfully breached AND MACD confirms bearish momentum
+      // Require >0.2% below VWAP to avoid exiting on a 0.001 tick below VWAP
+      const vwapBreachPct = (vwap - price) / vwap * 100;
+      const macdBearish = !macd ? vwapBreachPct > 0.5 : macd.histogram < 0;
+      check(`Trend reversed — ${vwapBreachPct.toFixed(2)}% below VWAP${macd && macdBearish ? " with bearish MACD" : ""}`, price < vwap && macdBearish && vwapBreachPct > 0.2);
     }
     check(`ATR stop hit — $${effectiveStop.toFixed(2)} (${breakEvenActive ? "break-even floor" : `${(trailPct*100).toFixed(1)}% trail`})`, price < effectiveStop);
 
     // Max hold time — exit stale trades before they turn into big losses
     if (position.entryTime) {
       const hoursOpen = (Date.now() - new Date(position.entryTime).getTime()) / (1000 * 60 * 60);
-      if (hoursOpen > 16) {
-        check(`Max hold exceeded — open ${hoursOpen.toFixed(1)}h (limit 16h)`, true);
-      } else if (hoursOpen > 8 && pnlPct < 0) {
+      if (hoursOpen > 10) {
+        check(`Max hold exceeded — open ${hoursOpen.toFixed(1)}h (limit 10h)`, true);
+      } else if (hoursOpen > 4 && pnlPct < 0) {
         check(`Stale trade — open ${hoursOpen.toFixed(1)}h with P&L ${pnlPct.toFixed(2)}%`, true);
       }
     }
@@ -1669,8 +1680,11 @@ async function run(tvSignal = null, symbol = null) {
 
   const currentPortfolio = log.portfolioValue || CONFIG.portfolioValue;
   const sizePct = CONFIG.maxTradeSizePct || 0.25;
-  const rawSize = currentPortfolio * sizePct * adaptive.sizeMultiplier;
+  // Scale down position size as daily losses accumulate — don't dig deeper holes
+  const drawdownScale = drawdown.drawdownPct > 7 ? 0.30 : drawdown.drawdownPct > 5 ? 0.50 : drawdown.drawdownPct > 3 ? 0.75 : 1.0;
+  const rawSize = currentPortfolio * sizePct * adaptive.sizeMultiplier * drawdownScale;
   const tradeSize = CONFIG.maxTradeSizeUSD ? Math.min(rawSize, CONFIG.maxTradeSizeUSD) : rawSize;
+  if (drawdownScale < 1.0) console.log(`\n⚠️  Drawdown scaling: ${(drawdownScale * 100).toFixed(0)}% position size (down ${drawdown.drawdownPct.toFixed(1)}% today)`);
   console.log(`\n💰 Portfolio: $${currentPortfolio.toFixed(4)} | Trade size: $${tradeSize.toFixed(4)} (${(sizePct * 100).toFixed(0)}%)`);
 
   const CONFIDENCE_MIN = log.learnedThresholds?._confidenceMin ?? adaptive.confidenceMin;
@@ -1702,7 +1716,14 @@ async function run(tvSignal = null, symbol = null) {
     let finalExit = tvSignal === "SELL" ? true : shouldExit;
     let claudeAnalysis = null;
 
-    if (anthropic) {
+    // Hard stops are non-negotiable — Claude cannot override these
+    const HARD_EXIT_KEYWORDS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Failed bounce", "Momentum stop"];
+    const hasHardExit = reasons.some(r => HARD_EXIT_KEYWORDS.some(kw => r.startsWith(kw)));
+
+    if (hasHardExit) {
+      finalExit = true;
+      console.log(`\n⚠️  Hard stop — Claude analysis skipped (${reasons.filter(r => HARD_EXIT_KEYWORDS.some(kw => r.startsWith(kw))).join(", ")})`);
+    } else if (anthropic) {
       console.log("\n── Claude AI Analysis ───────────────────────────────────\n");
       try {
         claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, position, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h: bullTrendConfirmed, vol }, symbol);
@@ -1854,8 +1875,8 @@ async function run(tvSignal = null, symbol = null) {
     const lastEntry = log.trades.filter(t => t.type === "entry" && t.orderPlaced).slice(-1)[0];
     if (lastEntry) {
       const minsSinceLast = (Date.now() - new Date(lastEntry.timestamp).getTime()) / 60000;
-      if (minsSinceLast < 10) {
-        console.log(`🚫 ENTRY COOLDOWN — last entry was ${minsSinceLast.toFixed(0)}min ago. Waiting 10min between entries.`);
+      if (minsSinceLast < 15) {
+        console.log(`🚫 ENTRY COOLDOWN — last entry was ${minsSinceLast.toFixed(0)}min ago. Waiting 15min between entries.`);
         console.log("═══════════════════════════════════════════════════════════\n");
         return;
       }
