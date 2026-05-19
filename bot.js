@@ -135,7 +135,7 @@ const SWING = {
 // ─── Logging ────────────────────────────────────────────────────────────────
 
 function loadLog() {
-  if (!existsSync(LOG_FILE)) return { trades: [], portfolioValue: CONFIG.portfolioValue, dayStartValue: CONFIG.portfolioValue, dayStartDate: new Date().toISOString().slice(0, 10) };
+  if (!existsSync(LOG_FILE)) return { trades: [], portfolioValue: CONFIG.portfolioValue, dayStartValue: CONFIG.portfolioValue, dayStartDate: new Date().toISOString().slice(0, 10), _needsPortfolioSync: true };
   let raw = readFileSync(LOG_FILE);
   if (raw[0] === 0xEF && raw[1] === 0xBB && raw[2] === 0xBF) raw = raw.slice(3);
   const log = JSON.parse(raw.toString("utf8"));
@@ -1613,6 +1613,19 @@ async function getSpotBalance(coin) {
   return parseFloat(asset?.available ?? "0");
 }
 
+async function syncPortfolioBalance(log) {
+  if (CONFIG.paperTrading) return;
+  try {
+    const balance = await getSpotBalance("USDT");
+    if (balance > 0) {
+      log.portfolioValue = balance;
+      console.log(`🔄 Portfolio synced from BitGet: $${balance.toFixed(4)} USDT`);
+    }
+  } catch (e) {
+    console.log(`⚠️ Balance sync failed: ${e.message}`);
+  }
+}
+
 const _symbolPrecisionCache = {};
 async function getQuantityPrecision(symbol) {
   if (_symbolPrecisionCache[symbol] !== undefined) return _symbolPrecisionCache[symbol];
@@ -2422,6 +2435,13 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
 
+    // Bear market block — no new scalp entries when BTC macro trend is bearish
+    if (regime.btcTrend === "bear") {
+      console.log(`🚫 BEAR MARKET BLOCK — BTC regime is BEAR (${regime.regime}). Scalp entries blocked; exits still monitored.`);
+      console.log("═══════════════════════════════════════════════════════════\n");
+      return;
+    }
+
     // Upgrade 1: ETH correlation filter — ETH leads altcoins; if ETH dropped >2% last hour, skip
     try {
       const ethCandles = await fetchCandles("ETHUSDT", "1H", 3);
@@ -2531,6 +2551,18 @@ async function run(tvSignal = null, symbol = null) {
     }
     if (openCount > 0 && openPositions.some(([s]) => s === symbol)) {
       console.log(`🚫 ALREADY HOLDING — already have an open position in ${symbol}.`);
+      console.log("═══════════════════════════════════════════════════════════\n");
+      return;
+    }
+
+    // Cross-strategy dedup — no scalp if swing or breakout already open on same coin
+    if ((log.swingPositions || {})[symbol]?.open) {
+      console.log(`🚫 CROSS-STRATEGY BLOCK — swing position open on ${symbol}. No simultaneous scalp.`);
+      console.log("═══════════════════════════════════════════════════════════\n");
+      return;
+    }
+    if ((log.breakoutPositions || {})[symbol]?.open) {
+      console.log(`🚫 CROSS-STRATEGY BLOCK — breakout position open on ${symbol}. No simultaneous scalp.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
@@ -3193,6 +3225,10 @@ if (process.argv.includes("--tax-summary")) {
     // ── Entry check ─────────────────────────────────────────────────────────
     if (openSwingCount >= SWING.maxOpen) return;
 
+    // Cross-strategy dedup — don't swing if scalp or breakout already open on same coin
+    if ((log.positions || {})[symbol]?.open) return;
+    if ((log.breakoutPositions || {})[symbol]?.open) return;
+
     // Off-hours block
     const utcH = new Date().getUTCHours();
     if (utcH >= SWING.entryBlockH[0] || utcH < SWING.entryBlockH[1]) return;
@@ -3355,6 +3391,10 @@ if (process.argv.includes("--tax-summary")) {
     const openBreakouts = Object.values(log.breakoutPositions || {}).filter(p => p?.open).length;
     if (openBreakouts >= 2) return;
 
+    // Cross-strategy dedup — don't break out if scalp or swing already open on same coin
+    if ((log.positions || {})[symbol]?.open) return;
+    if ((log.swingPositions || {})[symbol]?.open) return;
+
     // Off-hours and bear market block
     const utcH = new Date().getUTCHours();
     if (utcH >= 22 || utcH < 6) return;
@@ -3386,6 +3426,13 @@ if (process.argv.includes("--tax-summary")) {
     const stopDist = price - rangeHigh; // distance to breakout level
     const reward = targetPrice - price;
     if (stopDist <= 0 || reward / Math.abs(stopDist) < 2) return;
+
+    // Walk-forward backtest gate — same gate as scalp, using 1H candles
+    const bkBtResult = await backtestCoin(symbol).catch(() => null);
+    if (bkBtResult && bkBtResult.recommendation === "SKIP") {
+      console.log(`🚫 BREAKOUT BACKTEST BLOCK — ${symbol} failed walk-forward gate (WR<65%). Skipping.`);
+      return;
+    }
 
     const portfolio = log.portfolioValue || CONFIG.portfolioValue;
     const bkSize = portfolio * 0.15;
@@ -3436,6 +3483,13 @@ if (process.argv.includes("--tax-summary")) {
       // Log market regime on startup
       const regime = await detectMarketRegime().catch(() => ({ regime: "UNKNOWN" }));
       console.log(`\n🌍 Market regime: ${regime.regime} | BTC trend: ${regime.btcTrend} | Volatility: ${regime.volatility}`);
+
+      // Startup balance sync — always pull real USDT balance from BitGet on boot
+      if (!CONFIG.paperTrading) {
+        const startLog = loadLog();
+        await syncPortfolioBalance(startLog);
+        saveLog(startLog);
+      }
 
       await refreshTopMovers();
       startPriceStream(CONFIG.symbols);
