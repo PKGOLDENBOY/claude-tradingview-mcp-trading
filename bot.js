@@ -1460,6 +1460,7 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
     symbol,
     side,
     orderType: "market",
+    force: "gtc",
     size: orderSize,
     ...(CONFIG.tradeMode === "futures" && {
       productType: "USDT-FUTURES",
@@ -1774,7 +1775,7 @@ async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
 
     const timestamp = Date.now().toString();
     const path = "/api/v2/spot/trade/place-order";
-    const body = JSON.stringify({ symbol, side: "buy", orderType: "limit", price: limitPriceStr, size: qty.toFixed(qtyPrecision) });
+    const body = JSON.stringify({ symbol, side: "buy", orderType: "limit", force: "gtc", price: limitPriceStr, size: qty.toFixed(qtyPrecision) });
     const signature = signBitGet(timestamp, "POST", path, body);
     const res = await fetch(`${CONFIG.bitget.baseUrl}${path}`, {
       method: "POST",
