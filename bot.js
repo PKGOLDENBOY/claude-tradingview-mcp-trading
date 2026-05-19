@@ -1338,7 +1338,7 @@ ${recentHistory || "No prior trades recorded."}
 ${hasPosition ? "EXIT or HOLD?" : "BUY or HOLD?"}`;
 
   const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
+    model: "claude-haiku-4-5-20251001",
     max_tokens: 150,
     system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
     messages: [{ role: "user", content: userMessage }],
@@ -2088,10 +2088,14 @@ async function run(tvSignal = null, symbol = null) {
     const HARD_EXIT_KEYWORDS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Failed bounce", "Momentum stop"];
     const hasHardExit = reasons.some(r => HARD_EXIT_KEYWORDS.some(kw => r.startsWith(kw)));
 
+    // Exit Claude calls: cap at 20/day to control API spend
+    const claudeExitCallsToday = log.trades.filter(t => t.claudeAnalysis && t.type === "exit" && t.timestamp?.startsWith(today)).length;
+    const claudeExitCapReached = claudeExitCallsToday >= 20;
+
     if (hasHardExit) {
       finalExit = true;
       console.log(`\n⚠️  Hard stop — Claude analysis skipped (${reasons.filter(r => HARD_EXIT_KEYWORDS.some(kw => r.startsWith(kw))).join(", ")})`);
-    } else if (anthropic) {
+    } else if (anthropic && !claudeExitCapReached) {
       console.log("\n── Claude AI Analysis ───────────────────────────────────\n");
       try {
         claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, position, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h: bullTrendConfirmed, vol }, symbol);
@@ -2108,6 +2112,8 @@ async function run(tvSignal = null, symbol = null) {
         console.log(`  ⚠️  Claude unavailable (${err.message}) — using rule-based decision`);
         finalExit = shouldExit;
       }
+    } else if (claudeExitCapReached) {
+      console.log(`\n💰 Claude exit cap reached (${claudeExitCallsToday}/20 today) — using rule-based decision`);
     }
 
     console.log("\n── Decision ─────────────────────────────────────────────\n");
