@@ -760,6 +760,55 @@ function detectBullishDivergence(candles) {
   return rsiPrev !== null && rsiCurr !== null && rsiCurr > rsiPrev;
 }
 
+// OBV (On Balance Volume) — tells you whether real money is flowing in or out.
+// Price can be manipulated; volume cannot lie. Rising OBV + rising price = healthy move.
+// Divergence: price rising + OBV falling = smart money distributing = avoid entry.
+function calcOBV(candles) {
+  let obv = 0;
+  const series = [0];
+  for (let i = 1; i < candles.length; i++) {
+    if (candles[i].close > candles[i-1].close)      obv += candles[i].volume;
+    else if (candles[i].close < candles[i-1].close) obv -= candles[i].volume;
+    series.push(obv);
+  }
+  const recent = series.slice(-10);
+  const rising = recent[recent.length - 1] > recent[0];
+  // Divergence: price making higher highs but OBV falling = distribution
+  const priceLast = candles[candles.length - 1].close;
+  const priceFirst = candles[candles.length - 10]?.close ?? priceLast;
+  const bearDivergence = priceLast > priceFirst && !rising;
+  return { obv, rising, bearDivergence };
+}
+
+// Double bottom — price makes two lows at approximately the same level, then reverses.
+// One of the most reliable reversal patterns. RSI making a higher low confirms it (divergence).
+// Both bottoms must be within 1.5% of each other and separated by at least 5 bars.
+function detectDoubleBottom(candles) {
+  if (candles.length < 30) return false;
+  const recent = candles.slice(-30);
+  const lows = recent.map(c => c.low);
+  // Find local valleys
+  const valleys = [];
+  for (let i = 2; i < recent.length - 2; i++) {
+    if (lows[i] < lows[i-1] && lows[i] < lows[i-2] && lows[i] < lows[i+1] && lows[i] < lows[i+2])
+      valleys.push({ idx: i, low: lows[i] });
+  }
+  if (valleys.length < 2) return false;
+  const v1 = valleys[valleys.length - 2];
+  const v2 = valleys[valleys.length - 1];
+  // Bottoms within 1.5% of each other and separated by at least 5 bars
+  const levelMatch = Math.abs(v1.low - v2.low) / v1.low < 0.015;
+  const separated  = (v2.idx - v1.idx) >= 5;
+  if (!levelMatch || !separated) return false;
+  // RSI divergence: RSI(3) at second bottom must be higher than at first bottom
+  const closes = recent.map(c => c.close);
+  const rsi1 = calcRSI(closes.slice(0, v1.idx + 1), 3);
+  const rsi2 = calcRSI(closes.slice(0, v2.idx + 1), 3);
+  const rsiDivergence = rsi1 !== null && rsi2 !== null && rsi2 > rsi1;
+  // Pattern valid even without RSI divergence, stronger with it
+  return { detected: true, strongConfirmation: rsiDivergence, low1: v1.low, low2: v2.low };
+}
+
 // ─── Professional-grade signals ─────────────────────────────────────────────
 
 // Liquidity sweep (ICT / Smart Money Concept) — one of the highest-probability setups in trading.
@@ -1702,8 +1751,10 @@ async function run(tvSignal = null, symbol = null) {
   const adx        = calcADX(candles);
   const patterns   = detectCandlePatterns(candles);
   const sr         = calcSupportResistance(candles, candles4h, candlesDay);
-  const stochRsi   = calcStochRSI(closes);
-  const divergence = detectBullishDivergence(candles);
+  const stochRsi    = calcStochRSI(closes);
+  const divergence  = detectBullishDivergence(candles);
+  const obv         = calcOBV(candles);
+  const doubleBottom = detectDoubleBottom(candles);
 
   console.log(`  EMA(8):   $${ema8.toFixed(2)} | EMA(21): $${ema21.toFixed(2)} | ${ema8 > ema21 ? "✅ entry TF uptrend" : "🔴 entry TF downtrend"}`);
   console.log(`  1H trend: EMA(8) $${ema8_1h.toFixed(2)} vs EMA(21) $${ema21_1h.toFixed(2)} | ${bullTrend1h ? "✅ 1H uptrend" : "🔴 1H downtrend"}`);
@@ -1718,6 +1769,8 @@ async function run(tvSignal = null, symbol = null) {
   console.log(`  ADX:      ${adx ? `${adx.adx.toFixed(2)} (${adx.trending ? "✅ trending" : "⚠️ choppy"}) | +DI ${adx.plusDI.toFixed(1)} -DI ${adx.minusDI.toFixed(1)}` : "N/A"}`);
   console.log(`  StochRSI: K=${stochRsi ? stochRsi.k.toFixed(1) : "N/A"} | ${stochRsi?.oversold ? "✅ oversold" : stochRsi?.overbought ? "⚠️ overbought" : "neutral"}`);
   console.log(`  Divergence: ${divergence ? "✅ Bullish divergence detected!" : "none"}`);
+  console.log(`  OBV:      ${obv.rising ? "✅ rising (buyers in control)" : "⚠️  falling"} | ${obv.bearDivergence ? "🔴 OBV bear divergence — smart money selling into rally" : "no divergence"}`);
+  if (doubleBottom?.detected) console.log(`  Double Bottom: ✅ detected — two lows at $${doubleBottom.low1?.toFixed(2)}/$${doubleBottom.low2?.toFixed(2)}${doubleBottom.strongConfirmation ? " with RSI divergence (STRONG)" : ""}`);
   console.log(`  Patterns: ${patterns.length ? patterns.join(", ") : "None detected"}`);
   console.log(`  S/R:      Support $${sr.nearestSupport?.toFixed(2) ?? "?"} (${sr.distToSupport?.toFixed(2) ?? "?"}% below, ${sr.supportConf ?? 0} TF confluences) | Resistance $${sr.nearestResistance?.toFixed(2) ?? "?"} (${sr.distToResistance?.toFixed(2) ?? "?"}% above, ${sr.resistanceConf ?? 0} TF confluences)${sr.nearSupport ? " ✅ near support" : ""}${sr.nearResistance ? " ⚠️ near resistance" : ""}`);
 
@@ -1738,7 +1791,7 @@ async function run(tvSignal = null, symbol = null) {
   console.log(`\n💰 Portfolio: $${currentPortfolio.toFixed(4)} | Trade size: $${tradeSize.toFixed(4)} (Kelly ${(sizePct * 100).toFixed(0)}%)`);
 
   const CONFIDENCE_MIN = log.learnedThresholds?._confidenceMin ?? adaptive.confidenceMin;
-  const position = (log.positions || {})[symbol] || null;
+  let position = (log.positions || {})[symbol] || null;
 
   // TradingView SELL with no position, or BUY with position already open — nothing to do
   if (tvSignal === "SELL" && !position) {
@@ -1754,6 +1807,56 @@ async function run(tvSignal = null, symbol = null) {
   }
 
   if (position && position.open) {
+    // ── Partial profit lock (scale-out) ───────────────────────────────────
+    // At +1.5%, sell 50% to guarantee a profit even if the trade reverses.
+    // The remaining 50% rides with a tight trail to capture larger moves.
+    // This is the single most impactful technique for improving R:R ratio.
+    const livePnlPct = ((price - position.entryPrice) / position.entryPrice) * 100;
+    if (!position.partialExitDone && livePnlPct >= 1.5) {
+      const originalQty = parseFloat(position.quantity);
+      const halfQty = originalQty * 0.5;
+      const partialPnlUSD = (price - position.entryPrice) * halfQty;
+      console.log(`\n📊 PARTIAL TP — up ${livePnlPct.toFixed(2)}%, selling 50% to lock gains`);
+      console.log(`   Selling ${halfQty.toFixed(6)} ${symbol} | Locking ~$${partialPnlUSD >= 0 ? "+" : ""}${partialPnlUSD.toFixed(4)}`);
+
+      let partialOrderId = null;
+      let partialOk = false;
+      if (CONFIG.paperTrading) {
+        partialOrderId = `PAPER-PARTIAL-${Date.now()}`;
+        partialOk = true;
+        console.log(`📋 PAPER PARTIAL SELL — ${halfQty.toFixed(6)} @ $${price.toFixed(2)}`);
+      } else {
+        try {
+          const pOrder = await placeBitGetOrder(symbol, "sell", null, price, halfQty.toFixed(6));
+          partialOrderId = pOrder.orderId;
+          partialOk = true;
+          console.log(`✅ PARTIAL SELL PLACED — ${pOrder.orderId}`);
+        } catch (err) {
+          console.log(`⚠️  Partial sell failed: ${err.message} — keeping full position`);
+        }
+      }
+
+      if (partialOk) {
+        log.portfolioValue = (log.portfolioValue || CONFIG.portfolioValue) + partialPnlUSD;
+        log.positions[symbol] = { ...position, quantity: halfQty.toFixed(6), partialExitDone: true, partialExitPrice: price };
+        position = log.positions[symbol]; // use updated position for the rest of this cycle
+        const partialEntry = {
+          timestamp: new Date().toISOString(), type: "exit", symbol,
+          timeframe: CONFIG.timeframe, price, entryPrice: position.entryPrice,
+          pnlPct: livePnlPct, pnlUSD: partialPnlUSD,
+          indicators: { ema8, vwap, rsi3 },
+          exitReasons: [`Partial TP — locked 50% at +${livePnlPct.toFixed(2)}%`],
+          shouldExit: true, quantity: halfQty.toFixed(6),
+          tradeSize, orderPlaced: true, orderId: partialOrderId,
+          paperTrading: CONFIG.paperTrading, partial: true,
+        };
+        log.trades.push(partialEntry);
+        saveLog(log);
+        writeTradeCsv(partialEntry);
+        console.log(`💰 Portfolio: $${log.portfolioValue.toFixed(4)} | Remaining: ${halfQty.toFixed(6)} ${symbol}`);
+      }
+    }
+
     // ── EXIT FLOW ──────────────────────────────────────────────────────────
     const { shouldExit, reasons, newHigh } = checkExitConditions(position, price, ema8, vwap, rsi3, candles, stochRsi, bb, sr, macd);
     // Update high watermark for trailing stop
@@ -2179,14 +2282,24 @@ async function run(tvSignal = null, symbol = null) {
     const effectiveRsiThreshold = vwapBounceMode ? 65 : (hasBtThreshold ? coinRsiThreshold : Math.min(adaptive.rsiThreshold, coinRsiThreshold));
     const { results, allPass: rulesPass, entryType, entryScore: baseEntryScore } = runSafetyCheck(price, ema8, vwap, rsi3, rules, effectiveRsiThreshold, vol, ema21, bullTrendConfirmed, adx, stochRsi, divergence, bb, vwapBounceMode);
 
-    // ── Advanced signal augmentation (ICT, funding rate, macro sentiment) ────
+    // OBV bear divergence — smart money distributing into price rise = skip entry
+    if (obv.bearDivergence) {
+      console.log(`🚫 OBV DIVERGENCE BLOCK — price rising but OBV falling. Institutions are selling into this rally.`);
+      console.log("═══════════════════════════════════════════════════════════\n");
+      return;
+    }
+
+    // ── Advanced signal augmentation (ICT, funding rate, macro sentiment, patterns) ────
     const liquiditySweep = detectLiquiditySweep(candles);
     let entryScore = baseEntryScore;
     const advSignals = [];
-    if (liquiditySweep)                              { entryScore += 3; advSignals.push("🎯 Liquidity sweep (stop hunt reversal)"); }
-    if (fundingRate !== null && fundingRate < -0.0003) { entryScore += 2; advSignals.push(`💰 Funding ${(fundingRate*100).toFixed(4)}% — shorts squeezed`); }
-    if (btcDailyRsi !== null && btcDailyRsi < 35)   { entryScore += 1; advSignals.push(`😱 BTC fear (RSI ${btcDailyRsi.toFixed(1)})`); }
-    if (btcDailyRsi !== null && btcDailyRsi > 70)   { entryScore -= 1; advSignals.push(`🤑 BTC greed (RSI ${btcDailyRsi.toFixed(1)}) — raising bar`); }
+    if (liquiditySweep)                                  { entryScore += 3; advSignals.push("🎯 Liquidity sweep"); }
+    if (doubleBottom?.detected && doubleBottom.strongConfirmation) { entryScore += 3; advSignals.push("📐 Double bottom + RSI div"); }
+    else if (doubleBottom?.detected)                     { entryScore += 2; advSignals.push("📐 Double bottom"); }
+    if (fundingRate !== null && fundingRate < -0.0003)   { entryScore += 2; advSignals.push(`💰 Funding ${(fundingRate*100).toFixed(4)}%`); }
+    if (obv.rising)                                      { entryScore += 1; advSignals.push("📈 OBV rising"); }
+    if (btcDailyRsi !== null && btcDailyRsi < 35)        { entryScore += 1; advSignals.push(`😱 BTC fear RSI ${btcDailyRsi.toFixed(1)}`); }
+    if (btcDailyRsi !== null && btcDailyRsi > 70)        { entryScore -= 1; advSignals.push(`🤑 BTC greed RSI ${btcDailyRsi.toFixed(1)}`); }
     if (advSignals.length > 0) {
       console.log(`\n  ⚡ Advanced signals: ${advSignals.join(" | ")}`);
       console.log(`  Score: ${baseEntryScore} (base) → ${entryScore} (with advanced signals)`);
