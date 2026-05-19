@@ -1028,6 +1028,86 @@ function kellyPositionPct(log, symbol, fallback = 0.25) {
   return Math.max(0.10, Math.min(0.35, kelly / 2)); // half-Kelly, capped 10%–35%
 }
 
+// ─── Ichimoku Cloud ──────────────────────────────────────────────────────────
+// The most comprehensive single indicator used by institutional traders.
+// Combines trend direction, momentum, and support/resistance in one view.
+function calcIchimoku(candles, tenkanP = 9, kijunP = 26, senkouBP = 52) {
+  if (candles.length < senkouBP + kijunP) return null;
+  const n = candles.length - 1;
+  const midHL = (start, end) => {
+    let h = -Infinity, l = Infinity;
+    for (let i = start; i <= end; i++) { h = Math.max(h, candles[i].high); l = Math.min(l, candles[i].low); }
+    return (h + l) / 2;
+  };
+  const tenkan  = midHL(n - tenkanP  + 1, n);
+  const kijun   = midHL(n - kijunP   + 1, n);
+  const senkouA = (tenkan + kijun) / 2;
+  const senkouB = midHL(n - senkouBP + 1, n);
+  const cloudTop    = Math.max(senkouA, senkouB);
+  const cloudBottom = Math.min(senkouA, senkouB);
+  const price = candles[n].close;
+  return {
+    tenkan, kijun, cloudTop, cloudBottom,
+    aboveCloud:   price > cloudTop,
+    inCloud:      price >= cloudBottom && price <= cloudTop,
+    belowCloud:   price < cloudBottom,
+    bullishCross: tenkan > kijun,  // tenkan above kijun = bullish momentum
+  };
+}
+
+// ─── Market Regime Detection ─────────────────────────────────────────────────
+// Detects whether the broader market is trending, ranging, or in high volatility.
+// Different regimes favour different strategies — routing trades accordingly
+// is one of the key edges of professional multi-strategy systems.
+const _regimeCache = { value: null, ts: 0 };
+async function detectMarketRegime() {
+  if (_regimeCache.value && Date.now() - _regimeCache.ts < 30 * 60 * 1000) return _regimeCache.value;
+  try {
+    const btc = await fetchCandles("BTCUSDT", "4H", 60);
+    if (!btc || btc.length < 30) return { regime: "UNKNOWN", btcTrend: "neutral", volatility: "normal" };
+    const closes = btc.map(c => c.close);
+    const ema8   = calcEMA(closes, 8);
+    const ema21  = calcEMA(closes, 21);
+    const curATR = calcATR(btc.slice(-14)) ?? 1;
+    // Rolling average ATR over prior 30 bars (sample every 3 bars for speed)
+    let atrSum = 0, atrCount = 0;
+    for (let i = 14; i < btc.length - 14; i += 3) {
+      const a = calcATR(btc.slice(i, i + 14));
+      if (a) { atrSum += a; atrCount++; }
+    }
+    const avgATR = atrCount > 0 ? atrSum / atrCount : curATR;
+    const volRatio = curATR / avgATR;
+    const btcTrend = ema8 > ema21 * 1.005 ? "bull" : ema8 < ema21 * 0.995 ? "bear" : "neutral";
+    const volatility = volRatio > 1.8 ? "high" : volRatio < 0.6 ? "low" : "normal";
+    const regime = volatility === "high" ? "VOLATILE" : btcTrend === "bull" ? "TRENDING" : btcTrend === "bear" ? "BEAR" : "RANGING";
+    _regimeCache.value = { regime, btcTrend, volatility, volRatio: +volRatio.toFixed(2) };
+    _regimeCache.ts = Date.now();
+    return _regimeCache.value;
+  } catch { return { regime: "UNKNOWN", btcTrend: "neutral", volatility: "normal" }; }
+}
+
+// ─── Portfolio Heat ───────────────────────────────────────────────────────────
+// Tracks total $ at risk across ALL open positions (scalp + swing + breakout).
+// Hard cap at 8% — never risk more than this simultaneously.
+function calcPortfolioHeat(log) {
+  const portfolio = log.portfolioValue || CONFIG.portfolioValue;
+  let totalRisk = 0;
+  const positions = [];
+  const addPos = (map, stopPct, type) => {
+    for (const [sym, pos] of Object.entries(map || {})) {
+      if (!pos?.open) continue;
+      const risk = pos.entryPrice * stopPct * parseFloat(pos.quantity || 0);
+      totalRisk += risk;
+      positions.push({ sym, risk: +risk.toFixed(4), type });
+    }
+  };
+  addPos(log.positions,         0.025, "scalp");    // ~2.5% scalp stop
+  addPos(log.swingPositions,    SWING.stopLoss, "swing");
+  addPos(log.breakoutPositions, 0.03,  "breakout"); // 3% breakout stop
+  const heatPct = portfolio > 0 ? (totalRisk / portfolio) * 100 : 0;
+  return { heatPct: +heatPct.toFixed(2), totalRisk, positions, isOverheated: heatPct > 8 };
+}
+
 // VWAP — rolling 20-bar, stays close to current price action
 function calcVWAP(candles) {
   const window = candles.slice(-20);
@@ -2037,6 +2117,14 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
+  // Market regime + portfolio heat — logged once per scan cycle
+  const regime = await detectMarketRegime().catch(() => ({ regime: "UNKNOWN", btcTrend: "neutral", volatility: "normal" }));
+  const heat = calcPortfolioHeat(log);
+  console.log(`🌍 Regime: ${regime.regime} (BTC:${regime.btcTrend} Vol:${regime.volatility}) | Portfolio heat: ${heat.heatPct}%/${heat.isOverheated ? "🔴 OVERHEATED" : "8% max"}`);
+
+  // In BEAR regime: only manage exits on existing positions, skip all new scalp entries
+  // In VOLATILE regime: reduce scalp size by 50% (applied in tradeSize calc below)
+
   // Fetch candle data — entry TF + 15min + 1H + 4H + daily + weekly
   console.log("\n── Fetching market data from BitGet ────────────────────\n");
   const [candles, candles15m, candles1h, candles4h, candlesDay, candlesWeek] = await Promise.all([
@@ -2119,11 +2207,13 @@ async function run(tvSignal = null, symbol = null) {
   // Kelly Criterion sizing — optimal fraction based on live win rate + payoff ratio per coin
   const kellySizePct = kellyPositionPct(log, symbol, CONFIG.maxTradeSizePct || 0.25);
   const sizePct = kellySizePct;
-  // Scale down as daily losses accumulate
+  // Scale down as daily losses accumulate + volatile regime
+  const regimeScale   = regime.volatility === "high" ? 0.50 : 1.0; // halve size in volatile markets
   const drawdownScale = drawdown.drawdownPct > 7 ? 0.30 : drawdown.drawdownPct > 5 ? 0.50 : drawdown.drawdownPct > 3 ? 0.75 : 1.0;
-  const rawSize = currentPortfolio * sizePct * adaptive.sizeMultiplier * drawdownScale;
+  const rawSize = currentPortfolio * sizePct * adaptive.sizeMultiplier * drawdownScale * regimeScale;
   const tradeSize = CONFIG.maxTradeSizeUSD ? Math.min(rawSize, CONFIG.maxTradeSizeUSD) : rawSize;
   if (drawdownScale < 1.0) console.log(`\n⚠️  Drawdown scaling: ${(drawdownScale * 100).toFixed(0)}% position size (down ${drawdown.drawdownPct.toFixed(1)}% today)`);
+  if (regimeScale < 1.0)   console.log(`⚠️  Volatile regime: 50% position size`);
   console.log(`\n💰 Portfolio: $${currentPortfolio.toFixed(4)} | Trade size: $${tradeSize.toFixed(4)} (Kelly ${(sizePct * 100).toFixed(0)}%)`);
 
   const CONFIDENCE_MIN = log.learnedThresholds?._confidenceMin ?? adaptive.confidenceMin;
@@ -3184,6 +3274,158 @@ if (process.argv.includes("--tax-summary")) {
     writeTradeCsv(entryLog);
   }
 
+  // ─── Breakout Strategy (1H) ──────────────────────────────────────────────────
+  // Catches coins breaking out of consolidation with strong volume.
+  // Complements scalp (snap-backs) and swing (dip-buying) by covering trending breakouts.
+
+  async function runBreakout(symbol) {
+    if (!SWING_ENABLED) return;
+    const PERM_EXCLUDE = ["ARBUSDT", "VIRTUALUSDT", "SUIUSDT"];
+    if (PERM_EXCLUDE.includes(symbol)) return;
+
+    const log = loadLog();
+    const bkPos = (log.breakoutPositions || {})[symbol] || null;
+
+    // Portfolio heat — never open new trade when total risk > 8% of portfolio
+    const heat = calcPortfolioHeat(log);
+    if (heat.isOverheated && !bkPos?.open) return;
+
+    let candles;
+    try { candles = await fetchCandles(symbol, "1H", 120); }
+    catch { return; }
+    if (!candles || candles.length < 30) return;
+
+    const closes  = candles.map(c => c.close);
+    const price   = candles[candles.length - 1].close;
+    const atr     = calcATR(candles.slice(-20));
+    const vol     = calcVolume(candles);
+    const ema8    = calcEMA(closes, 8);
+    const ema21   = calcEMA(closes, 21);
+    const ema50   = calcEMA(closes, 50);
+    const ichimoku = candles.length >= 78 ? calcIchimoku(candles) : null;
+    if (!atr) return;
+
+    // ── Manage open breakout position ────────────────────────────────────────
+    if (bkPos && bkPos.open) {
+      const pnlPct = ((price - bkPos.entryPrice) / bkPos.entryPrice) * 100;
+      const holdH  = (Date.now() - new Date(bkPos.entryTime).getTime()) / 3600000;
+      const peak   = Math.max(bkPos.highWatermark || bkPos.entryPrice, price);
+      if (peak > (bkPos.highWatermark || 0)) {
+        bkPos.highWatermark = peak;
+        log.breakoutPositions[symbol] = bkPos;
+        saveLog(log);
+      }
+      // Stepped profit lock + ATR trail
+      let trail = peak - 2 * atr;
+      if (pnlPct >= 6) trail = Math.max(trail, bkPos.entryPrice * 1.04);
+      else if (pnlPct >= 4) trail = Math.max(trail, bkPos.entryPrice * 1.02);
+      else if (pnlPct >= 2) trail = Math.max(trail, bkPos.entryPrice * 1.00);
+
+      const exitReasons = [];
+      if (pnlPct < -3)                            exitReasons.push(`Stop-loss ${pnlPct.toFixed(2)}%`);
+      if (price < bkPos.breakoutLevel && pnlPct < 0) exitReasons.push(`Below breakout level`);
+      if (price < trail && pnlPct > 0)            exitReasons.push(`ATR trail $${trail.toFixed(4)}`);
+      if (holdH > 48)                             exitReasons.push(`Max hold 48h`);
+      if (bkPos.targetPrice && price >= bkPos.targetPrice) exitReasons.push(`Target hit +${pnlPct.toFixed(1)}%`);
+
+      if (exitReasons.length > 0) {
+        const pnlUSD = (price - bkPos.entryPrice) * parseFloat(bkPos.quantity);
+        console.log(`\n🚀 BREAKOUT EXIT — ${symbol} | ${exitReasons.join(" | ")} | P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`);
+        if (!CONFIG.paperTrading) {
+          try { await placeBitGetOrder(symbol, "sell", null, price, bkPos.quantity); }
+          catch (e) { console.log(`❌ BREAKOUT SELL FAILED — ${e.message}`); return; }
+        } else {
+          console.log(`📋 PAPER BREAKOUT SELL — ${bkPos.quantity} ${symbol} @ $${price.toFixed(4)}`);
+        }
+        const exitEntry = {
+          timestamp: new Date().toISOString(), type: "exit", symbol, timeframe: "1H",
+          price, pnlPct, pnlUSD: +pnlUSD.toFixed(4), reasons: exitReasons,
+          orderPlaced: true, paperTrading: CONFIG.paperTrading, tradeType: "breakout",
+        };
+        log.breakoutPositions[symbol] = { ...bkPos, open: false };
+        log.portfolioValue = (log.portfolioValue || CONFIG.portfolioValue) + pnlUSD;
+        log.trades.push(exitEntry);
+        saveLog(log);
+        writeTradeCsv(exitEntry);
+      }
+      return;
+    }
+
+    // ── Entry check ─────────────────────────────────────────────────────────
+    const openBreakouts = Object.values(log.breakoutPositions || {}).filter(p => p?.open).length;
+    if (openBreakouts >= 2) return;
+
+    // Off-hours and bear market block
+    const utcH = new Date().getUTCHours();
+    if (utcH >= 22 || utcH < 6) return;
+    const regime = await detectMarketRegime();
+    if (regime.btcTrend === "bear") return;
+
+    // Need uptrend context on 1H
+    if (!ema8 || !ema21 || ema8 < ema21) return;
+    if (ichimoku && ichimoku.belowCloud) return;
+
+    // Consolidation: 20-bar range must be tight (< 4 × ATR)
+    const lookback = candles.slice(-21, -1);
+    const rangeHigh = Math.max(...lookback.map(c => c.high));
+    const rangeLow  = Math.min(...lookback.map(c => c.low));
+    const range = rangeHigh - rangeLow;
+    if (range > atr * 4) return; // not consolidating
+
+    // Breakout: close above range high with 0.2% buffer to avoid fakeouts
+    if (price < rangeHigh * 1.002) return;
+
+    // Volume surge required — 2× average
+    if (!vol || vol.current < vol.avg * 2) return;
+
+    // Ichimoku: must not be breaking out below the cloud
+    if (ichimoku && !ichimoku.aboveCloud && !ichimoku.bullishCross) return;
+
+    // R:R check — need at least 2:1
+    const targetPrice = price + range; // measured move
+    const stopDist = price - rangeHigh; // distance to breakout level
+    const reward = targetPrice - price;
+    if (stopDist <= 0 || reward / Math.abs(stopDist) < 2) return;
+
+    const portfolio = log.portfolioValue || CONFIG.portfolioValue;
+    const bkSize = portfolio * 0.15;
+
+    console.log(`\n🚀 BREAKOUT ENTRY — ${symbol} | Regime:${regime.regime}`);
+    console.log(`   Consolidation: $${rangeLow.toFixed(4)}–$${rangeHigh.toFixed(4)} | Breakout @ $${price.toFixed(4)}`);
+    console.log(`   Target: $${targetPrice.toFixed(4)} (+${(reward/price*100).toFixed(1)}%) | Stop: $${rangeHigh.toFixed(4)} (-${(Math.abs(stopDist)/price*100).toFixed(1)}%)`);
+    console.log(`   Vol: ${(vol.current/vol.avg*100).toFixed(0)}% of avg | Ichimoku: ${ichimoku ? (ichimoku.aboveCloud ? "above cloud ✅" : "in cloud ⚠️") : "n/a"}`);
+    if (heat.heatPct > 0) console.log(`   Portfolio heat: ${heat.heatPct}% of 8% max`);
+
+    let qty = bkSize / price;
+    let orderId = `PAPER-BK-${Date.now()}`;
+    if (!CONFIG.paperTrading) {
+      try {
+        const order = await placeBitGetOrder(symbol, "buy", bkSize, price);
+        qty = order.confirmedQty ?? qty;
+        orderId = order.orderId;
+        console.log(`✅ BREAKOUT ORDER — ${orderId} | qty:${qty.toFixed(6)}`);
+      } catch (e) { console.log(`❌ BREAKOUT ORDER FAILED — ${e.message}`); return; }
+    } else {
+      console.log(`📋 PAPER BREAKOUT BUY — $${bkSize.toFixed(2)} ${symbol} @ $${price.toFixed(4)}`);
+    }
+
+    log.breakoutPositions = { ...(log.breakoutPositions || {}), [symbol]: {
+      open: true, side: "long", entryPrice: price, highWatermark: price,
+      entryTime: new Date().toISOString(), quantity: qty.toFixed(6),
+      orderId, tradeType: "breakout", breakoutLevel: rangeHigh,
+      targetPrice, rangeLow, rangeHigh,
+    }};
+    const entryLog = {
+      timestamp: new Date().toISOString(), type: "entry", symbol, timeframe: "1H",
+      price, tradeSize: bkSize, indicators: { ema8, ema21, range, volRatio: vol.current/vol.avg },
+      breakoutLevel: rangeHigh, targetPrice, orderPlaced: true,
+      paperTrading: CONFIG.paperTrading, tradeType: "breakout",
+    };
+    log.trades.push(entryLog);
+    saveLog(log);
+    writeTradeCsv(entryLog);
+  }
+
   server.listen(PORT, () => {
     console.log(`\n🌐 Webhook server listening on port ${PORT}`);
     console.log(`   Symbols:     ${CONFIG.symbols.join(", ")}`);
@@ -3191,16 +3433,23 @@ if (process.argv.includes("--tax-summary")) {
 
     // Fetch top movers then run first scan
     (async () => {
+      // Log market regime on startup
+      const regime = await detectMarketRegime().catch(() => ({ regime: "UNKNOWN" }));
+      console.log(`\n🌍 Market regime: ${regime.regime} | BTC trend: ${regime.btcTrend} | Volatility: ${regime.volatility}`);
+
       await refreshTopMovers();
       startPriceStream(CONFIG.symbols);
       for (const sym of CONFIG.symbols) {
         await run(null, sym).catch((err) => console.error(`Startup ${sym} error:`, err));
       }
-      // Initial swing scan
       if (SWING_ENABLED) {
         console.log("\n📈 Initial swing scan...");
         for (const sym of CONFIG.symbols) {
           await runSwing(sym).catch((err) => console.error(`Swing startup ${sym} error:`, err));
+        }
+        console.log("\n🚀 Initial breakout scan...");
+        for (const sym of CONFIG.symbols) {
+          await runBreakout(sym).catch((err) => console.error(`Breakout startup ${sym} error:`, err));
         }
       }
     })();
@@ -3249,6 +3498,27 @@ if (process.argv.includes("--tax-summary")) {
       await runSwing(sym).catch((err) => console.error(`Swing scan ${sym} error:`, err));
     }
   }, 4 * 60 * 60 * 1000);
+
+  // Breakout exit monitor — every 15 minutes (1H candles, faster reaction than swing)
+  setInterval(async () => {
+    if (!SWING_ENABLED) return;
+    const log = loadLog();
+    const openBk = Object.entries(log.breakoutPositions || {})
+      .filter(([, p]) => p?.open).map(([s]) => s);
+    if (openBk.length === 0) return;
+    console.log(`\n🚀 Breakout exit check — ${openBk.join(", ")}`);
+    for (const sym of openBk) {
+      await runBreakout(sym).catch((err) => console.error(`Breakout exit ${sym} error:`, err));
+    }
+  }, 15 * 60 * 1000);
+
+  // Breakout entry scan — every 1 hour
+  setInterval(async () => {
+    if (!SWING_ENABLED) return;
+    for (const sym of CONFIG.symbols) {
+      await runBreakout(sym).catch((err) => console.error(`Breakout scan ${sym} error:`, err));
+    }
+  }, 60 * 60 * 1000);
 
   // Check all symbols every 5 minutes (scalp entry scan + exit check)
   setInterval(async () => {
