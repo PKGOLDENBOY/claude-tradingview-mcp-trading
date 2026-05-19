@@ -81,6 +81,8 @@ const BACKTEST = existsSync("backtest_results.json")
   ? JSON.parse(readFileSync("backtest_results.json", "utf8"))
   : {};
 
+const SWING_BACKTEST = {}; // in-memory cache, 24h TTL
+
 // ─── Config ────────────────────────────────────────────────────────────────
 
 const WATCHLIST = (process.env.WATCHLIST || "")
@@ -435,6 +437,106 @@ async function backtestCoin(symbol) {
   }
 
   BACKTEST[symbol] = result;
+  return result;
+}
+
+// ─── Swing Backtest ──────────────────────────────────────────────────────────
+
+function runSwingBacktestSim(candles4h, rsiThreshold, takeProfit = 0.08, stopLoss = 0.04) {
+  const closes = candles4h.map(c => c.close);
+  const ema8   = calcEMASeries(closes, 8);
+  const ema21  = calcEMASeries(closes, 21);
+  const rsi3   = calcRSI3Series(closes);
+  const vwap   = calcVWAPSeries(candles4h);
+  const maxBars = 30; // 30 × 4H = 5 days max hold
+  const trades = [];
+  let inTrade = false, entry = 0, bar = 0;
+  for (let i = 30; i < candles4h.length - 1; i++) {
+    if (inTrade) {
+      const pct = (candles4h[i].close - entry) / entry;
+      if (pct >= takeProfit || pct <= -stopLoss || (i - bar) >= maxBars) {
+        trades.push({ pct: pct * 100, win: pct > 0 });
+        inTrade = false;
+      }
+      continue;
+    }
+    const p = candles4h[i].close, rv = rsi3[i];
+    if (rv === null || rv === undefined) continue;
+    if (p > vwap[i] && p > ema8[i] && ema8[i] > ema21[i] && rv < rsiThreshold) {
+      inTrade = true; entry = candles4h[i + 1].open; bar = i + 1;
+    }
+  }
+  return trades;
+}
+
+function optimiseSwingCoin(candles4h) {
+  let best = null;
+  for (const rsi of [20, 25, 30, 35, 40, 45]) {
+    for (const tp of [0.05, 0.06, 0.08, 0.10, 0.12, 0.15]) {
+      for (const sl of [0.03, 0.04, 0.05, 0.06]) {
+        if (tp / sl < 1.5) continue; // enforce minimum R:R
+        const trades = runSwingBacktestSim(candles4h, rsi, tp, sl);
+        if (trades.length < 3) continue;
+        const wins = trades.filter(t => t.win), losses = trades.filter(t => !t.win);
+        const wr  = wins.length / trades.length;
+        const aw  = wins.length   > 0 ? wins.reduce((s, t) => s + t.pct, 0)   / wins.length   : 0;
+        const al  = losses.length > 0 ? losses.reduce((s, t) => s + t.pct, 0) / losses.length : 0;
+        const exp = wr * aw + (1 - wr) * al;
+        if (wr < 0.55 || exp <= 0) continue;
+        const score = wr * exp;
+        if (!best || score > best.score) {
+          best = { rsiThreshold: rsi, takeProfit: tp, stopLoss: sl,
+            trades: trades.length, winRate: +(wr * 100).toFixed(1),
+            expectancy: +exp.toFixed(2), score };
+        }
+      }
+    }
+  }
+  if (!best) return { trades: 0, winRate: 0, recommendation: "SKIP", rsiThreshold: 35, takeProfit: 0.08, stopLoss: 0.04 };
+  return { ...best, recommendation: best.winRate >= 65 ? "TRADE" : "CAUTION" };
+}
+
+async function backtestSwingCoin(symbol) {
+  const existing = SWING_BACKTEST[symbol];
+  if (existing?.testedAt && Date.now() - new Date(existing.testedAt).getTime() < 24 * 60 * 60 * 1000) {
+    return existing; // 24h cache — 4H data evolves slowly
+  }
+
+  let candles;
+  try { candles = await fetchCandles(symbol, "4H", 200); }
+  catch { return { recommendation: "SKIP", trades: 0 }; }
+  if (!candles || candles.length < 60) return { recommendation: "SKIP", trades: 0 };
+
+  // Walk-forward: last 7 days (42 × 4H bars) as out-of-sample
+  const oosSize    = Math.min(42, Math.floor(candles.length * 0.25));
+  const inSample   = candles.slice(0, candles.length - oosSize);
+  const outSample  = candles.slice(candles.length - oosSize);
+
+  const inResult = optimiseSwingCoin(inSample);
+  if (inResult.recommendation === "SKIP") {
+    SWING_BACKTEST[symbol] = { ...inResult, symbol, testedAt: new Date().toISOString() };
+    return SWING_BACKTEST[symbol];
+  }
+
+  const oosTrades = runSwingBacktestSim(outSample, inResult.rsiThreshold, inResult.takeProfit, inResult.stopLoss);
+  const oosWins = oosTrades.filter(t => t.win).length;
+  const oosWR   = oosTrades.length > 0 ? oosWins / oosTrades.length : 0;
+  const oosExp  = oosTrades.length > 0 ? oosTrades.reduce((s, t) => s + t.pct, 0) / oosTrades.length : 0;
+
+  const result = { ...inResult, symbol, oosWinRate: +(oosWR * 100).toFixed(1),
+    oosTrades: oosTrades.length, testedAt: new Date().toISOString() };
+
+  if (oosTrades.length >= 2 && oosWR < 0.45) {
+    result.recommendation = "SKIP";
+    console.log(`  🔴 Swing WF FAILED — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}% (need 45%+)`);
+  } else if (oosTrades.length >= 2 && oosWR < 0.55) {
+    result.recommendation = "CAUTION";
+    console.log(`  ⚠️  Swing WF CAUTION — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}%`);
+  } else if (oosTrades.length >= 2) {
+    console.log(`  ✅ Swing WF PASSED — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}% | exp +${oosExp.toFixed(2)}%`);
+  }
+
+  SWING_BACKTEST[symbol] = result;
   return result;
 }
 
@@ -2871,12 +2973,18 @@ if (process.argv.includes("--tax-summary")) {
     const swingPos = (log.swingPositions || {})[symbol] || null;
     const openSwingCount = Object.values(log.swingPositions || {}).filter(p => p && p.open).length;
 
-    let candles;
+    // Fetch all three timeframes in parallel
+    let candles, dailyCandles, weeklyCandles;
     try {
-      candles = await fetchCandles(symbol, SWING.tf, SWING.bars);
+      [candles, dailyCandles, weeklyCandles] = await Promise.all([
+        fetchCandles(symbol, SWING.tf, SWING.bars),  // 4H — entry timing
+        fetchCandles(symbol, "1D", 90),               // Daily — intermediate trend
+        fetchCandles(symbol, "1W", 52),               // Weekly — macro direction
+      ]);
     } catch { return; }
     if (!candles || candles.length < 50) return;
 
+    // ── 4H indicators ───────────────────────────────────────────────────────
     const closes = candles.map(c => c.close);
     const price   = candles[candles.length - 1].close;
     const rsi3    = calcRSI(closes, 3);
@@ -2890,6 +2998,33 @@ if (process.argv.includes("--tax-summary")) {
     const obv     = calcOBV(candles);
     const atr     = calcATR(candles.slice(-20));
     const dblBtm  = detectDoubleBottom(candles);
+
+    // ── Daily indicators (intermediate trend) ───────────────────────────────
+    let dailyBull = true, dailyDip = true, dailyNotCrashing = true, dailyAbove50 = true, dailyRsi14 = 50;
+    if (dailyCandles && dailyCandles.length >= 30) {
+      const dc = dailyCandles.map(c => c.close);
+      const dEma8  = calcEMA(dc, 8);
+      const dEma21 = calcEMA(dc, 21);
+      const dEma50 = calcEMA(dc, 50);
+      dailyRsi14       = calcRSI(dc, 14) ?? 50;
+      const dRsi3      = calcRSI(dc, 3)  ?? 50;
+      const dPrice     = dc[dc.length - 1];
+      dailyBull        = dEma8 > dEma21;                    // daily uptrend
+      dailyDip         = dailyRsi14 < 65 && dRsi3 < 60;    // pulled back from highs
+      dailyNotCrashing = dailyRsi14 > 25;                   // not in freefall
+      dailyAbove50     = dEma50 !== null && dPrice > dEma50; // above 50-day MA (bull territory)
+    }
+
+    // ── Weekly indicators (macro trend) ─────────────────────────────────────
+    let weeklyBull = true, weeklyNotOverbought = true, weeklyRsi14 = 50;
+    if (weeklyCandles && weeklyCandles.length >= 20) {
+      const wc = weeklyCandles.map(c => c.close);
+      const wEma8  = calcEMA(wc, 8);
+      const wEma21 = calcEMA(wc, 21);
+      weeklyRsi14        = calcRSI(wc, 14) ?? 50;
+      weeklyBull         = wEma8 > wEma21;      // weekly uptrend (macro bull)
+      weeklyNotOverbought = weeklyRsi14 < 75;   // not peaked on weekly
+    }
 
     if (rsi3 === null || vwap === null || atr === null) return;
 
@@ -2927,13 +3062,16 @@ if (process.argv.includes("--tax-summary")) {
       else if (pnlPct >= 5) trail = Math.max(trail, swingPos.entryPrice * 1.02);
       else if (pnlPct >= 3) trail = Math.max(trail, swingPos.entryPrice * 1.00);
 
-      // Exit reasons
+      // Use backtest-optimised stop if available
+      const btSL = SWING_BACKTEST[symbol]?.stopLoss ?? SWING.stopLoss;
       const exitReasons = [];
-      if (pnlPct < -SWING.stopLoss * 100) exitReasons.push(`Stop-loss ${pnlPct.toFixed(2)}%`);
+      if (pnlPct < -btSL * 100)            exitReasons.push(`Stop-loss ${pnlPct.toFixed(2)}%`);
       if (price < trail && pnlPct > 0)     exitReasons.push(`ATR trail $${trail.toFixed(4)}`);
       if (rsi3 !== null && rsi3 > 80)       exitReasons.push(`RSI(3) overbought ${rsi3.toFixed(1)}`);
       if (holdH > SWING.maxHoldH)           exitReasons.push(`Max hold ${holdH.toFixed(0)}h`);
       if (macd && !macd.bullish && pnlPct > 2) exitReasons.push(`MACD bearish cross at +${pnlPct.toFixed(1)}%`);
+      // Daily trend reversal — exit if daily turns bearish while in loss
+      if (!dailyBull && pnlPct < -1)        exitReasons.push(`Daily trend reversed at ${pnlPct.toFixed(1)}%`);
 
       if (exitReasons.length > 0) {
         const pnlUSD = (price - swingPos.entryPrice) * parseFloat(swingPos.quantity);
@@ -2969,30 +3107,47 @@ if (process.argv.includes("--tax-summary")) {
     const utcH = new Date().getUTCHours();
     if (utcH >= SWING.entryBlockH[0] || utcH < SWING.entryBlockH[1]) return;
 
-    // Core entry conditions
-    const bullish    = price > vwap && ema8 > ema21;
-    const oversold   = rsi3 < SWING.rsi3Gate || (rsi14 !== null && rsi14 < SWING.rsi14Gate);
+    // ── Top-down multi-timeframe filter (weekly → daily → 4H) ───────────────
+    // Weekly must be bullish — never fight the macro trend
+    if (!weeklyBull) return;
+    // Daily must not be crashing — no falling knives
+    if (!dailyNotCrashing) return;
+    // Daily must be in a dip, not already extended (RSI > 65 means too late)
+    if (!dailyDip) return;
+
+    // ── 4H entry conditions ──────────────────────────────────────────────────
+    const bullish4h  = price > vwap && ema8 > ema21;
+    const oversold4h = rsi3 < SWING.rsi3Gate || (rsi14 !== null && rsi14 < SWING.rsi14Gate);
     const noOBVDiv   = !obv.bearDivergence;
-    const rrOk       = (SWING.takeProfit * price) / (SWING.stopLoss * price) >= 2;
 
-    if (!bullish || !oversold || !noOBVDiv || !rrOk) return;
+    if (!bullish4h || !oversold4h || !noOBVDiv) return;
 
-    // Score extra signals
+    // ── Backtest gate ────────────────────────────────────────────────────────
+    const btResult = await backtestSwingCoin(symbol);
+    if (btResult.recommendation === "SKIP") return;
+
+    // ── Score confirmations ──────────────────────────────────────────────────
     let score = 0;
-    if (adx && adx.adx > 25)         score++;
-    if (vol && vol.aboveAvg)          score++;
-    if (macd && macd.bullish)         score++;
-    if (dblBtm && dblBtm.detected)   score += dblBtm.strongConfirmation ? 2 : 1;
-    if (rsi3 < 20)                    score++;
+    if (weeklyNotOverbought)                    score++;  // weekly has room to run
+    if (dailyBull)                              score++;  // daily trend still up
+    if (dailyAbove50)                           score++;  // above 50-day MA (bull territory)
+    if (dailyRsi14 < 45)                        score++;  // genuinely oversold on daily too
+    if (adx && adx.adx > 25)                   score++;  // 4H trend strong
+    if (vol && vol.aboveAvg)                    score++;  // volume confirms the move
+    if (macd && macd.bullish)                   score++;  // 4H momentum intact
+    if (dblBtm && dblBtm.detected)             score += dblBtm.strongConfirmation ? 2 : 1;
+    if (rsi3 < 20)                              score++;  // extremely oversold on 4H
+    if (btResult.recommendation === "TRADE")    score++;  // backtest says go
 
-    if (score < 2) return; // need at least 2 extra confirmations
+    if (score < 3) return; // need at least 3 confirmations across all timeframes
 
     const portfolio  = log.portfolioValue || CONFIG.portfolioValue;
     const swingSize  = portfolio * SWING.sizePct;
 
-    console.log(`\n📈 SWING ENTRY — ${symbol} | 4H RSI(3):${rsi3.toFixed(1)} RSI(14):${rsi14?.toFixed(1)} | Score:${score}/5`);
-    console.log(`   VWAP:$${vwap.toFixed(4)} EMA8:$${ema8.toFixed(4)} Price:$${price.toFixed(4)}`);
-    console.log(`   TP: +${SWING.takeProfit * 100}% | Stop: -${SWING.stopLoss * 100}% | Size: $${swingSize.toFixed(2)}`);
+    console.log(`\n📈 SWING ENTRY — ${symbol} | Score:${score}/10 | BT:${btResult.recommendation}`);
+    console.log(`   Weekly: ${weeklyBull ? "✅ bullish" : "❌"} RSI:${weeklyRsi14.toFixed(0)} | Daily: ${dailyBull ? "✅ uptrend" : "❌"} RSI:${dailyRsi14.toFixed(0)} ${dailyAbove50 ? "above 50MA ✅" : "below 50MA ⚠️"}`);
+    console.log(`   4H: RSI(3):${rsi3.toFixed(1)} RSI(14):${rsi14?.toFixed(1)} VWAP:$${vwap.toFixed(4)} EMA8:$${ema8.toFixed(4)}`);
+    console.log(`   TP: +${(btResult.takeProfit * 100).toFixed(0)}% | Stop: -${(btResult.stopLoss * 100).toFixed(0)}% | Size: $${swingSize.toFixed(2)}`);
     if (dblBtm?.detected) console.log(`   🔔 Double bottom${dblBtm.strongConfirmation ? " + RSI divergence" : ""}`);
 
     let qty = swingSize / price;
