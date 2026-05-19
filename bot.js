@@ -1851,6 +1851,7 @@ async function run(tvSignal = null, symbol = null) {
 
   // Load log and check daily limits
   const log = loadLog();
+  const today = new Date().toISOString().slice(0, 10);
 
   // Fix 5: Auto-sync portfolio value from real BitGet balance at day start
   if (log._needsPortfolioSync) {
