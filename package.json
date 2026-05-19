@@ -6,12 +6,14 @@
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "dev": "node bot.js"
+    "dev": "node bot.js",
+    "status": "node status.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.95.1",
     "dotenv": "^16.4.5",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "ws": "^8.18.0"
   },
   "engines": {
     "node": ">=18.0.0"

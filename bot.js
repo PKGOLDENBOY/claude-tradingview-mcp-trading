@@ -15,6 +15,12 @@ import http from "http";
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
 import crypto from "crypto";
 import { execSync } from "child_process";
+import WebSocket from "ws";
+
+// Real-time price cache — updated by WebSocket stream, consumed by hard-stop monitor
+const livePrices = new Map(); // symbol → { price, timestamp }
+let priceStreamWs = null;
+const _processingStops = new Set(); // guard against double-exits
 
 // ─── Onboarding ───────────────────────────────────────────────────────────────
 
@@ -362,9 +368,54 @@ async function backtestCoin(symbol) {
   if (existing?.testedAt && Date.now() - new Date(existing.testedAt).getTime() < 20 * 60 * 60 * 1000) {
     return existing; // fresh enough — skip re-test
   }
-  const candles = await fetchCandles(symbol, "1H", 500);
-  const result = optimiseCoin(symbol, candles);
-  result.symbol = symbol;
+
+  // Walk-forward backtesting:
+  // 1. Optimize parameters on the last 23 days (in-sample)
+  // 2. Validate those parameters on the most recent 7 days (out-of-sample)
+  // 3. Only trade if the strategy holds on recent market conditions
+  // This prevents over-fitting to conditions that no longer exist
+  const candles = await fetchCandles(symbol, "1H", 800); // ~33 days of hourly data
+
+  if (candles.length < 200) {
+    // Not enough history for walk-forward — use simple backtest
+    const result = optimiseCoin(symbol, candles);
+    result.symbol = symbol;
+    BACKTEST[symbol] = result;
+    return result;
+  }
+
+  const oosSize = Math.min(7 * 24, Math.floor(candles.length * 0.25)); // 7 days or 25%
+  const inSample    = candles.slice(0, candles.length - oosSize);
+  const outOfSample = candles.slice(candles.length - oosSize);
+
+  // Optimize on in-sample window
+  const inResult = optimiseCoin(symbol, inSample);
+  if (inResult.recommendation === "SKIP") {
+    BACKTEST[symbol] = { ...inResult, symbol };
+    return BACKTEST[symbol];
+  }
+
+  // Validate on out-of-sample (most recent 7 days)
+  const oosTrades = runBacktestSim(outOfSample, inResult.rsiThreshold, inResult.takeProfit, inResult.stopLoss);
+  const oosWins = oosTrades.filter(t => t.win).length;
+  const oosWR   = oosTrades.length > 0 ? oosWins / oosTrades.length : 0;
+  const oosExp  = oosTrades.length > 0 ? oosTrades.reduce((s, t) => s + t.pct, 0) / oosTrades.length : 0;
+
+  const result = { ...inResult, symbol, oosWinRate: +(oosWR * 100).toFixed(1), oosTrades: oosTrades.length, walkForward: true };
+
+  if (oosTrades.length >= 3 && oosWR < 0.50) {
+    // Parameters don't work on recent data — market conditions changed
+    result.recommendation = "SKIP";
+    console.log(`  🔴 Walk-forward FAILED — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}% on ${oosTrades.length} recent trades (need 50%+)`);
+  } else if (oosTrades.length >= 3 && oosWR < 0.60) {
+    result.recommendation = "CAUTION";
+    console.log(`  ⚠️  Walk-forward CAUTION — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}% | exp ${oosExp >= 0 ? "+" : ""}${oosExp.toFixed(2)}%`);
+  } else if (oosTrades.length >= 3) {
+    console.log(`  ✅ Walk-forward PASSED — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}% on ${oosTrades.length} recent trades | exp +${oosExp.toFixed(2)}%`);
+  } else {
+    console.log(`  ℹ️  Walk-forward: only ${oosTrades.length} OOS trades — insufficient for validation`);
+  }
+
   BACKTEST[symbol] = result;
   return result;
 }
@@ -1610,6 +1661,169 @@ function generateTaxSummary() {
   console.log("─────────────────────────────────────────────────────────\n");
 }
 
+// ─── WebSocket real-time price stream ────────────────────────────────────────
+
+function startPriceStream(symbols) {
+  if (priceStreamWs) {
+    try { priceStreamWs.terminate(); } catch {}
+  }
+  const ws = new WebSocket("wss://ws.bitget.com/v2/ws/public");
+  priceStreamWs = ws;
+
+  ws.on("open", () => {
+    console.log(`\n📡 WebSocket connected — streaming ${symbols.length} symbols`);
+    const args = symbols.map(s => ({ instType: "SPOT", channel: "ticker", instId: s }));
+    ws.send(JSON.stringify({ op: "subscribe", args }));
+  });
+
+  ws.on("message", (data) => {
+    try {
+      const msg = JSON.parse(data.toString());
+      if (msg.event === "pong" || msg.op === "pong") return;
+      if (msg.data?.[0]?.lastPr && msg.arg?.channel === "ticker") {
+        const sym = msg.arg.instId;
+        livePrices.set(sym, { price: parseFloat(msg.data[0].lastPr), ts: Date.now() });
+      }
+    } catch {}
+  });
+
+  ws.on("close", () => {
+    console.log("⚠️  WebSocket disconnected — reconnecting in 5s");
+    setTimeout(() => startPriceStream(CONFIG.symbols), 5000);
+  });
+
+  ws.on("error", (err) => console.error("WebSocket error:", err.message));
+
+  // BitGet requires a ping within every 30s or the server closes the connection
+  const ping = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ op: "ping" }));
+    else clearInterval(ping);
+  }, 25000);
+
+  return ws;
+}
+
+// Hard-stop monitor — checks live prices every 5 seconds.
+// Only handles stop-loss and emergency stops (no indicators needed — just price).
+// Fires BEFORE the 60-second indicator-based exit check, cutting losses faster.
+async function checkLiveHardStops() {
+  const log = loadLog();
+  const openPositions = Object.entries(log.positions || {}).filter(([, p]) => p?.open);
+  if (openPositions.length === 0) return;
+
+  for (const [sym, pos] of openPositions) {
+    if (_processingStops.has(sym)) continue;
+    const live = livePrices.get(sym);
+    if (!live || Date.now() - live.ts > 30000) continue; // stale — skip
+
+    const livePrice = live.price;
+    const pnlPct = (livePrice - pos.entryPrice) / pos.entryPrice * 100;
+    const slPct = (typeof BACKTEST !== "undefined" && BACKTEST[sym]?.stopLoss) ? BACKTEST[sym].stopLoss : 0.04;
+    const slPrice = pos.entryPrice * (1 - slPct);
+    const emergencyHit = pnlPct <= -8;
+    const slHit = livePrice <= slPrice;
+
+    if (!emergencyHit && !slHit) continue;
+
+    _processingStops.add(sym);
+    const reason = emergencyHit ? `Emergency stop ${pnlPct.toFixed(2)}%` : `Stop-loss $${slPrice.toFixed(4)} (${(slPct*100).toFixed(0)}%)`;
+    console.log(`\n🚨 LIVE STOP [WebSocket] — ${sym} @ $${livePrice.toFixed(4)} | ${reason}`);
+
+    try {
+      const pnlUSD = (livePrice - pos.entryPrice) * parseFloat(pos.quantity);
+      if (!CONFIG.paperTrading) {
+        const order = await placeBitGetOrder(sym, "sell", null, livePrice, pos.quantity);
+        console.log(`✅ STOP SELL — ${order.orderId}`);
+      } else {
+        console.log(`📋 PAPER STOP SELL`);
+      }
+      log.positions[sym] = null;
+      log.portfolioValue = (log.portfolioValue || CONFIG.portfolioValue) + pnlUSD;
+      log.trades.push({
+        timestamp: new Date().toISOString(), type: "exit", symbol: sym,
+        price: livePrice, entryPrice: pos.entryPrice, pnlPct, pnlUSD,
+        indicators: {}, exitReasons: [reason],
+        shouldExit: true, quantity: pos.quantity,
+        orderPlaced: true, paperTrading: CONFIG.paperTrading,
+        wsTriggered: true,
+      });
+      saveLog(log);
+      console.log(`💰 Portfolio: $${log.portfolioValue.toFixed(4)}`);
+    } catch (err) {
+      console.error(`Stop sell failed for ${sym}: ${err.message}`);
+    } finally {
+      _processingStops.delete(sym);
+    }
+  }
+}
+
+// ─── Limit order with market fallback ────────────────────────────────────────
+
+// Places a limit buy at the specified price. Polls for fill up to 30s.
+// Falls back to market order if not filled (snap-back moves fast — don't miss the entry).
+async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
+  try {
+    // Get symbol precision
+    const symRes = await fetch(`${CONFIG.bitget.baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`);
+    const symData = await symRes.json();
+    const pricePrecision = parseInt(symData.data?.[0]?.pricePrecision ?? "4", 10);
+    const qtyPrecision   = parseInt(symData.data?.[0]?.quantityPrecision ?? "6", 10);
+    const limitPriceStr  = limitPrice.toFixed(pricePrecision);
+    const qty = floorToDecimals(sizeUSD / limitPrice, qtyPrecision);
+    if (qty <= 0) return null;
+
+    const timestamp = Date.now().toString();
+    const path = "/api/v2/spot/trade/place-order";
+    const body = JSON.stringify({ symbol, side: "buy", orderType: "limit", price: limitPriceStr, size: qty.toFixed(qtyPrecision) });
+    const signature = signBitGet(timestamp, "POST", path, body);
+    const res = await fetch(`${CONFIG.bitget.baseUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "ACCESS-KEY": CONFIG.bitget.apiKey, "ACCESS-SIGN": signature, "ACCESS-TIMESTAMP": timestamp, "ACCESS-PASSPHRASE": CONFIG.bitget.passphrase, "locale": "en-US" },
+      body,
+    });
+    const orderData = await res.json();
+    if (orderData.code !== "00000") throw new Error(orderData.msg);
+    const orderId = orderData.data.orderId;
+    console.log(`  📋 Limit BUY @ $${limitPriceStr} | id: ${orderId}`);
+
+    // Poll for fill — up to 30 seconds (10 × 3s)
+    for (let i = 0; i < 10; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      const ts2 = Date.now().toString();
+      const checkPath = `/api/v2/spot/trade/orderInfo?orderId=${orderId}&symbol=${symbol}`;
+      const checkSign = signBitGet(ts2, "GET", checkPath);
+      const checkRes = await fetch(`${CONFIG.bitget.baseUrl}${checkPath}`, {
+        headers: { "ACCESS-KEY": CONFIG.bitget.apiKey, "ACCESS-SIGN": checkSign, "ACCESS-TIMESTAMP": ts2, "ACCESS-PASSPHRASE": CONFIG.bitget.passphrase, "locale": "en-US" },
+      });
+      const checkData = await checkRes.json();
+      const status = checkData.data?.status;
+      if (status === "full_fill") {
+        const confirmedQty = parseFloat(checkData.data?.baseVolume ?? qty.toFixed(qtyPrecision));
+        console.log(`  ✅ Limit filled | qty: ${confirmedQty}`);
+        return { orderId, confirmedQty };
+      }
+      if (status === "cancelled" || status === "cancel") break;
+      console.log(`  ⏳ Waiting for fill (${i + 1}/10)...`);
+    }
+
+    // Cancel unfilled order
+    const cancelTs = Date.now().toString();
+    const cancelPath = "/api/v2/spot/trade/cancel-order";
+    const cancelBody = JSON.stringify({ symbol, orderId });
+    const cancelSign = signBitGet(cancelTs, "POST", cancelPath, cancelBody);
+    await fetch(`${CONFIG.bitget.baseUrl}${cancelPath}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "ACCESS-KEY": CONFIG.bitget.apiKey, "ACCESS-SIGN": cancelSign, "ACCESS-TIMESTAMP": cancelTs, "ACCESS-PASSPHRASE": CONFIG.bitget.passphrase, "locale": "en-US" },
+      body: cancelBody,
+    });
+    console.log(`  ⚠️  Limit not filled — cancelled, falling back to market`);
+    return null;
+  } catch (err) {
+    console.log(`  ⚠️  Limit order error (${err.message}) — falling back to market`);
+    return null;
+  }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function run(tvSignal = null, symbol = null) {
@@ -2486,7 +2700,14 @@ async function run(tvSignal = null, symbol = null) {
       } else if (slippageOk) {
         console.log(`\n🔴 PLACING LIVE ORDER — $${finalTradeSize.toFixed(2)} BUY ${symbol}`);
         try {
-          const order = await placeBitGetOrder(symbol, "buy", finalTradeSize, price);
+          // Try limit order first (better fill price, avoids spread cost)
+          // Falls back to market after 30s if not filled
+          console.log(`  Attempting limit buy @ $${price.toFixed(4)}...`);
+          let order = await placeLimitBuyWithFallback(symbol, finalTradeSize, price);
+          if (!order) {
+            console.log(`  Falling back to market order...`);
+            order = await placeBitGetOrder(symbol, "buy", finalTradeSize, price);
+          }
           const actualQty = order.confirmedQty ?? (finalTradeSize / price);
           logEntry.orderPlaced = true;
           logEntry.orderId = order.orderId;
@@ -2620,14 +2841,21 @@ if (process.argv.includes("--tax-summary")) {
     // Fetch top movers then run first scan
     (async () => {
       await refreshTopMovers();
+      startPriceStream(CONFIG.symbols);
       for (const sym of CONFIG.symbols) {
         await run(null, sym).catch((err) => console.error(`Startup ${sym} error:`, err));
       }
     })();
   });
 
-  // Swap to fresh top movers every 4 hours
-  setInterval(refreshTopMovers, 4 * 60 * 60 * 1000);
+  // Swap to fresh top movers every 4 hours (restarts price stream with new symbols)
+  setInterval(async () => {
+    await refreshTopMovers();
+    startPriceStream(CONFIG.symbols);
+  }, 4 * 60 * 60 * 1000);
+
+  // WebSocket hard-stop checker — fires every 5 seconds using live streamed prices
+  setInterval(checkLiveHardStops, 5000);
 
   // Fast exit monitor — check open positions every 60 seconds
   // Stops and partial TPs execute up to 4 minutes earlier than the 5-min entry scan
