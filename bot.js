@@ -760,6 +760,54 @@ function detectBullishDivergence(candles) {
   return rsiPrev !== null && rsiCurr !== null && rsiCurr > rsiPrev;
 }
 
+// ─── Professional-grade signals ─────────────────────────────────────────────
+
+// Liquidity sweep (ICT / Smart Money Concept) — one of the highest-probability setups in trading.
+// Institutions trigger retail stop orders below a swing low, then reverse hard upward.
+// Pattern: price wicks below a recent swing low → closes back above it → currently recovering.
+function detectLiquiditySweep(candles, lookback = 15) {
+  if (candles.length < lookback + 3) return false;
+  const window = candles.slice(-(lookback + 2));
+  const swingLow = Math.min(...window.slice(0, -2).map(c => c.low));
+  const prev = window[window.length - 2]; // last fully closed candle
+  const curr = window[window.length - 1]; // candle currently forming
+  const swept    = prev.low   < swingLow * 0.999; // wick briefly took out swing low
+  const recovered = prev.close > swingLow;          // but closed back above it
+  const recovering = curr.close > prev.close;       // momentum now positive
+  return swept && recovered && recovering;
+}
+
+// Funding rate — perpetual futures market positioning.
+// Negative funding: shorts pay longs = market is overcrowded short → squeeze risk → buy signal.
+// Positive funding: longs pay shorts = market is overcrowded long → crowded trade → avoid.
+async function getFundingRate(symbol) {
+  try {
+    const res = await fetch(`https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${symbol}&productType=USDT-FUTURES`);
+    const data = await res.json();
+    if (data.code !== "00000") return null;
+    return parseFloat(data.data?.[0]?.fundingRate ?? 0);
+  } catch { return null; }
+}
+
+// Kelly Criterion — mathematically optimal position size based on your own live trade history.
+// f = W - (1-W)/R | W = win rate, R = avg win / avg loss
+// Uses half-Kelly for safety (full Kelly maximises growth but has large drawdowns).
+function kellyPositionPct(log, symbol, fallback = 0.25) {
+  const exits = log.trades.filter(t =>
+    t.type === "exit" && t.symbol === symbol && t.orderPlaced && t.pnlPct !== undefined
+  );
+  if (exits.length < 15) return fallback; // need 15+ trades for statistical validity
+  const wins   = exits.filter(t => t.pnlPct >  0.25); // net of fees
+  const losses = exits.filter(t => t.pnlPct <= 0.25);
+  if (wins.length === 0 || losses.length === 0) return fallback;
+  const W = wins.length / exits.length;
+  const avgWin  =  wins.reduce((s, t) => s + t.pnlPct, 0) / wins.length;
+  const avgLoss = Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0) / losses.length);
+  const R = avgWin / avgLoss;
+  const kelly = W - (1 - W) / R;
+  return Math.max(0.10, Math.min(0.35, kelly / 2)); // half-Kelly, capped 10%–35%
+}
+
 // VWAP — rolling 20-bar, stays close to current price action
 function calcVWAP(candles) {
   const window = candles.slice(-20);
@@ -1679,13 +1727,15 @@ async function run(tvSignal = null, symbol = null) {
   }
 
   const currentPortfolio = log.portfolioValue || CONFIG.portfolioValue;
-  const sizePct = CONFIG.maxTradeSizePct || 0.25;
-  // Scale down position size as daily losses accumulate — don't dig deeper holes
+  // Kelly Criterion sizing — optimal fraction based on live win rate + payoff ratio per coin
+  const kellySizePct = kellyPositionPct(log, symbol, CONFIG.maxTradeSizePct || 0.25);
+  const sizePct = kellySizePct;
+  // Scale down as daily losses accumulate
   const drawdownScale = drawdown.drawdownPct > 7 ? 0.30 : drawdown.drawdownPct > 5 ? 0.50 : drawdown.drawdownPct > 3 ? 0.75 : 1.0;
   const rawSize = currentPortfolio * sizePct * adaptive.sizeMultiplier * drawdownScale;
   const tradeSize = CONFIG.maxTradeSizeUSD ? Math.min(rawSize, CONFIG.maxTradeSizeUSD) : rawSize;
   if (drawdownScale < 1.0) console.log(`\n⚠️  Drawdown scaling: ${(drawdownScale * 100).toFixed(0)}% position size (down ${drawdown.drawdownPct.toFixed(1)}% today)`);
-  console.log(`\n💰 Portfolio: $${currentPortfolio.toFixed(4)} | Trade size: $${tradeSize.toFixed(4)} (${(sizePct * 100).toFixed(0)}%)`);
+  console.log(`\n💰 Portfolio: $${currentPortfolio.toFixed(4)} | Trade size: $${tradeSize.toFixed(4)} (Kelly ${(sizePct * 100).toFixed(0)}%)`);
 
   const CONFIDENCE_MIN = log.learnedThresholds?._confidenceMin ?? adaptive.confidenceMin;
   const position = (log.positions || {})[symbol] || null;
@@ -1845,6 +1895,33 @@ async function run(tvSignal = null, symbol = null) {
         console.log(`  ETH 1H change: ${ethHourChange >= 0 ? "+" : ""}${ethHourChange.toFixed(2)}%`);
         if (ethHourChange <= -2) {
           console.log(`🚫 ETH CORRELATION BLOCK — ETH dropped ${ethHourChange.toFixed(2)}% in the last hour. Altcoins will follow.`);
+          console.log("═══════════════════════════════════════════════════════════\n");
+          return;
+        }
+      }
+    } catch { /* non-critical */ }
+
+    // BTC daily RSI — macro sentiment gauge (fear/greed proxy used by top analysts)
+    // Below 35 = fear = better buying opportunities. Above 70 = greed = be selective.
+    let btcDailyRsi = null;
+    try {
+      const btcDailyCandles = await fetchCandles("BTCUSDT", "1D", 20);
+      btcDailyRsi = calcRSI(btcDailyCandles.map(c => c.close), 14);
+      const sentiment = btcDailyRsi < 35 ? "😱 Fear — contrarian opportunity" : btcDailyRsi > 70 ? "🤑 Greed — be selective" : "😐 Neutral";
+      console.log(`  BTC daily RSI(14): ${btcDailyRsi.toFixed(1)} — ${sentiment}`);
+    } catch { /* non-critical */ }
+
+    // Funding rate — crowd positioning signal for this coin's perp market
+    // Very negative: shorts overcrowded → squeeze risk = strong buy. Very positive: longs overcrowded → trap.
+    let fundingRate = null;
+    try {
+      fundingRate = await getFundingRate(symbol);
+      if (fundingRate !== null) {
+        const frPct = (fundingRate * 100).toFixed(4);
+        const frLabel = fundingRate < -0.0003 ? " ✅ shorts overcrowded — squeeze risk" : fundingRate > 0.0005 ? " ⚠️ longs overcrowded — dangerous" : "";
+        console.log(`  Funding rate (${symbol}): ${frPct}%${frLabel}`);
+        if (fundingRate > 0.0005) {
+          console.log(`🚫 FUNDING RATE BLOCK — +${frPct}% means longs are crowded. Price is likely to fall to liquidate them.`);
           console.log("═══════════════════════════════════════════════════════════\n");
           return;
         }
@@ -2100,17 +2177,30 @@ async function run(tvSignal = null, symbol = null) {
     // In VWAP bounce mode, use 65 as threshold (VWAP bounce can fire at mid-RSI)
     const hasBtThreshold = !!BACKTEST[symbol]?.rsiThreshold;
     const effectiveRsiThreshold = vwapBounceMode ? 65 : (hasBtThreshold ? coinRsiThreshold : Math.min(adaptive.rsiThreshold, coinRsiThreshold));
-    const { results, allPass: rulesPass, entryType, entryScore } = runSafetyCheck(price, ema8, vwap, rsi3, rules, effectiveRsiThreshold, vol, ema21, bullTrendConfirmed, adx, stochRsi, divergence, bb, vwapBounceMode);
+    const { results, allPass: rulesPass, entryType, entryScore: baseEntryScore } = runSafetyCheck(price, ema8, vwap, rsi3, rules, effectiveRsiThreshold, vol, ema21, bullTrendConfirmed, adx, stochRsi, divergence, bb, vwapBounceMode);
+
+    // ── Advanced signal augmentation (ICT, funding rate, macro sentiment) ────
+    const liquiditySweep = detectLiquiditySweep(candles);
+    let entryScore = baseEntryScore;
+    const advSignals = [];
+    if (liquiditySweep)                              { entryScore += 3; advSignals.push("🎯 Liquidity sweep (stop hunt reversal)"); }
+    if (fundingRate !== null && fundingRate < -0.0003) { entryScore += 2; advSignals.push(`💰 Funding ${(fundingRate*100).toFixed(4)}% — shorts squeezed`); }
+    if (btcDailyRsi !== null && btcDailyRsi < 35)   { entryScore += 1; advSignals.push(`😱 BTC fear (RSI ${btcDailyRsi.toFixed(1)})`); }
+    if (btcDailyRsi !== null && btcDailyRsi > 70)   { entryScore -= 1; advSignals.push(`🤑 BTC greed (RSI ${btcDailyRsi.toFixed(1)}) — raising bar`); }
+    if (advSignals.length > 0) {
+      console.log(`\n  ⚡ Advanced signals: ${advSignals.join(" | ")}`);
+      console.log(`  Score: ${baseEntryScore} (base) → ${entryScore} (with advanced signals)`);
+    }
 
     // Entry quality gate — trend-follow entries need score >= 3 (RSI extreme + 1 confirming signal)
     if (rulesPass && entryType === "trend-follow" && entryScore < 3 && !vwapBounceMode) {
-      console.log(`🚫 ENTRY QUALITY BLOCK — score ${entryScore}/3 needed. Add: RSI<20, BB%<0.35, StochRSI oversold, vol surge, or divergence.`);
+      console.log(`🚫 ENTRY QUALITY BLOCK — score ${entryScore}/3 needed. Signals: RSI<20, BB%<0.35, StochRSI oversold, vol surge, divergence, liquidity sweep, or negative funding.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
     // Snapback quality gate — counter-trend entries need confirmation (StochRSI/BB%/divergence)
     if (rulesPass && entryType === "snapback" && entryScore < 2 && !vwapBounceMode) {
-      console.log(`🚫 SNAPBACK QUALITY BLOCK — score ${entryScore}/2 needed. Counter-trend needs: StochRSI oversold, BB% near low, RSI<15, or divergence.`);
+      console.log(`🚫 SNAPBACK QUALITY BLOCK — score ${entryScore}/2 needed. Counter-trend needs: StochRSI oversold, BB% near low, RSI<15, divergence, or liquidity sweep.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
