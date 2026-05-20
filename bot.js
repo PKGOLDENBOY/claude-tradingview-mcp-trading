@@ -114,6 +114,32 @@ const anthropic = process.env.ANTHROPIC_API_KEY
 
 const LOG_FILE = "safety-check-log.json";
 
+// ─── Multi-account support ────────────────────────────────────────────────────
+const ACCOUNTS = [
+  {
+    id: 1,
+    apiKey:     process.env.BITGET_API_KEY,
+    secretKey:  process.env.BITGET_SECRET_KEY,
+    passphrase: process.env.BITGET_PASSPHRASE,
+    baseUrl:    process.env.BITGET_BASE_URL || "https://api.bitget.com",
+    portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD || "1000"),
+    logFile:    "safety-check-log.json",
+  },
+  ...(process.env.BITGET_API_KEY_2 ? [{
+    id: 2,
+    apiKey:     process.env.BITGET_API_KEY_2,
+    secretKey:  process.env.BITGET_SECRET_KEY_2,
+    passphrase: process.env.BITGET_PASSPHRASE_2,
+    baseUrl:    process.env.BITGET_BASE_URL || "https://api.bitget.com",
+    portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD_2 || process.env.PORTFOLIO_VALUE_USD || "1000"),
+    logFile:    "safety-check-log-2.json",
+  }] : []),
+];
+
+// Active account context — set before each account's operation cycle (sequential, never concurrent)
+let _currentAccount = ACCOUNTS[0];
+const acct = () => _currentAccount;
+
 // ─── Swing Trading Config ────────────────────────────────────────────────────
 const SWING_ENABLED = process.env.SWING_TRADING !== "false"; // on by default
 const SWING = {
@@ -135,13 +161,13 @@ const SWING = {
 // ─── Logging ────────────────────────────────────────────────────────────────
 
 function loadLog() {
-  if (!existsSync(LOG_FILE)) return { trades: [], portfolioValue: CONFIG.portfolioValue, dayStartValue: CONFIG.portfolioValue, dayStartDate: new Date().toISOString().slice(0, 10), _needsPortfolioSync: true };
-  let raw = readFileSync(LOG_FILE);
+  if (!existsSync(acct().logFile)) return { trades: [], portfolioValue: acct().portfolioValue, dayStartValue: acct().portfolioValue, dayStartDate: new Date().toISOString().slice(0, 10), _needsPortfolioSync: true };
+  let raw = readFileSync(acct().logFile);
   if (raw[0] === 0xEF && raw[1] === 0xBB && raw[2] === 0xBF) raw = raw.slice(3);
   const log = JSON.parse(raw.toString("utf8"));
   // Reset day start value each new day
   const today = new Date().toISOString().slice(0, 10);
-  if (!log.portfolioValue) log.portfolioValue = CONFIG.portfolioValue;
+  if (!log.portfolioValue) log.portfolioValue = acct().portfolioValue;
   if (log.dayStartDate !== today) {
     log.dayStartDate = today;
     // Fix 5: Auto-sync portfolio to real BitGet USDT balance at day start
@@ -154,7 +180,7 @@ function loadLog() {
 }
 
 function saveLog(log) {
-  writeFileSync(LOG_FILE, JSON.stringify(log, null, 2));
+  writeFileSync(acct().logFile, JSON.stringify(log, null, 2));
 }
 
 function countTodaysTrades(log) {
@@ -181,15 +207,15 @@ function checkDailyDrawdown(log) {
     (t) => t.type === "exit" && t.timestamp.startsWith(today) && t.pnlUSD !== undefined,
   );
   const totalLoss = todayExits.reduce((sum, t) => sum + Math.min(t.pnlUSD, 0), 0);
-  const drawdownPct = Math.abs(totalLoss) / (log.portfolioValue || CONFIG.portfolioValue) * 100;
+  const drawdownPct = Math.abs(totalLoss) / (log.portfolioValue || acct().portfolioValue) * 100;
   const limit = 10; // 10% max daily loss
   return { drawdownPct, totalLoss, paused: drawdownPct >= limit, limit };
 }
 
 // Daily profit target — stop trading once we've hit the goal for the day
 function checkDailyProfitTarget(log) {
-  const startValue = log.dayStartValue || CONFIG.portfolioValue;
-  const currentValue = log.portfolioValue || CONFIG.portfolioValue;
+  const startValue = log.dayStartValue || acct().portfolioValue;
+  const currentValue = log.portfolioValue || acct().portfolioValue;
   const gainPct = ((currentValue - startValue) / startValue) * 100;
   const target = 30; // 30% daily target — stop and protect gains
   return { gainPct, startValue, currentValue, targetHit: gainPct >= target, target };
@@ -1090,7 +1116,7 @@ async function detectMarketRegime() {
 // Tracks total $ at risk across ALL open positions (scalp + swing + breakout).
 // Hard cap at 8% — never risk more than this simultaneously.
 function calcPortfolioHeat(log) {
-  const portfolio = log.portfolioValue || CONFIG.portfolioValue;
+  const portfolio = log.portfolioValue || acct().portfolioValue;
   let totalRisk = 0;
   const positions = [];
   const addPos = (map, stopPct, type) => {
@@ -1567,7 +1593,7 @@ function checkTradeLimits(log) {
     `✅ Trades today: ${todayCount}/${CONFIG.maxTradesPerDay} — within limit`,
   );
 
-  const portfolio = log.portfolioValue || CONFIG.portfolioValue;
+  const portfolio = log.portfolioValue || acct().portfolioValue;
   const sizePct = CONFIG.maxTradeSizePct || 0.25;
   const tradeSize = CONFIG.maxTradeSizeUSD ? Math.min(portfolio * sizePct, CONFIG.maxTradeSizeUSD) : portfolio * sizePct;
 
@@ -1583,15 +1609,15 @@ function checkTradeLimits(log) {
 function signBitGet(timestamp, method, path, body = "") {
   const message = `${timestamp}${method}${path}${body}`;
   return crypto
-    .createHmac("sha256", CONFIG.bitget.secretKey)
+    .createHmac("sha256", acct().secretKey)
     .update(message)
     .digest("base64");
 }
 
 function signBitGetPassphrase() {
   return crypto
-    .createHmac("sha256", CONFIG.bitget.secretKey)
-    .update(CONFIG.bitget.passphrase)
+    .createHmac("sha256", acct().secretKey)
+    .update(acct().passphrase)
     .digest("base64");
 }
 
@@ -1599,12 +1625,12 @@ async function getSpotBalance(coin) {
   const timestamp = Date.now().toString();
   const path = "/api/v2/spot/account/assets";
   const sign = signBitGet(timestamp, "GET", path);
-  const res = await fetch(`${CONFIG.bitget.baseUrl}${path}`, {
+  const res = await fetch(`${acct().baseUrl}${path}`, {
     headers: {
-      "ACCESS-KEY": CONFIG.bitget.apiKey,
+      "ACCESS-KEY": acct().apiKey,
       "ACCESS-SIGN": sign,
       "ACCESS-TIMESTAMP": timestamp,
-      "ACCESS-PASSPHRASE": CONFIG.bitget.passphrase,
+      "ACCESS-PASSPHRASE": acct().passphrase,
       "locale": "en-US",
     },
   });
@@ -1630,7 +1656,7 @@ const _symbolPrecisionCache = {};
 async function getQuantityPrecision(symbol) {
   if (_symbolPrecisionCache[symbol] !== undefined) return _symbolPrecisionCache[symbol];
   try {
-    const res = await fetch(`${CONFIG.bitget.baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`);
+    const res = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`);
     const data = await res.json();
     const precision = parseInt(data.data?.[0]?.quantityPrecision ?? "6", 10);
     _symbolPrecisionCache[symbol] = precision;
@@ -1684,14 +1710,14 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
 
   const signature = signBitGet(timestamp, "POST", path, body);
 
-  const res = await fetch(`${CONFIG.bitget.baseUrl}${path}`, {
+  const res = await fetch(`${acct().baseUrl}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "ACCESS-KEY": CONFIG.bitget.apiKey,
+      "ACCESS-KEY": acct().apiKey,
       "ACCESS-SIGN": signature,
       "ACCESS-TIMESTAMP": timestamp,
-      "ACCESS-PASSPHRASE": CONFIG.bitget.passphrase,
+      "ACCESS-PASSPHRASE": acct().passphrase,
       "locale": "en-US",
     },
     body,
@@ -1952,7 +1978,7 @@ async function checkLiveHardStops() {
         console.log(`📋 PAPER STOP SELL`);
       }
       log.positions[sym] = null;
-      log.portfolioValue = (log.portfolioValue || CONFIG.portfolioValue) + pnlUSD;
+      log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
       log.trades.push({
         timestamp: new Date().toISOString(), type: "exit", symbol: sym,
         price: livePrice, entryPrice: pos.entryPrice, pnlPct, pnlUSD,
@@ -1978,7 +2004,7 @@ async function checkLiveHardStops() {
 async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
   try {
     // Get symbol precision
-    const symRes = await fetch(`${CONFIG.bitget.baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`);
+    const symRes = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`);
     const symData = await symRes.json();
     const pricePrecision = parseInt(symData.data?.[0]?.pricePrecision ?? "4", 10);
     const qtyPrecision   = parseInt(symData.data?.[0]?.quantityPrecision ?? "6", 10);
@@ -1990,9 +2016,9 @@ async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
     const path = "/api/v2/spot/trade/place-order";
     const body = JSON.stringify({ symbol, side: "buy", orderType: "limit", force: "gtc", price: limitPriceStr, size: qty.toFixed(qtyPrecision) });
     const signature = signBitGet(timestamp, "POST", path, body);
-    const res = await fetch(`${CONFIG.bitget.baseUrl}${path}`, {
+    const res = await fetch(`${acct().baseUrl}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "ACCESS-KEY": CONFIG.bitget.apiKey, "ACCESS-SIGN": signature, "ACCESS-TIMESTAMP": timestamp, "ACCESS-PASSPHRASE": CONFIG.bitget.passphrase, "locale": "en-US" },
+      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": signature, "ACCESS-TIMESTAMP": timestamp, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
       body,
     });
     const orderData = await res.json();
@@ -2006,8 +2032,8 @@ async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
       const ts2 = Date.now().toString();
       const checkPath = `/api/v2/spot/trade/orderInfo?orderId=${orderId}&symbol=${symbol}`;
       const checkSign = signBitGet(ts2, "GET", checkPath);
-      const checkRes = await fetch(`${CONFIG.bitget.baseUrl}${checkPath}`, {
-        headers: { "ACCESS-KEY": CONFIG.bitget.apiKey, "ACCESS-SIGN": checkSign, "ACCESS-TIMESTAMP": ts2, "ACCESS-PASSPHRASE": CONFIG.bitget.passphrase, "locale": "en-US" },
+      const checkRes = await fetch(`${acct().baseUrl}${checkPath}`, {
+        headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": checkSign, "ACCESS-TIMESTAMP": ts2, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
       });
       const checkData = await checkRes.json();
       const status = checkData.data?.status;
@@ -2025,9 +2051,9 @@ async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
     const cancelPath = "/api/v2/spot/trade/cancel-order";
     const cancelBody = JSON.stringify({ symbol, orderId });
     const cancelSign = signBitGet(cancelTs, "POST", cancelPath, cancelBody);
-    await fetch(`${CONFIG.bitget.baseUrl}${cancelPath}`, {
+    await fetch(`${acct().baseUrl}${cancelPath}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "ACCESS-KEY": CONFIG.bitget.apiKey, "ACCESS-SIGN": cancelSign, "ACCESS-TIMESTAMP": cancelTs, "ACCESS-PASSPHRASE": CONFIG.bitget.passphrase, "locale": "en-US" },
+      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": cancelSign, "ACCESS-TIMESTAMP": cancelTs, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
       body: cancelBody,
     });
     console.log(`  ⚠️  Limit not filled — cancelled, falling back to market`);
@@ -2066,28 +2092,10 @@ async function run(tvSignal = null, symbol = null) {
   const log = loadLog();
   const today = new Date().toISOString().slice(0, 10);
 
-  // Fix 5: Auto-sync portfolio value from real BitGet balance at day start
   if (log._needsPortfolioSync) {
-    try {
-      const ts = Date.now().toString();
-      const syncPath = "/api/v2/spot/account/assets";
-      const syncSign = crypto.createHmac("sha256", process.env.BITGET_SECRET_KEY)
-        .update(ts + "GET" + syncPath).digest("base64");
-      const syncRes = await fetch(`${process.env.BITGET_BASE_URL}${syncPath}`, {
-        headers: { "ACCESS-KEY": process.env.BITGET_API_KEY, "ACCESS-SIGN": syncSign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": process.env.BITGET_PASSPHRASE, "locale": "en-US" }
-      });
-      const syncData = await syncRes.json();
-      const usdtBalance = parseFloat(syncData.data?.find(a => a.coin === "USDT")?.available ?? "0");
-      if (usdtBalance > 0) {
-        log.portfolioValue = usdtBalance;
-        log.dayStartValue = usdtBalance;
-        log._needsPortfolioSync = false;
-        saveLog(log);
-        console.log(`\n🔄 Portfolio synced from BitGet: $${usdtBalance.toFixed(4)} USDT`);
-      }
-    } catch (e) {
-      console.log(`\n⚠️  Portfolio sync failed: ${e.message}`);
-    }
+    await syncPortfolioBalance(log);
+    log._needsPortfolioSync = false;
+    saveLog(log);
   }
 
   const coinRsiThreshold = getCoinRsiThreshold(symbol, log);
@@ -2216,7 +2224,7 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
-  const currentPortfolio = log.portfolioValue || CONFIG.portfolioValue;
+  const currentPortfolio = log.portfolioValue || acct().portfolioValue;
   // Kelly Criterion sizing — optimal fraction based on live win rate + payoff ratio per coin
   const kellySizePct = kellyPositionPct(log, symbol, CONFIG.maxTradeSizePct || 0.25);
   const sizePct = kellySizePct;
@@ -2276,7 +2284,7 @@ async function run(tvSignal = null, symbol = null) {
       }
 
       if (partialOk) {
-        log.portfolioValue = (log.portfolioValue || CONFIG.portfolioValue) + partialPnlUSD;
+        log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + partialPnlUSD;
         log.positions[symbol] = { ...position, quantity: halfQty.toFixed(6), partialExitDone: true, partialExitPrice: price };
         position = log.positions[symbol]; // use updated position for the rest of this cycle
         const partialEntry = {
@@ -2391,7 +2399,7 @@ async function run(tvSignal = null, symbol = null) {
         logEntry.orderId = `PAPER-SELL-${Date.now()}`;
         log.positions = { ...(log.positions || {}), [symbol]: null };
         // Compound portfolio value
-        log.portfolioValue = (log.portfolioValue || CONFIG.portfolioValue) + pnlUSD;
+        log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
         console.log(`💰 Portfolio updated: $${log.portfolioValue.toFixed(4)} (${pnlUSD >= 0 ? "+" : ""}$${pnlUSD.toFixed(4)})`);
       } else {
         console.log(`\n🔴 PLACING LIVE SELL — ${position.quantity} ${symbol}`);
@@ -2401,7 +2409,7 @@ async function run(tvSignal = null, symbol = null) {
           logEntry.orderId = order.orderId;
           log.positions = { ...(log.positions || {}), [symbol]: null };
           // Compound portfolio value
-          log.portfolioValue = (log.portfolioValue || CONFIG.portfolioValue) + pnlUSD;
+          log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
           console.log(`✅ SELL ORDER PLACED — ${order.orderId}`);
           console.log(`💰 Portfolio updated: $${log.portfolioValue.toFixed(4)} (${pnlUSD >= 0 ? "+" : ""}$${pnlUSD.toFixed(4)})`);
         } catch (err) {
@@ -3022,7 +3030,7 @@ if (process.argv.includes("--tax-summary")) {
           acc[s] = b ? `${b.timeframe} | WR ${b.winRate}% | PF ${b.profitFactor}` : `${CONFIG.timeframe} | no backtest`;
           return acc;
         }, {}),
-        portfolio: `$${(log.portfolioValue || CONFIG.portfolioValue).toFixed(4)}`,
+        portfolio: `$${(log.portfolioValue || acct().portfolioValue).toFixed(4)}`,
         dailyGoal: `$${dailyProfit.startValue.toFixed(2)} → $${(dailyProfit.startValue * 1.3).toFixed(2)} | ${dailyProfit.gainPct >= 0 ? "+" : ""}${dailyProfit.gainPct.toFixed(2)}% ${dailyProfit.targetHit ? "🏆 TARGET HIT" : ""}`,
         positions: log.positions || {},
         todayTrades: todayTrades.length,
@@ -3214,7 +3222,7 @@ if (process.argv.includes("--tax-summary")) {
           paperTrading: CONFIG.paperTrading, tradeType: "swing",
         };
         log.swingPositions[symbol] = { ...swingPos, open: false };
-        log.portfolioValue = (log.portfolioValue || CONFIG.portfolioValue) + pnlUSD;
+        log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
         log.trades.push(exitEntry);
         saveLog(log);
         writeTradeCsv(exitEntry);
@@ -3267,7 +3275,7 @@ if (process.argv.includes("--tax-summary")) {
 
     if (score < 3) return; // need at least 3 confirmations across all timeframes
 
-    const portfolio  = log.portfolioValue || CONFIG.portfolioValue;
+    const portfolio  = log.portfolioValue || acct().portfolioValue;
     const swingSize  = portfolio * SWING.sizePct;
 
     console.log(`\n📈 SWING ENTRY — ${symbol} | Score:${score}/10 | BT:${btResult.recommendation}`);
@@ -3379,7 +3387,7 @@ if (process.argv.includes("--tax-summary")) {
           orderPlaced: true, paperTrading: CONFIG.paperTrading, tradeType: "breakout",
         };
         log.breakoutPositions[symbol] = { ...bkPos, open: false };
-        log.portfolioValue = (log.portfolioValue || CONFIG.portfolioValue) + pnlUSD;
+        log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
         log.trades.push(exitEntry);
         saveLog(log);
         writeTradeCsv(exitEntry);
@@ -3434,7 +3442,7 @@ if (process.argv.includes("--tax-summary")) {
       return;
     }
 
-    const portfolio = log.portfolioValue || CONFIG.portfolioValue;
+    const portfolio = log.portfolioValue || acct().portfolioValue;
     const bkSize = portfolio * 0.15;
 
     console.log(`\n🚀 BREAKOUT ENTRY — ${symbol} | Regime:${regime.regime}`);
@@ -3484,28 +3492,31 @@ if (process.argv.includes("--tax-summary")) {
       const regime = await detectMarketRegime().catch(() => ({ regime: "UNKNOWN" }));
       console.log(`\n🌍 Market regime: ${regime.regime} | BTC trend: ${regime.btcTrend} | Volatility: ${regime.volatility}`);
 
-      // Startup balance sync — always pull real USDT balance from BitGet on boot
-      if (!CONFIG.paperTrading) {
-        const startLog = loadLog();
-        await syncPortfolioBalance(startLog);
-        saveLog(startLog);
-      }
-
       await refreshTopMovers();
       startPriceStream(CONFIG.symbols);
-      for (const sym of CONFIG.symbols) {
-        await run(null, sym).catch((err) => console.error(`Startup ${sym} error:`, err));
-      }
-      if (SWING_ENABLED) {
-        console.log("\n📈 Initial swing scan...");
-        for (const sym of CONFIG.symbols) {
-          await runSwing(sym).catch((err) => console.error(`Swing startup ${sym} error:`, err));
+
+      for (const account of ACCOUNTS) {
+        _currentAccount = account;
+        // Startup balance sync
+        if (!CONFIG.paperTrading) {
+          const startLog = loadLog();
+          await syncPortfolioBalance(startLog);
+          saveLog(startLog);
         }
-        console.log("\n🚀 Initial breakout scan...");
+        console.log(`\n👛 Account ${account.id} — initial scan`);
         for (const sym of CONFIG.symbols) {
-          await runBreakout(sym).catch((err) => console.error(`Breakout startup ${sym} error:`, err));
+          await run(null, sym).catch((err) => console.error(`Startup ${sym} [acct${account.id}] error:`, err));
+        }
+        if (SWING_ENABLED) {
+          for (const sym of CONFIG.symbols) {
+            await runSwing(sym).catch((err) => console.error(`Swing startup ${sym} [acct${account.id}] error:`, err));
+          }
+          for (const sym of CONFIG.symbols) {
+            await runBreakout(sym).catch((err) => console.error(`Breakout startup ${sym} [acct${account.id}] error:`, err));
+          }
         }
       }
+      _currentAccount = ACCOUNTS[0];
     })();
   });
 
@@ -3516,68 +3527,99 @@ if (process.argv.includes("--tax-summary")) {
   }, 4 * 60 * 60 * 1000);
 
   // WebSocket hard-stop checker — fires every 5 seconds using live streamed prices
-  setInterval(checkLiveHardStops, 5000);
+  setInterval(async () => {
+    for (const account of ACCOUNTS) {
+      _currentAccount = account;
+      await checkLiveHardStops();
+    }
+    _currentAccount = ACCOUNTS[0];
+  }, 5000);
 
   // Fast exit monitor — check open scalp positions every 60 seconds
   setInterval(async () => {
-    const log = loadLog();
-    const openSymbols = Object.entries(log.positions || {})
-      .filter(([, p]) => p && p.open)
-      .map(([sym]) => sym);
-    if (openSymbols.length === 0) return;
-    for (const sym of openSymbols) {
-      await run(null, sym).catch((err) => console.error(`Exit monitor ${sym} error:`, err));
+    for (const account of ACCOUNTS) {
+      _currentAccount = account;
+      const log = loadLog();
+      const openSymbols = Object.entries(log.positions || {})
+        .filter(([, p]) => p && p.open)
+        .map(([sym]) => sym);
+      for (const sym of openSymbols) {
+        await run(null, sym).catch((err) => console.error(`Exit monitor ${sym} [acct${account.id}] error:`, err));
+      }
     }
+    _currentAccount = ACCOUNTS[0];
   }, 60 * 1000);
 
   // Swing exit monitor — check open swing positions every 30 minutes
   setInterval(async () => {
     if (!SWING_ENABLED) return;
-    const log = loadLog();
-    const openSwings = Object.entries(log.swingPositions || {})
-      .filter(([, p]) => p && p.open)
-      .map(([sym]) => sym);
-    if (openSwings.length === 0) return;
-    console.log(`\n📈 Swing exit check — ${openSwings.join(", ")}`);
-    for (const sym of openSwings) {
-      await runSwing(sym).catch((err) => console.error(`Swing exit ${sym} error:`, err));
+    for (const account of ACCOUNTS) {
+      _currentAccount = account;
+      const log = loadLog();
+      const openSwings = Object.entries(log.swingPositions || {})
+        .filter(([, p]) => p && p.open)
+        .map(([sym]) => sym);
+      if (openSwings.length > 0) {
+        console.log(`\n📈 Swing exit check [acct${account.id}] — ${openSwings.join(", ")}`);
+        for (const sym of openSwings) {
+          await runSwing(sym).catch((err) => console.error(`Swing exit ${sym} [acct${account.id}] error:`, err));
+        }
+      }
     }
+    _currentAccount = ACCOUNTS[0];
   }, 30 * 60 * 1000);
 
   // Swing entry scan — every 4 hours (aligned with 4H candle closes)
   setInterval(async () => {
     if (!SWING_ENABLED) return;
-    console.log("\n📈 Swing entry scan (4H)...");
-    for (const sym of CONFIG.symbols) {
-      await runSwing(sym).catch((err) => console.error(`Swing scan ${sym} error:`, err));
+    for (const account of ACCOUNTS) {
+      _currentAccount = account;
+      console.log(`\n📈 Swing entry scan [acct${account.id}]...`);
+      for (const sym of CONFIG.symbols) {
+        await runSwing(sym).catch((err) => console.error(`Swing scan ${sym} [acct${account.id}] error:`, err));
+      }
     }
+    _currentAccount = ACCOUNTS[0];
   }, 4 * 60 * 60 * 1000);
 
   // Breakout exit monitor — every 15 minutes (1H candles, faster reaction than swing)
   setInterval(async () => {
     if (!SWING_ENABLED) return;
-    const log = loadLog();
-    const openBk = Object.entries(log.breakoutPositions || {})
-      .filter(([, p]) => p?.open).map(([s]) => s);
-    if (openBk.length === 0) return;
-    console.log(`\n🚀 Breakout exit check — ${openBk.join(", ")}`);
-    for (const sym of openBk) {
-      await runBreakout(sym).catch((err) => console.error(`Breakout exit ${sym} error:`, err));
+    for (const account of ACCOUNTS) {
+      _currentAccount = account;
+      const log = loadLog();
+      const openBk = Object.entries(log.breakoutPositions || {})
+        .filter(([, p]) => p?.open).map(([s]) => s);
+      if (openBk.length > 0) {
+        console.log(`\n🚀 Breakout exit check [acct${account.id}] — ${openBk.join(", ")}`);
+        for (const sym of openBk) {
+          await runBreakout(sym).catch((err) => console.error(`Breakout exit ${sym} [acct${account.id}] error:`, err));
+        }
+      }
     }
+    _currentAccount = ACCOUNTS[0];
   }, 15 * 60 * 1000);
 
   // Breakout entry scan — every 1 hour
   setInterval(async () => {
     if (!SWING_ENABLED) return;
-    for (const sym of CONFIG.symbols) {
-      await runBreakout(sym).catch((err) => console.error(`Breakout scan ${sym} error:`, err));
+    for (const account of ACCOUNTS) {
+      _currentAccount = account;
+      for (const sym of CONFIG.symbols) {
+        await runBreakout(sym).catch((err) => console.error(`Breakout scan ${sym} [acct${account.id}] error:`, err));
+      }
     }
+    _currentAccount = ACCOUNTS[0];
   }, 60 * 60 * 1000);
 
   // Check all symbols every 5 minutes (scalp entry scan + exit check)
   setInterval(async () => {
-    for (const sym of CONFIG.symbols) {
-      await run(null, sym).catch((err) => console.error(`Poll ${sym} error:`, err));
+    for (const account of ACCOUNTS) {
+      _currentAccount = account;
+      for (const sym of CONFIG.symbols) {
+        await run(null, sym).catch((err) => console.error(`Poll ${sym} [acct${account.id}] error:`, err));
+      }
     }
+    _currentAccount = ACCOUNTS[0];
   }, 5 * 60 * 1000);
 }
