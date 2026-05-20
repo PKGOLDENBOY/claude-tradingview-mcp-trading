@@ -1444,6 +1444,18 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     }
   }
 
+  // Fee gate — don't take profit if gain doesn't cover round-trip fee (0.2% buy + 0.2% sell)
+  // Hard stops (stop-loss, ATR trail, max hold) always fire regardless
+  const FEE_MIN_PCT = 0.30;
+  if (pnlPct > 0 && pnlPct < FEE_MIN_PCT) {
+    const HARD_STOPS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Failed bounce", "Momentum stop"];
+    const hardOnly = reasons.filter(r => HARD_STOPS.some(kw => r.startsWith(kw)));
+    if (hardOnly.length < reasons.length) {
+      console.log(`  ℹ️  Fee gate — holding at +${pnlPct.toFixed(2)}% (need +${FEE_MIN_PCT}% to cover fees)`);
+    }
+    reasons.splice(0, reasons.length, ...hardOnly);
+  }
+
   return { shouldExit: reasons.length > 0, reasons, newHigh };
 }
 
@@ -2513,6 +2525,12 @@ async function run(tvSignal = null, symbol = null) {
     // Only persist actual exits (order placed) — not hold decisions
     if (logEntry.orderPlaced) {
       log.trades.push(logEntry);
+      // Per-coin loss cooldown: skip re-entering a coin for 2h after a loss
+      if (pnlPct < 0) {
+        if (!log.coinCooldowns) log.coinCooldowns = {};
+        log.coinCooldowns[symbol] = { until: Date.now() + 2 * 60 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
+        console.log(`⏳ Cooldown set for ${symbol} — no re-entry for 2h (loss: ${pnlPct.toFixed(2)}%)`);
+      }
       saveLog(log);
       console.log(`\nDecision log saved → ${LOG_FILE}`);
       writeTradeCsv(logEntry);
@@ -2530,6 +2548,15 @@ async function run(tvSignal = null, symbol = null) {
     const utcHour = new Date().getUTCHours();
     if (utcHour >= 20 || utcHour < 8) {
       console.log(`🚫 OFF-HOURS BLOCK — ${utcHour}:00 UTC is outside 08:00–20:00 UTC trading window (EU + US sessions only).`);
+      console.log("═══════════════════════════════════════════════════════════\n");
+      return;
+    }
+
+    // Per-coin cooldown — skip re-entry for 2h after a loss on this coin
+    const cooldown = (log.coinCooldowns || {})[symbol];
+    if (cooldown && Date.now() < cooldown.until) {
+      const minsLeft = Math.ceil((cooldown.until - Date.now()) / 60000);
+      console.log(`⏳ COOLDOWN — ${symbol} blocked for ${minsLeft} more min (last loss: ${cooldown.pnlPct}%)`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
