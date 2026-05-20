@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: trading-bot
-    env: node
-    plan: free
-    buildCommand: npm install
-    startCommand: node bot.js
-    healthCheckPath: /health
-    autoDeploy: true
