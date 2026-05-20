@@ -2430,14 +2430,25 @@ async function run(tvSignal = null, symbol = null) {
     const HARD_EXIT_KEYWORDS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Failed bounce", "Momentum stop"];
     const hasHardExit = reasons.some(r => HARD_EXIT_KEYWORDS.some(kw => r.startsWith(kw)));
 
-    // Exit Claude calls: cap at 20/day to control API spend
-    const claudeExitCallsToday = log.trades.filter(t => t.claudeAnalysis && t.type === "exit" && t.timestamp?.startsWith(today)).length;
-    const claudeExitCapReached = claudeExitCallsToday >= 20;
+    // Pre-compute for gate checks
+    const _pnlPct = ((price - position.entryPrice) / position.entryPrice) * 100;
+    const FEE_MIN_EXIT = parseFloat((getFeePct() * 2 * 100 + 0.10).toFixed(2));
+    const heldMins = position.entryTime ? (Date.now() - new Date(position.entryTime).getTime()) / 60000 : 999;
 
-    if (hasHardExit) {
+    // Fee gate — hard block, Claude cannot override.
+    // Exiting a winning trade below fee cost locks in a guaranteed net loss.
+    if (!hasHardExit && tvSignal !== "SELL" && _pnlPct > 0 && _pnlPct < FEE_MIN_EXIT) {
+      console.log(`\n⛔ Fee gate (hard) — holding at +${_pnlPct.toFixed(2)}% | need +${FEE_MIN_EXIT}% to cover fees. Claude blocked.`);
+      finalExit = false;
+    // Minimum hold — no profit exit within 5 min of entry. Stops fee-eating micro-flips.
+    } else if (!hasHardExit && tvSignal !== "SELL" && _pnlPct > 0 && heldMins < 5) {
+      console.log(`\n⏱ Min hold — ${heldMins.toFixed(1)} min old, need 5 min before profit exit. Claude blocked.`);
+      finalExit = false;
+    // Exit Claude calls: cap at 20/day to control API spend
+    } else if (hasHardExit) {
       finalExit = true;
       console.log(`\n⚠️  Hard stop — Claude analysis skipped (${reasons.filter(r => HARD_EXIT_KEYWORDS.some(kw => r.startsWith(kw))).join(", ")})`);
-    } else if (anthropic && !claudeExitCapReached) {
+    } else if (anthropic && !((log.trades.filter(t => t.claudeAnalysis && t.type === "exit" && t.timestamp?.startsWith(today)).length) >= 20)) {
       console.log("\n── Claude AI Analysis ───────────────────────────────────\n");
       try {
         claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, position, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h: bullTrendConfirmed, vol }, symbol);
@@ -2454,8 +2465,8 @@ async function run(tvSignal = null, symbol = null) {
         console.log(`  ⚠️  Claude unavailable (${err.message}) — using rule-based decision`);
         finalExit = shouldExit;
       }
-    } else if (claudeExitCapReached) {
-      console.log(`\n💰 Claude exit cap reached (${claudeExitCallsToday}/20 today) — using rule-based decision`);
+    } else {
+      console.log(`\n💰 Claude exit cap reached (20/day) — using rule-based decision`);
     }
 
     console.log("\n── Decision ─────────────────────────────────────────────\n");
