@@ -117,7 +117,7 @@ const LOG_FILE = "safety-check-log.json";
 // ─── Multi-account support ────────────────────────────────────────────────────
 const ACCOUNTS = [
   {
-    id: 1,
+    id: 1, exchange: "bitget",
     apiKey:     process.env.BITGET_API_KEY,
     secretKey:  process.env.BITGET_SECRET_KEY,
     passphrase: process.env.BITGET_PASSPHRASE,
@@ -126,13 +126,22 @@ const ACCOUNTS = [
     logFile:    "safety-check-log.json",
   },
   ...(process.env.BITGET_API_KEY_2 ? [{
-    id: 2,
+    id: 2, exchange: "bitget",
     apiKey:     process.env.BITGET_API_KEY_2,
     secretKey:  process.env.BITGET_SECRET_KEY_2,
     passphrase: process.env.BITGET_PASSPHRASE_2,
     baseUrl:    process.env.BITGET_BASE_URL || "https://api.bitget.com",
     portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD_2 || process.env.PORTFOLIO_VALUE_USD || "1000"),
     logFile:    "safety-check-log-2.json",
+  }] : []),
+  ...(process.env.BITMART_API_KEY ? [{
+    id: "BM", exchange: "bitmart",
+    apiKey:     process.env.BITMART_API_KEY,
+    secretKey:  process.env.BITMART_SECRET_KEY,
+    memo:       process.env.BITMART_MEMO,
+    baseUrl:    "https://api-cloud.bitmart.com",
+    portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD_BITMART || process.env.PORTFOLIO_VALUE_USD || "1000"),
+    logFile:    "safety-check-log-bitmart.json",
   }] : []),
 ];
 
@@ -1639,13 +1648,93 @@ async function getSpotBalance(coin) {
   return parseFloat(asset?.available ?? "0");
 }
 
+// ─── BitMart Exchange ─────────────────────────────────────────────────────────
+
+// BitMart symbols use underscores: BTCUSDT → BTC_USDT
+function toBitMartSymbol(symbol) {
+  return symbol.endsWith("USDT") ? symbol.slice(0, -4) + "_USDT" : symbol;
+}
+
+function signBitMart(timestamp, body = "") {
+  const message = `${timestamp}#${acct().memo}#${body}`;
+  return crypto.createHmac("sha256", acct().secretKey).update(message).digest("hex");
+}
+
+async function getBitMartBalance(coin) {
+  const timestamp = Date.now().toString();
+  const sign = signBitMart(timestamp);
+  const res = await fetch(`${acct().baseUrl}/account/v1/wallet`, {
+    headers: { "X-BM-KEY": acct().apiKey, "X-BM-SIGN": sign, "X-BM-TIMESTAMP": timestamp },
+  });
+  const data = await res.json();
+  if (data.code !== 1000) throw new Error(`BitMart balance error: ${data.message}`);
+  const asset = data.data?.wallet?.find(w => w.id === coin);
+  return parseFloat(asset?.available ?? "0");
+}
+
+async function placeBitMartOrder(symbol, side, sizeUSD, price, quantityOverride = null) {
+  const bmSymbol = toBitMartSymbol(symbol);
+  const timestamp = Date.now().toString();
+
+  let bodyObj;
+  if (side === "buy") {
+    bodyObj = { symbol: bmSymbol, side: "buy", type: "market", notional: sizeUSD.toFixed(2) };
+  } else {
+    const baseCoin = symbol.replace("USDT", "");
+    const qty = quantityOverride ?? await getBitMartBalance(baseCoin);
+    if (parseFloat(qty) <= 0) throw new Error(`No ${baseCoin} balance to sell on BitMart`);
+    bodyObj = { symbol: bmSymbol, side: "sell", type: "market", size: parseFloat(qty).toFixed(6) };
+  }
+
+  const body = JSON.stringify(bodyObj);
+  const sign = signBitMart(timestamp, body);
+  const res = await fetch(`${acct().baseUrl}/spot/v1/submit_order`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-BM-KEY": acct().apiKey, "X-BM-SIGN": sign, "X-BM-TIMESTAMP": timestamp },
+    body,
+  });
+  const data = await res.json();
+  if (data.code !== 1000) throw new Error(`BitMart order failed: ${data.message}`);
+
+  if (side === "buy") {
+    const baseCoin = symbol.replace("USDT", "");
+    const balBefore = await getBitMartBalance(baseCoin);
+    let received = 0;
+    for (const delay of [3000, 4000, 5000]) {
+      await new Promise(r => setTimeout(r, delay));
+      received = (await getBitMartBalance(baseCoin)) - balBefore;
+      if (received > 0) break;
+    }
+    const estimatedQty = sizeUSD / price;
+    if (received < estimatedQty * 0.90) {
+      console.log(`⚠️  BitMart balance uncertain — using estimated qty ${estimatedQty.toFixed(6)} ${baseCoin}`);
+      return { orderId: data.data?.order_id, confirmedQty: estimatedQty };
+    }
+    console.log(`✅ BitMart balance confirmed: +${received.toFixed(6)} ${baseCoin}`);
+    return { orderId: data.data?.order_id, confirmedQty: received };
+  }
+  return { orderId: data.data?.order_id };
+}
+
+// ─── Exchange-agnostic wrappers ───────────────────────────────────────────────
+
+async function getBalance(coin) {
+  return acct().exchange === "bitmart" ? getBitMartBalance(coin) : getSpotBalance(coin);
+}
+
+async function placeOrder(symbol, side, sizeUSD, price, quantityOverride = null) {
+  return acct().exchange === "bitmart"
+    ? placeBitMartOrder(symbol, side, sizeUSD, price, quantityOverride)
+    : placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride);
+}
+
 async function syncPortfolioBalance(log) {
   if (CONFIG.paperTrading) return;
   try {
-    const balance = await getSpotBalance("USDT");
+    const balance = await getBalance("USDT");
     if (balance > 0) {
       log.portfolioValue = balance;
-      console.log(`🔄 Portfolio synced from BitGet: $${balance.toFixed(4)} USDT`);
+      console.log(`🔄 Portfolio synced from ${acct().exchange}: $${balance.toFixed(4)} USDT`);
     }
   } catch (e) {
     console.log(`⚠️ Balance sync failed: ${e.message}`);
@@ -1654,12 +1743,14 @@ async function syncPortfolioBalance(log) {
 
 const _symbolPrecisionCache = {};
 async function getQuantityPrecision(symbol) {
-  if (_symbolPrecisionCache[symbol] !== undefined) return _symbolPrecisionCache[symbol];
+  if (acct().exchange === "bitmart") return 6; // BitMart: default precision
+  const cacheKey = symbol + acct().id;
+  if (_symbolPrecisionCache[cacheKey] !== undefined) return _symbolPrecisionCache[cacheKey];
   try {
     const res = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`);
     const data = await res.json();
     const precision = parseInt(data.data?.[0]?.quantityPrecision ?? "6", 10);
-    _symbolPrecisionCache[symbol] = precision;
+    _symbolPrecisionCache[cacheKey] = precision;
     return precision;
   } catch {
     return 6;
@@ -1852,7 +1943,7 @@ function writeTradeCsv(logEntry) {
   const row = [
     date,
     time,
-    "BitGet",
+    acct().exchange === "bitmart" ? "BitMart" : "BitGet",
     logEntry.symbol,
     side,
     quantity,
@@ -1972,7 +2063,7 @@ async function checkLiveHardStops() {
     try {
       const pnlUSD = (livePrice - pos.entryPrice) * parseFloat(pos.quantity);
       if (!CONFIG.paperTrading) {
-        const order = await placeBitGetOrder(sym, "sell", null, livePrice, pos.quantity);
+        const order = await placeOrder(sym, "sell", null, livePrice, pos.quantity);
         console.log(`✅ STOP SELL — ${order.orderId}`);
       } else {
         console.log(`📋 PAPER STOP SELL`);
@@ -2274,7 +2365,7 @@ async function run(tvSignal = null, symbol = null) {
         console.log(`📋 PAPER PARTIAL SELL — ${halfQty.toFixed(6)} @ $${price.toFixed(2)}`);
       } else {
         try {
-          const pOrder = await placeBitGetOrder(symbol, "sell", null, price, halfQty.toFixed(6));
+          const pOrder = await placeOrder(symbol, "sell", null, price, halfQty.toFixed(6));
           partialOrderId = pOrder.orderId;
           partialOk = true;
           console.log(`✅ PARTIAL SELL PLACED — ${pOrder.orderId}`);
@@ -2404,7 +2495,7 @@ async function run(tvSignal = null, symbol = null) {
       } else {
         console.log(`\n🔴 PLACING LIVE SELL — ${position.quantity} ${symbol}`);
         try {
-          const order = await placeBitGetOrder(symbol, "sell", null, price, position.quantity);
+          const order = await placeOrder(symbol, "sell", null, price, position.quantity);
           logEntry.orderPlaced = true;
           logEntry.orderId = order.orderId;
           log.positions = { ...(log.positions || {}), [symbol]: null };
@@ -2661,7 +2752,7 @@ async function run(tvSignal = null, symbol = null) {
       } else {
         console.log(`\n🔴 PLACING LIVE MOMENTUM ORDER — $${tradeSize.toFixed(2)} BUY ${symbol}`);
         try {
-          const order = await placeBitGetOrder(symbol, "buy", tradeSize, price);
+          const order = await placeOrder(symbol, "buy", tradeSize, price);
           const actualQty = order.confirmedQty ?? (tradeSize / price);
           momEntry.orderPlaced = true;
           momEntry.orderId = order.orderId;
@@ -2964,7 +3055,7 @@ async function run(tvSignal = null, symbol = null) {
           let order = await placeLimitBuyWithFallback(symbol, finalTradeSize, price);
           if (!order) {
             console.log(`  Falling back to market order...`);
-            order = await placeBitGetOrder(symbol, "buy", finalTradeSize, price);
+            order = await placeOrder(symbol, "buy", finalTradeSize, price);
           }
           const actualQty = order.confirmedQty ?? (finalTradeSize / price);
           logEntry.orderPlaced = true;
@@ -3176,7 +3267,7 @@ if (process.argv.includes("--tax-summary")) {
         const partialQty = parseFloat(swingPos.quantity) * SWING.partialQty;
         console.log(`\n📈 SWING PARTIAL TP — ${symbol} +${pnlPct.toFixed(2)}% | selling 30%`);
         if (!CONFIG.paperTrading) {
-          try { await placeBitGetOrder(symbol, "sell", null, price, partialQty.toFixed(6)); }
+          try { await placeOrder(symbol, "sell", null, price, partialQty.toFixed(6)); }
           catch (e) { console.log(`  ⚠️ Partial failed: ${e.message}`); }
         }
         swingPos.quantity = (parseFloat(swingPos.quantity) - partialQty).toFixed(6);
@@ -3209,7 +3300,7 @@ if (process.argv.includes("--tax-summary")) {
         console.log(`   P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% ($${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(4)}) | Held ${holdH.toFixed(1)}h`);
 
         if (!CONFIG.paperTrading) {
-          try { await placeBitGetOrder(symbol, "sell", null, price, swingPos.quantity); }
+          try { await placeOrder(symbol, "sell", null, price, swingPos.quantity); }
           catch (e) { console.log(`❌ SWING SELL FAILED — ${e.message}`); return; }
         } else {
           console.log(`📋 PAPER SWING SELL — ${swingPos.quantity} ${symbol} @ $${price.toFixed(4)}`);
@@ -3289,7 +3380,7 @@ if (process.argv.includes("--tax-summary")) {
 
     if (!CONFIG.paperTrading) {
       try {
-        const order = await placeBitGetOrder(symbol, "buy", swingSize, price);
+        const order = await placeOrder(symbol, "buy", swingSize, price);
         qty = order.confirmedQty ?? qty;
         orderId = order.orderId;
         console.log(`✅ SWING ORDER PLACED — ${orderId} | qty:${qty.toFixed(6)}`);
@@ -3376,7 +3467,7 @@ if (process.argv.includes("--tax-summary")) {
         const pnlUSD = (price - bkPos.entryPrice) * parseFloat(bkPos.quantity);
         console.log(`\n🚀 BREAKOUT EXIT — ${symbol} | ${exitReasons.join(" | ")} | P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`);
         if (!CONFIG.paperTrading) {
-          try { await placeBitGetOrder(symbol, "sell", null, price, bkPos.quantity); }
+          try { await placeOrder(symbol, "sell", null, price, bkPos.quantity); }
           catch (e) { console.log(`❌ BREAKOUT SELL FAILED — ${e.message}`); return; }
         } else {
           console.log(`📋 PAPER BREAKOUT SELL — ${bkPos.quantity} ${symbol} @ $${price.toFixed(4)}`);
@@ -3455,7 +3546,7 @@ if (process.argv.includes("--tax-summary")) {
     let orderId = `PAPER-BK-${Date.now()}`;
     if (!CONFIG.paperTrading) {
       try {
-        const order = await placeBitGetOrder(symbol, "buy", bkSize, price);
+        const order = await placeOrder(symbol, "buy", bkSize, price);
         qty = order.confirmedQty ?? qty;
         orderId = order.orderId;
         console.log(`✅ BREAKOUT ORDER — ${orderId} | qty:${qty.toFixed(6)}`);
