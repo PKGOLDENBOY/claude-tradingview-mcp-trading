@@ -152,7 +152,7 @@ const acct = () => _currentAccount;
 // Per-side taker fee rate for the active exchange.
 // BitGet spot: 0.10% | BitMart spot: 0.25%
 function getFeePct() {
-  return acct().exchange === "bitmart" ? 0.0025 : 0.0010;
+  return acct().exchange === "bitmart" ? 0.0025 : 0.0008;
 }
 
 // ─── Swing Trading Config ────────────────────────────────────────────────────
