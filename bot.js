@@ -97,7 +97,7 @@ const CONFIG = {
   portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD || "1000"),
   maxTradeSizePct: (() => { const v = process.env.MAX_TRADE_SIZE_USD || "25%"; return v.trim().endsWith("%") ? parseFloat(v) / 100 : null; })(),
   maxTradeSizeUSD: (() => { const v = process.env.MAX_TRADE_SIZE_USD || "25%"; return v.trim().endsWith("%") ? null : parseFloat(v); })(),
-  maxTradesPerDay: parseInt(process.env.MAX_TRADES_PER_DAY || "3"),
+  maxTradesPerDay: Math.min(parseInt(process.env.MAX_TRADES_PER_DAY || "20"), 20),
   paperTrading: process.env.PAPER_TRADING !== "false",
   tradeMode: process.env.TRADE_MODE || "spot",
   bitget: {
@@ -1405,14 +1405,15 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     const slPrice = position.entryPrice * (1 - slPct);
     check(`Stop-loss hit — $${slPrice.toFixed(4)} (-${(slPct*100).toFixed(0)}%${position.bearMarket ? " bear market" : ""})`, price <= slPrice);
 
-    // RSI overbought — exit before momentum fully exhausts (captures more of the move)
-    check(`RSI(3) overbought > 80 | Actual: ${rsi3.toFixed(2)}`, rsi3 > 80);
-    // StochRSI exit requires confirmation — don't exit on StochRSI alone if P&L < 1% (let winners run)
+    // Soft exits — only fire once gain is meaningful (>= 0.50%). Prevents exiting at
+    // +0.08% which is a net loss after 0.16% round-trip fees.
+    const SOFT_MIN = 0.50;
+    check(`RSI(3) overbought > 80 | Actual: ${rsi3.toFixed(2)}`, rsi3 > 80 && pnlPct >= SOFT_MIN);
     if (stochRsi) {
-      const stochExitOk = stochRsi.overbought && (pnlPct >= 1.0 || rsi3 > 70 || (sr?.nearResistance ?? false));
-      check(`StochRSI overbought > 80 | K=${stochRsi.k.toFixed(1)}${stochRsi.overbought && !stochExitOk ? " (holding — P&L < 1% and not at resistance)" : ""}`, stochExitOk);
+      const stochExitOk = stochRsi.overbought && (pnlPct >= 1.0 || (rsi3 > 85 && pnlPct >= SOFT_MIN) || (sr?.nearResistance && pnlPct >= SOFT_MIN));
+      check(`StochRSI overbought > 80 | K=${stochRsi.k.toFixed(1)}${stochRsi.overbought && !stochExitOk ? ` (holding — P&L ${pnlPct.toFixed(2)}% < ${SOFT_MIN}% min)` : ""}`, stochExitOk);
     }
-    if (bb) check(`BB% > 0.85 (at upper band) | BB%=${bb.pct.toFixed(2)}`, bb.pct > 0.85);
+    if (bb) check(`BB% > 0.85 (at upper band) | BB%=${bb.pct.toFixed(2)}`, bb.pct > 0.85 && pnlPct >= SOFT_MIN);
     // Snap-back entries start below VWAP deliberately — "trend reversed" doesn't apply.
     // Dynamic TP: exit RSI threshold shifts based on distance to resistance
     if (position.entryType === "snapback") {
@@ -1425,7 +1426,7 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
       } else {
         snapRsiExit = 55; snapLabel = `RSI(3) recovered above 55 — snap-back complete`;
       }
-      check(snapLabel, rsi3 > snapRsiExit);
+      check(snapLabel, rsi3 > snapRsiExit && pnlPct >= SOFT_MIN);
     } else {
       // Failed bounce — entered expecting snap-back but price kept falling with bearish momentum
       if (pnlPct < -1.5 && macd && !macd.bullish) {
@@ -2427,7 +2428,7 @@ async function run(tvSignal = null, symbol = null) {
     let claudeAnalysis = null;
 
     // Hard stops are non-negotiable — Claude cannot override these
-    const HARD_EXIT_KEYWORDS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Failed bounce", "Momentum stop"];
+    const HARD_EXIT_KEYWORDS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Failed bounce", "Momentum stop", "Trend reversed"];
     const hasHardExit = reasons.some(r => HARD_EXIT_KEYWORDS.some(kw => r.startsWith(kw)));
 
     // Pre-compute for gate checks
@@ -2575,6 +2576,19 @@ async function run(tvSignal = null, symbol = null) {
     if (cooldown && Date.now() < cooldown.until) {
       const minsLeft = Math.ceil((cooldown.until - Date.now()) / 60000);
       console.log(`⏳ COOLDOWN — ${symbol} blocked for ${minsLeft} more min (last loss: ${cooldown.pnlPct}%)`);
+      console.log("═══════════════════════════════════════════════════════════\n");
+      return;
+    }
+
+    // Daily coin blacklist — after 2 losses on same coin today, skip for the rest of the day
+    const todayLosses = log.trades.filter(t =>
+      t.type === "exit" && t.orderPlaced &&
+      t.symbol === symbol &&
+      t.timestamp?.startsWith(today) &&
+      (t.pnlPct ?? 0) < 0
+    ).length;
+    if (todayLosses >= 2) {
+      console.log(`🚫 DAILY BLOCK — ${symbol} has lost ${todayLosses}x today. Skipping for rest of day.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
