@@ -149,6 +149,12 @@ const ACCOUNTS = [
 let _currentAccount = ACCOUNTS[0];
 const acct = () => _currentAccount;
 
+// Per-side taker fee rate for the active exchange.
+// BitGet spot: 0.10% | BitMart spot: 0.25%
+function getFeePct() {
+  return acct().exchange === "bitmart" ? 0.0025 : 0.0010;
+}
+
 // ─── Swing Trading Config ────────────────────────────────────────────────────
 const SWING_ENABLED = process.env.SWING_TRADING !== "false"; // on by default
 const SWING = {
@@ -1444,9 +1450,10 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     }
   }
 
-  // Fee gate — don't take profit if gain doesn't cover round-trip fee (0.2% buy + 0.2% sell)
+  // Fee gate — don't take profit if gain doesn't cover round-trip fee + small buffer.
+  // BitGet: 0.10% × 2 + 0.10 buffer = 0.30% | BitMart: 0.25% × 2 + 0.10 = 0.60%
   // Hard stops (stop-loss, ATR trail, max hold) always fire regardless
-  const FEE_MIN_PCT = 0.30;
+  const FEE_MIN_PCT = parseFloat((getFeePct() * 2 * 100 + 0.10).toFixed(2));
   if (pnlPct > 0 && pnlPct < FEE_MIN_PCT) {
     const HARD_STOPS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Failed bounce", "Momentum stop"];
     const hardOnly = reasons.filter(r => HARD_STOPS.some(kw => r.startsWith(kw)));
@@ -1918,8 +1925,8 @@ function writeTradeCsv(logEntry) {
       side = "SELL";
       quantity = logEntry.quantity;
       totalUSD = val.toFixed(2);
-      fee = (val * 0.001).toFixed(4);
-      netAmount = (val - val * 0.001).toFixed(2);
+      fee = (val * getFeePct()).toFixed(4);
+      netAmount = (val - val * getFeePct()).toFixed(2);
       orderId = logEntry.orderId || "";
       mode = logEntry.paperTrading ? "PAPER" : "LIVE";
       notes = claudeTag ?? `Exit: ${logEntry.exitReasons?.join("; ")}${pnlStr}`;
@@ -3407,7 +3414,10 @@ if (process.argv.includes("--tax-summary")) {
 
     if (!CONFIG.paperTrading) {
       try {
-        const order = await placeOrder(symbol, "buy", swingSize, price);
+        let order = acct().exchange === "bitget"
+          ? await placeLimitBuyWithFallback(symbol, swingSize, price)
+          : null;
+        if (!order) order = await placeOrder(symbol, "buy", swingSize, price);
         qty = order.confirmedQty ?? qty;
         orderId = order.orderId;
         console.log(`✅ SWING ORDER PLACED — ${orderId} | qty:${qty.toFixed(6)}`);
@@ -3573,7 +3583,10 @@ if (process.argv.includes("--tax-summary")) {
     let orderId = `PAPER-BK-${Date.now()}`;
     if (!CONFIG.paperTrading) {
       try {
-        const order = await placeOrder(symbol, "buy", bkSize, price);
+        let order = acct().exchange === "bitget"
+          ? await placeLimitBuyWithFallback(symbol, bkSize, price)
+          : null;
+        if (!order) order = await placeOrder(symbol, "buy", bkSize, price);
         qty = order.confirmedQty ?? qty;
         orderId = order.orderId;
         console.log(`✅ BREAKOUT ORDER — ${orderId} | qty:${qty.toFixed(6)}`);
