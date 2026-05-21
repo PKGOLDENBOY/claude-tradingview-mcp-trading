@@ -1365,7 +1365,7 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
   const trailingStop = newHigh * (1 - trailPct);
 
   // Break-even floor — once up 1.5%, stop floors at entry price
-  const breakEvenActive = newHigh >= position.entryPrice * 1.015;
+  const breakEvenActive = newHigh >= position.entryPrice * 1.020;
   const effectiveStop = breakEvenActive ? Math.max(trailingStop, position.entryPrice) : trailingStop;
 
   console.log("\n── Exit Check ───────────────────────────────────────────\n");
@@ -1405,26 +1405,26 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     const slPrice = position.entryPrice * (1 - slPct);
     check(`Stop-loss hit — $${slPrice.toFixed(4)} (-${(slPct*100).toFixed(0)}%${position.bearMarket ? " bear market" : ""})`, price <= slPrice);
 
-    // Soft exits — only fire once gain is meaningful (>= 0.50%). Prevents exiting at
-    // +0.08% which is a net loss after 0.16% round-trip fees.
-    const SOFT_MIN = 0.50;
-    check(`RSI(3) overbought > 80 | Actual: ${rsi3.toFixed(2)}`, rsi3 > 80 && pnlPct >= SOFT_MIN);
+    // Soft exits — only fire once gain is meaningful. Prevents fee-losing exits.
+    // SOFT_MIN = 0.75%: hold through weak overbought signals, extract more from winners.
+    const SOFT_MIN = 0.75;
+    check(`RSI(3) overbought > 85 | Actual: ${rsi3.toFixed(2)}`, rsi3 > 85 && pnlPct >= SOFT_MIN);
     if (stochRsi) {
-      const stochExitOk = stochRsi.overbought && (pnlPct >= 1.0 || (rsi3 > 85 && pnlPct >= SOFT_MIN) || (sr?.nearResistance && pnlPct >= SOFT_MIN));
-      check(`StochRSI overbought > 80 | K=${stochRsi.k.toFixed(1)}${stochRsi.overbought && !stochExitOk ? ` (holding — P&L ${pnlPct.toFixed(2)}% < ${SOFT_MIN}% min)` : ""}`, stochExitOk);
+      const stochExitOk = stochRsi.overbought && (pnlPct >= 1.5 || (rsi3 > 90 && pnlPct >= SOFT_MIN) || (sr?.nearResistance && pnlPct >= SOFT_MIN));
+      check(`StochRSI overbought > 80 | K=${stochRsi.k.toFixed(1)}${stochRsi.overbought && !stochExitOk ? ` (holding — P&L ${pnlPct.toFixed(2)}% < min)` : ""}`, stochExitOk);
     }
-    if (bb) check(`BB% > 0.85 (at upper band) | BB%=${bb.pct.toFixed(2)}`, bb.pct > 0.85 && pnlPct >= SOFT_MIN);
+    if (bb) check(`BB% > 0.92 (at upper band) | BB%=${bb.pct.toFixed(2)}`, bb.pct > 0.92 && pnlPct >= SOFT_MIN);
     // Snap-back entries start below VWAP deliberately — "trend reversed" doesn't apply.
     // Dynamic TP: exit RSI threshold shifts based on distance to resistance
     if (position.entryType === "snapback") {
       const distToRes = sr?.distToResistance ?? null;
       let snapRsiExit, snapLabel;
       if (distToRes !== null && distToRes < 1.5) {
-        snapRsiExit = 65; snapLabel = `RSI(3) > 65 — near resistance ($${sr.nearestResistance?.toFixed(2)}, ${distToRes.toFixed(1)}% away)`;
+        snapRsiExit = 72; snapLabel = `RSI(3) > 72 — near resistance ($${sr.nearestResistance?.toFixed(2)}, ${distToRes.toFixed(1)}% away)`;
       } else if (distToRes !== null && distToRes > 5) {
-        snapRsiExit = 70; snapLabel = `RSI(3) > 70 — room to run (resistance ${distToRes.toFixed(1)}% away), holding longer`;
+        snapRsiExit = 80; snapLabel = `RSI(3) > 80 — room to run (resistance ${distToRes.toFixed(1)}% away), holding longer`;
       } else {
-        snapRsiExit = 55; snapLabel = `RSI(3) recovered above 55 — snap-back complete`;
+        snapRsiExit = 68; snapLabel = `RSI(3) recovered above 68 — snap-back complete`;
       }
       check(snapLabel, rsi3 > snapRsiExit && pnlPct >= SOFT_MIN);
     } else {
@@ -2370,7 +2370,7 @@ async function run(tvSignal = null, symbol = null) {
     // The remaining 50% rides with a tight trail to capture larger moves.
     // This is the single most impactful technique for improving R:R ratio.
     const livePnlPct = ((price - position.entryPrice) / position.entryPrice) * 100;
-    if (!position.partialExitDone && livePnlPct >= 1.5) {
+    if (!position.partialExitDone && livePnlPct >= 2.5) {
       const originalQty = parseFloat(position.quantity);
       const halfQty = originalQty * 0.5;
       const partialPnlUSD = (price - position.entryPrice) * halfQty;
