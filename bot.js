@@ -1761,6 +1761,57 @@ async function syncPortfolioBalance(log) {
   }
 }
 
+// On Railway, the log is wiped on every redeploy. This function re-discovers any
+// open positions by comparing actual BitGet balances against the log.
+async function reconcilePositions(log) {
+  if (CONFIG.paperTrading || acct().exchange !== "bitget") return;
+  try {
+    const ts = Date.now().toString();
+    const path = "/api/v2/spot/account/assets";
+    const sign = signBitGet(ts, "GET", path);
+    const res = await fetch(`${acct().baseUrl}${path}`, {
+      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" }
+    });
+    const data = await res.json();
+    if (!data.data) return;
+
+    const priceRes = await fetch("https://api.bitget.com/api/v2/spot/market/tickers");
+    const priceData = await priceRes.json();
+    const prices = Object.fromEntries((priceData.data || []).map(t => [t.symbol, parseFloat(t.lastPr)]));
+
+    if (!log.positions) log.positions = {};
+    let found = 0;
+
+    for (const asset of data.data) {
+      const qty = parseFloat(asset.available) + parseFloat(asset.frozen || 0);
+      if (asset.coin === "USDT" || qty < 0.0001) continue;
+      const symbol = asset.coin + "USDT";
+      const price = prices[symbol];
+      if (!price) continue;
+      const usdValue = qty * price;
+      if (usdValue < 5) continue; // skip dust < $5
+
+      if (!log.positions[symbol]?.open) {
+        console.log(`🔄 Reconcile: ${qty.toFixed(6)} ${asset.coin} ($${usdValue.toFixed(2)}) not in log — tracking as open position`);
+        log.positions[symbol] = {
+          open: true, side: "long",
+          entryPrice: price,
+          highWatermark: price,
+          entryTime: new Date().toISOString(),
+          quantity: qty.toFixed(6),
+          orderId: "reconciled",
+          entryType: "reconciled",
+        };
+        found++;
+      }
+    }
+    if (found > 0) { saveLog(log); console.log(`🔄 Reconciled ${found} position(s) from BitGet balances`); }
+    else console.log(`🔄 Position reconciliation: log matches BitGet balances`);
+  } catch (err) {
+    console.log(`⚠️ Position reconciliation failed: ${err.message}`);
+  }
+}
+
 const _symbolPrecisionCache = {};
 async function getQuantityPrecision(symbol) {
   if (acct().exchange === "bitmart") return 6; // BitMart: default precision
@@ -3653,10 +3704,12 @@ if (process.argv.includes("--tax-summary")) {
 
       for (const account of ACCOUNTS) {
         _currentAccount = account;
-        // Startup balance sync
+        // Startup balance sync + position reconciliation
+        // Reconciliation re-discovers open positions after Railway log wipe
         if (!CONFIG.paperTrading) {
           const startLog = loadLog();
           await syncPortfolioBalance(startLog);
+          await reconcilePositions(startLog);
           saveLog(startLog);
         }
         console.log(`\n👛 Account ${account.id} — initial scan`);
