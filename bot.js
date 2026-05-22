@@ -85,7 +85,8 @@ const SWING_BACKTEST = {}; // in-memory cache, 24h TTL
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
-const WATCHLIST = (process.env.WATCHLIST || "")
+const WATCHLIST = (process.env.WATCHLIST || process.env.SYMBOLS || "")
+  .replace(/^SYMBOLS=/i, "")
   .split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
 
 const CONFIG = {
