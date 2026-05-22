@@ -16,6 +16,106 @@ import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import WebSocket from "ws";
+import nodemailer from "nodemailer";
+
+// ─── Email notifications ──────────────────────────────────────────────────────
+
+const EMAIL_TO = process.env.NOTIFY_EMAIL || "joshualiversage01@gmail.com";
+let _mailer = null;
+
+function getMailer() {
+  if (_mailer) return _mailer;
+  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) return null;
+  _mailer = nodemailer.createTransport({
+    service: "gmail",
+    auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
+  });
+  return _mailer;
+}
+
+async function sendEmail(subject, html) {
+  const mailer = getMailer();
+  if (!mailer) return;
+  try {
+    await mailer.sendMail({ from: `"Trading Bot 🤖" <${process.env.GMAIL_USER}>`, to: EMAIL_TO, subject, html });
+    console.log(`📧 Email sent: ${subject}`);
+  } catch (e) {
+    console.log(`📧 Email failed: ${e.message}`);
+  }
+}
+
+function emailEntry({ symbol, price, tradeSize, orderId }) {
+  const coin = symbol.replace("USDT", "");
+  return sendEmail(
+    `📈 ENTRY — ${coin} @ $${price.toFixed(4)}`,
+    `<h2 style="color:#16a34a">📈 New Position Opened</h2>
+     <table style="font-size:16px;line-height:1.8">
+       <tr><td><b>Coin</b></td><td>${coin}</td></tr>
+       <tr><td><b>Entry Price</b></td><td>$${price.toFixed(4)}</td></tr>
+       <tr><td><b>Size</b></td><td>$${tradeSize.toFixed(2)}</td></tr>
+       <tr><td><b>Order ID</b></td><td>${orderId}</td></tr>
+       <tr><td><b>Time</b></td><td>${new Date().toUTCString()}</td></tr>
+     </table>`
+  );
+}
+
+function emailExit({ symbol, price, entryPrice, pnlPct, pnlUSD, reasons, orderId }) {
+  const coin = symbol.replace("USDT", "");
+  const won = pnlPct >= 0;
+  const icon = won ? "✅" : "❌";
+  const color = won ? "#16a34a" : "#dc2626";
+  return sendEmail(
+    `${icon} EXIT — ${coin} ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% ($${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(2)})`,
+    `<h2 style="color:${color}">${icon} Position Closed — ${won ? "WIN" : "LOSS"}</h2>
+     <table style="font-size:16px;line-height:1.8">
+       <tr><td><b>Coin</b></td><td>${coin}</td></tr>
+       <tr><td><b>Entry</b></td><td>$${entryPrice.toFixed(4)}</td></tr>
+       <tr><td><b>Exit</b></td><td>$${price.toFixed(4)}</td></tr>
+       <tr><td><b>P&amp;L</b></td><td style="color:${color}"><b>${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% ($${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(2)})</b></td></tr>
+       <tr><td><b>Reason</b></td><td>${reasons?.join(", ") ?? "—"}</td></tr>
+       <tr><td><b>Order ID</b></td><td>${orderId}</td></tr>
+       <tr><td><b>Time</b></td><td>${new Date().toUTCString()}</td></tr>
+     </table>`
+  );
+}
+
+async function emailDailySummary(log) {
+  const today = new Date().toISOString().slice(0, 10);
+  const todayTrades = (log.trades || []).filter(t => t.timestamp?.startsWith(today) && t.orderPlaced);
+  const exits = todayTrades.filter(t => t.type === "exit" && t.pnlPct !== undefined);
+  const entries = todayTrades.filter(t => t.type === "entry");
+  const wins = exits.filter(t => t.pnlPct > 0).length;
+  const losses = exits.filter(t => t.pnlPct <= 0).length;
+  const totalPnlPct = exits.reduce((s, t) => s + t.pnlPct, 0);
+  const totalPnlUSD = exits.reduce((s, t) => s + (t.pnlUSD || 0), 0);
+  const portfolioVal = log.portfolioValue || 0;
+
+  const rows = exits.map(t => {
+    const won = t.pnlPct >= 0;
+    return `<tr>
+      <td>${t.symbol?.replace("USDT","")}</td>
+      <td style="color:${won?"#16a34a":"#dc2626"}">${t.pnlPct >= 0?"+":""}${t.pnlPct.toFixed(2)}%</td>
+      <td style="color:${won?"#16a34a":"#dc2626"}">${t.pnlUSD >= 0?"+":""}$${(t.pnlUSD||0).toFixed(2)}</td>
+    </tr>`;
+  }).join("");
+
+  await sendEmail(
+    `📊 Daily Summary — ${wins}W/${losses}L | ${totalPnlPct >= 0 ? "+" : ""}${totalPnlPct.toFixed(2)}% | $${portfolioVal.toFixed(2)} portfolio`,
+    `<h2>📊 Daily Trading Summary — ${today}</h2>
+     <table style="font-size:16px;line-height:1.8">
+       <tr><td><b>Entries</b></td><td>${entries.length}</td></tr>
+       <tr><td><b>Exits</b></td><td>${exits.length} (${wins}W / ${losses}L)</td></tr>
+       <tr><td><b>Total P&amp;L</b></td><td style="color:${totalPnlPct>=0?"#16a34a":"#dc2626"}"><b>${totalPnlPct>=0?"+":""}${totalPnlPct.toFixed(2)}%</b></td></tr>
+       <tr><td><b>P&amp;L (USD)</b></td><td style="color:${totalPnlUSD>=0?"#16a34a":"#dc2626"}"><b>${totalPnlUSD>=0?"+":""}$${totalPnlUSD.toFixed(2)}</b></td></tr>
+       <tr><td><b>Portfolio</b></td><td>$${portfolioVal.toFixed(2)}</td></tr>
+     </table>
+     ${exits.length > 0 ? `<h3>Trade breakdown</h3>
+     <table border="1" cellpadding="6" style="border-collapse:collapse;font-size:14px">
+       <tr><th>Coin</th><th>P&amp;L %</th><th>P&amp;L $</th></tr>
+       ${rows}
+     </table>` : ""}`
+  );
+}
 
 // Real-time price cache — updated by WebSocket stream, consumed by hard-stop monitor
 const livePrices = new Map(); // symbol → { price, timestamp }
@@ -2034,6 +2134,14 @@ function writeTradeCsv(logEntry) {
 
   appendFileSync(CSV_FILE, row + "\n");
   console.log(`Tax record saved → ${CSV_FILE}`);
+
+  if (mode === "LIVE") {
+    if (side === "BUY") {
+      emailEntry({ symbol: logEntry.symbol, price: logEntry.price, tradeSize: logEntry.tradeSize, orderId: logEntry.orderId || "" });
+    } else if (side === "SELL" && logEntry.pnlPct !== undefined) {
+      emailExit({ symbol: logEntry.symbol, price: logEntry.price, entryPrice: logEntry.entryPrice, pnlPct: logEntry.pnlPct, pnlUSD: logEntry.pnlUSD || 0, reasons: logEntry.exitReasons, orderId: logEntry.orderId || "" });
+    }
+  }
 }
 
 // Tax summary command: node bot.js --tax-summary
@@ -3712,6 +3820,14 @@ if (process.argv.includes("--tax-summary")) {
           await syncPortfolioBalance(startLog);
           await reconcilePositions(startLog);
           saveLog(startLog);
+          sendEmail(
+            "🤖 Bot Online — Trading Started",
+            `<h2>🤖 Bot is now live</h2>
+             <p>Started at ${new Date().toUTCString()}</p>
+             <p><b>Portfolio:</b> $${(startLog.portfolioValue || 0).toFixed(2)}</p>
+             <p><b>Watching:</b> ${CONFIG.symbols.join(", ")}</p>
+             <p><b>Mode:</b> LIVE TRADING</p>`
+          );
         }
         console.log(`\n👛 Account ${account.id} — initial scan`);
         for (const sym of CONFIG.symbols) {
@@ -3735,6 +3851,15 @@ if (process.argv.includes("--tax-summary")) {
     await refreshTopMovers();
     startPriceStream(CONFIG.symbols);
   }, 4 * 60 * 60 * 1000);
+
+  // Daily summary email — fires at midnight UTC
+  setInterval(async () => {
+    const now = new Date();
+    if (now.getUTCHours() === 0 && now.getUTCMinutes() < 5) {
+      const log = loadLog();
+      await emailDailySummary(log);
+    }
+  }, 5 * 60 * 1000);
 
   // WebSocket hard-stop checker — fires every 5 seconds using live streamed prices
   setInterval(async () => {
