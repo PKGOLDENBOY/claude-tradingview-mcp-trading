@@ -3414,7 +3414,7 @@ body{font-family:'Inter',system-ui,sans-serif;color:var(--text);padding:0;max-wi
 #pin-err.show{opacity:1}
 
 /* MAIN APP */
-#main{display:none;min-height:100vh;padding-bottom:32px}
+#main{display:block;min-height:100vh;padding-bottom:32px}
 .header{padding:20px 20px 0;display:flex;align-items:center;justify-content:space-between}
 .header-left{display:flex;align-items:center;gap:10px}
 .header-logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#4f8dff,#00d4a0);display:flex;align-items:center;justify-content:center;font-size:18px}
@@ -3497,15 +3497,6 @@ body{font-family:'Inter',system-ui,sans-serif;color:var(--text);padding:0;max-wi
 </head>
 <body>
 
-<!-- PIN SCREEN (shown only if no PIN in URL) -->
-<div id="pin-screen">
-  <div class="pin-logo">📈</div>
-  <div class="pin-title">AlphaBot</div>
-  <div class="pin-sub">Open your saved link to access<br>the dashboard, or enter PIN below</div>
-  <input id="pin-input" type="number" inputmode="numeric" pattern="[0-9]*" placeholder="2026" autocomplete="off" style="width:100%;max-width:300px;padding:16px;border-radius:14px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:28px;text-align:center;font-family:inherit;outline:none;margin-top:8px">
-  <button id="pin-btn" style="width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;background:linear-gradient(135deg,#4f8dff,#3a6fd4);color:#fff;font-size:16px;font-weight:700;cursor:pointer;font-family:inherit">Unlock →</button>
-  <div id="pin-err" style="color:var(--red);font-size:13px;min-height:20px"></div>
-</div>
 
 <!-- MAIN DASHBOARD -->
 <div id="main">
@@ -3610,38 +3601,10 @@ body{font-family:'Inter',system-ui,sans-serif;color:var(--text);padding:0;max-wi
 <div id="toast"></div>
 
 <script>
-// Read PIN from URL (?pin=2026) — if present, auto-login immediately
+// PIN is already verified server-side — just read it from URL for API calls
 const PIN = new URLSearchParams(location.search).get('pin') || '';
-
-function showMain() {
-  document.getElementById('pin-screen').style.display='none';
-  document.getElementById('main').style.display='block';
-  load();
-  setInterval(load, 30000);
-}
-
-if (PIN) {
-  // PIN in URL — skip the PIN screen entirely
-  showMain();
-} else {
-  // No PIN in URL — show input form
-  document.getElementById('pin-btn').addEventListener('click', doLogin);
-  document.getElementById('pin-input').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
-}
-
-async function doLogin() {
-  const val = document.getElementById('pin-input').value.trim();
-  if (!val) return;
-  const r = await fetch('/api/status?pin=' + val).catch(() => null);
-  if (!r || !r.ok) {
-    document.getElementById('pin-err').textContent = 'Wrong PIN — try again';
-    document.getElementById('pin-input').value = '';
-    setTimeout(() => document.getElementById('pin-err').textContent = '', 2000);
-    return;
-  }
-  // Redirect to URL with PIN so it's bookmarkable
-  location.href = location.pathname + '?pin=' + val;
-}
+load();
+setInterval(load, 30000);
 
 async function apiFetch(path,method='GET'){
   const sep=path.includes('?')?'&':'?';
@@ -3930,10 +3893,28 @@ async function togglePause(){
       return;
     }
 
-    // Mobile dashboard — PIN entered in browser
+    // Mobile dashboard
     if (req.method === "GET" && path === "/") {
-      res.writeHead(200, { "Content-Type": "text/html" });
-      res.end(dashboardHTML());
+      if (checkPin(req.url)) {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(dashboardHTML());
+      } else {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AlphaBot</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,sans-serif;background:#07090f;color:#f0f2f7;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:32px;gap:20px}
+.logo{width:72px;height:72px;border-radius:20px;background:linear-gradient(135deg,#4f8dff,#00d4a0);display:flex;align-items:center;justify-content:center;font-size:36px}
+h1{font-size:26px;font-weight:800}p{color:#64748b;font-size:14px;text-align:center}
+input{width:100%;max-width:300px;padding:16px;border-radius:14px;border:1px solid #1a1f2e;background:#0e1117;color:#f0f2f7;font-size:24px;text-align:center;letter-spacing:4px;outline:none}
+button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;background:linear-gradient(135deg,#4f8dff,#3a6fd4);color:#fff;font-size:16px;font-weight:700;cursor:pointer}
+</style></head><body>
+<div class="logo">📈</div><h1>AlphaBot</h1><p>Enter your PIN</p>
+<form method="GET" action="/">
+<input name="pin" type="number" inputmode="numeric" placeholder="2026" autofocus>
+<br><br>
+<button type="submit">Open Dashboard</button>
+</form></body></html>`);
+      }
       return;
     }
 
