@@ -2871,14 +2871,17 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
 
-    // Upgrade 2: Auto-blacklist — skip coins with 2+ losses in the last 7 days
+    // Auto-blacklist — only skip a coin if it has BOTH 3+ losses in 7 days AND
+    // a win rate below 40% on recent trades. Two losses from normal variance is not enough.
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const recentLossesOnCoin = log.trades.filter(t =>
-      t.type === "exit" && t.symbol === symbol && t.orderPlaced &&
-      t.pnlPct !== undefined && t.pnlPct < -0.5 && t.timestamp > sevenDaysAgo
-    ).length;
-    if (recentLossesOnCoin >= 2) {
-      console.log(`🚫 AUTO-BLACKLIST — ${symbol} has ${recentLossesOnCoin} losses (< -0.5%) in the last 7 days. Skipping.`);
+    const recentTradesOnCoin = log.trades.filter(t =>
+      t.type === "exit" && t.symbol === symbol && t.orderPlaced && t.pnlPct !== undefined && t.timestamp > sevenDaysAgo
+    );
+    const recentLossesOnCoin = recentTradesOnCoin.filter(t => t.pnlPct < -0.5).length;
+    const recentWinsOnCoin   = recentTradesOnCoin.filter(t => t.pnlPct > 0).length;
+    const recentWrOnCoin     = recentTradesOnCoin.length > 0 ? recentWinsOnCoin / recentTradesOnCoin.length : 1;
+    if (recentLossesOnCoin >= 3 && recentWrOnCoin < 0.40) {
+      console.log(`🚫 AUTO-BLACKLIST — ${symbol}: ${recentLossesOnCoin} losses in 7 days with ${(recentWrOnCoin*100).toFixed(0)}% win rate. Genuinely bad edge — skipping.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
