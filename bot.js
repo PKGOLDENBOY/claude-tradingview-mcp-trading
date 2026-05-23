@@ -129,6 +129,9 @@ function pushSignal(symbol, result, reason, indicators = {}) {
   if (signalLog.length > 60) signalLog.shift();
 }
 
+// Dashboard pause flag — toggled via /api/pause and /api/resume
+let _tradingPaused = false;
+
 // ─── Onboarding ───────────────────────────────────────────────────────────────
 
 function checkOnboarding() {
@@ -3336,7 +3339,6 @@ if (process.argv.includes("--tax-summary")) {
 
   // ─── Dashboard PIN ───────────────────────────────────────────────────────────
   const BOT_PIN = process.env.BOT_PIN || "2026";
-  let _tradingPaused = false;
 
   function checkPin(url) {
     const pin = new URL(url, "http://localhost").searchParams.get("pin");
