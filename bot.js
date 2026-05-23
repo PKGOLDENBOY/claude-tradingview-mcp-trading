@@ -3403,20 +3403,14 @@ html,body{height:100%;background:var(--bg)}
 body{font-family:'Inter',system-ui,sans-serif;color:var(--text);padding:0;max-width:430px;margin:0 auto;overflow-x:hidden}
 
 /* PIN SCREEN */
-#pin-screen{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 32px;gap:0}
-.pin-logo{width:72px;height:72px;border-radius:20px;background:linear-gradient(135deg,#4f8dff,#00d4a0);display:flex;align-items:center;justify-content:center;font-size:36px;margin-bottom:28px;box-shadow:0 8px 32px #4f8dff44}
-.pin-title{font-size:26px;font-weight:800;margin-bottom:8px;letter-spacing:-.5px}
-.pin-sub{font-size:14px;color:var(--muted);margin-bottom:36px;text-align:center;line-height:1.5}
-.pin-dots{display:flex;gap:14px;margin-bottom:32px}
-.pin-dot{width:14px;height:14px;border-radius:50%;border:2px solid var(--border);background:transparent;transition:all .15s}
-.pin-dot.filled{background:var(--blue);border-color:var(--blue)}
-.pin-dot.error{background:var(--red);border-color:var(--red)}
-.numpad{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;width:100%;max-width:280px}
-.key{height:72px;border-radius:16px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:24px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;font-family:inherit;transition:all .1s;user-select:none}
-.key:active{background:var(--border);transform:scale(.94)}
-.key.del{font-size:18px;color:var(--muted)}
-.key.empty{background:transparent;border-color:transparent;pointer-events:none}
-#pin-err{color:var(--red);font-size:13px;font-weight:500;margin-top:16px;opacity:0;transition:opacity .2s}
+#pin-screen{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 32px;gap:16px}
+.pin-logo{width:72px;height:72px;border-radius:20px;background:linear-gradient(135deg,#4f8dff,#00d4a0);display:flex;align-items:center;justify-content:center;font-size:36px;box-shadow:0 8px 32px #4f8dff44}
+.pin-title{font-size:26px;font-weight:800;letter-spacing:-.5px}
+.pin-sub{font-size:14px;color:var(--muted);text-align:center;line-height:1.5;margin-bottom:8px}
+#pin-input{width:100%;max-width:300px;padding:16px;border-radius:14px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:28px;text-align:center;letter-spacing:6px;font-family:inherit;outline:none;-webkit-appearance:none;appearance:none}
+#pin-input:focus{border-color:var(--blue)}
+#pin-btn{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;background:linear-gradient(135deg,#4f8dff,#3a6fd4);color:#fff;font-size:16px;font-weight:700;cursor:pointer;font-family:inherit;box-shadow:0 4px 20px #4f8dff33}
+#pin-err{color:var(--red);font-size:13px;font-weight:500;opacity:0;transition:opacity .2s;min-height:20px}
 #pin-err.show{opacity:1}
 
 /* MAIN APP */
@@ -3508,26 +3502,8 @@ body{font-family:'Inter',system-ui,sans-serif;color:var(--text);padding:0;max-wi
   <div class="pin-logo">📈</div>
   <div class="pin-title">AlphaBot</div>
   <div class="pin-sub">Enter your PIN to access<br>your trading dashboard</div>
-  <div class="pin-dots">
-    <div class="pin-dot" id="d0"></div>
-    <div class="pin-dot" id="d1"></div>
-    <div class="pin-dot" id="d2"></div>
-    <div class="pin-dot" id="d3"></div>
-  </div>
-  <div class="numpad">
-    <button class="key" onclick="numKey('1')">1</button>
-    <button class="key" onclick="numKey('2')">2</button>
-    <button class="key" onclick="numKey('3')">3</button>
-    <button class="key" onclick="numKey('4')">4</button>
-    <button class="key" onclick="numKey('5')">5</button>
-    <button class="key" onclick="numKey('6')">6</button>
-    <button class="key" onclick="numKey('7')">7</button>
-    <button class="key" onclick="numKey('8')">8</button>
-    <button class="key" onclick="numKey('9')">9</button>
-    <button class="key empty"></button>
-    <button class="key" onclick="numKey('0')">0</button>
-    <button class="key del" onclick="delKey()">⌫</button>
-  </div>
+  <input id="pin-input" type="number" inputmode="numeric" pattern="[0-9]*" placeholder="Enter PIN" autocomplete="off">
+  <button id="pin-btn" onclick="submitPin()">Unlock →</button>
   <div id="pin-err">Incorrect PIN — try again</div>
 </div>
 
@@ -3635,44 +3611,42 @@ body{font-family:'Inter',system-ui,sans-serif;color:var(--text);padding:0;max-wi
 
 <script>
 let PIN = localStorage.getItem('bot_pin') || '';
-let pinBuffer = '';
 
-function updateDots(err) {
-  for(let i=0;i<4;i++){
-    const d=document.getElementById('d'+i);
-    d.className='pin-dot'+(i<pinBuffer.length?' filled':'')+(err?' error':'');
-  }
-}
-
-function numKey(n) {
-  if(pinBuffer.length>=4) return;
-  pinBuffer+=n;
-  updateDots(false);
-  if(pinBuffer.length===4) setTimeout(submitPin,120);
-}
-
-function delKey() {
-  pinBuffer=pinBuffer.slice(0,-1);
-  updateDots(false);
-}
+document.getElementById('pin-input').addEventListener('keydown', e => { if(e.key==='Enter') submitPin(); });
 
 async function submitPin() {
-  const r = await fetch('/api/status?pin='+pinBuffer).catch(()=>null);
+  const val = (document.getElementById('pin-input').value || '').trim();
+  if(!val) return;
+  const btn = document.getElementById('pin-btn');
+  btn.textContent = 'Checking...';
+  btn.style.opacity = '0.7';
+  const r = await fetch('/api/status?pin='+val).catch(()=>null);
+  btn.textContent = 'Unlock →';
+  btn.style.opacity = '1';
   if(!r||!r.ok){
-    updateDots(true);
     document.getElementById('pin-err').className='show';
-    setTimeout(()=>{ pinBuffer=''; updateDots(false); document.getElementById('pin-err').className=''; },900);
+    document.getElementById('pin-input').value='';
+    setTimeout(()=>{ document.getElementById('pin-err').className=''; },2000);
     return;
   }
-  localStorage.setItem('bot_pin',pinBuffer);
-  PIN=pinBuffer;
+  localStorage.setItem('bot_pin', val);
+  PIN = val;
   document.getElementById('pin-screen').style.display='none';
   document.getElementById('main').style.display='block';
   load();
   setInterval(load,30000);
 }
 
-if(PIN){ pinBuffer=PIN; submitPin(); }
+if(PIN){
+  fetch('/api/status?pin='+PIN).then(r=>{
+    if(r.ok){
+      document.getElementById('pin-screen').style.display='none';
+      document.getElementById('main').style.display='block';
+      load();
+      setInterval(load,30000);
+    } else { localStorage.removeItem('bot_pin'); PIN=''; }
+  }).catch(()=>{});
+}
 
 async function apiFetch(path,method='GET'){
   const r=await fetch(path+'?pin='+PIN,{method});
