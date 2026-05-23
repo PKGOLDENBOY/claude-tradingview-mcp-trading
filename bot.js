@@ -3876,7 +3876,7 @@ async function showCoin(sym){
     html+=ind('MACD',c.macdBullish?'Bullish ↑':'Bearish ↓',c.macdBullish);
     html+=ind('StochRSI','K='+c.stochK+(c.stochOversold?' (oversold)':c.stochOverbought?' (overbought)':''),c.stochOversold?true:c.stochOverbought?false:null);
     html+=ind('BB%',c.bbPct+'%',parseFloat(c.bbPct)<25?true:parseFloat(c.bbPct)>80?false:null);
-    html+=ind('ADX',c.adx+(c.adxTrending?' (trending)'?' (choppy)'),c.adxTrending);
+    html+=ind('ADX',c.adx+(c.adxTrending?' (trending)':' (choppy)'),c.adxTrending);
     html+=ind('Volume',c.volPct+'% of avg',c.volAboveAvg);
     html+=ind('OBV',c.obvRising?'Rising ↑':'Falling ↓',c.obvRising);
     if(c.divergence) html+=ind('Divergence','✅ Bullish detected',true);
