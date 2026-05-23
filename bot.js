@@ -3331,97 +3331,228 @@ if (process.argv.includes("--tax-summary")) {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Trading Bot</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>AlphaBot</title>
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;padding:16px;max-width:480px;margin:0 auto}
-h1{font-size:22px;font-weight:700;margin-bottom:16px;display:flex;align-items:center;gap:8px}
-.card{background:#1e293b;border-radius:14px;padding:16px;margin-bottom:12px}
-.card-title{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;font-weight:600}
-.big{font-size:36px;font-weight:700;letter-spacing:-1px}
-.sub{font-size:13px;color:#94a3b8;margin-top:4px}
-.row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #1e3a5f22}
-.row:last-child{border-bottom:none}
-.label{font-size:14px;color:#94a3b8}
-.value{font-size:14px;font-weight:500}
-.green{color:#4ade80}.red{color:#f87171}.yellow{color:#fbbf24}.gray{color:#64748b}
-.badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:700}
-.badge-green{background:#14532d;color:#4ade80}
-.badge-red{background:#450a0a;color:#f87171}
-.badge-blue{background:#1e3a8a;color:#93c5fd}
-.badge-yellow{background:#451a03;color:#fbbf24}
-.dot{width:9px;height:9px;border-radius:50%;background:#4ade80;display:inline-block;animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-.pos-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #1e3a5f22}
-.pos-row:last-child{border-bottom:none}
-.pos-coin{font-size:16px;font-weight:700}
-.pos-qty{font-size:12px;color:#64748b}
-.trade-row{padding:10px 0;border-bottom:1px solid #1e3a5f22}
-.trade-row:last-child{border-bottom:none}
-.trade-top{display:flex;justify-content:space-between;align-items:center}
-.trade-meta{font-size:12px;color:#64748b;margin-top:3px}
-.btn{width:100%;padding:15px;border-radius:12px;border:none;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:10px;transition:opacity .2s}
-.btn:active{opacity:.7}
-.btn:last-child{margin-bottom:0}
-.btn-blue{background:#2563eb;color:#fff}
-.btn-red{background:#dc2626;color:#fff}
-.btn-green{background:#16a34a;color:#fff}
-.btn-gray{background:#1e293b;color:#94a3b8;border:1px solid #334155}
-.updated{text-align:center;color:#334155;font-size:11px;margin-top:8px;padding-bottom:24px}
-#pin-screen{position:fixed;inset:0;background:#0f172a;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:32px}
-#pin-screen h2{font-size:24px;font-weight:700}
-#pin-screen p{color:#64748b;text-align:center;font-size:14px}
-#pin-input{width:100%;max-width:300px;padding:14px;border-radius:12px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font-size:18px;text-align:center;letter-spacing:2px}
-#pin-btn{width:100%;max-width:300px;padding:14px;border-radius:12px;border:none;background:#2563eb;color:#fff;font-size:16px;font-weight:700;cursor:pointer}
-#pin-err{color:#f87171;font-size:13px;display:none}
-#main{display:none}
-#toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1e293b;border:1px solid #334155;padding:12px 20px;border-radius:10px;font-size:14px;display:none;z-index:99;white-space:nowrap;box-shadow:0 4px 24px #0008}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  --bg:#07090f;
+  --surface:#0e1117;
+  --border:#1a1f2e;
+  --text:#f0f2f7;
+  --muted:#4a5272;
+  --green:#00d4a0;
+  --green-bg:#00d4a015;
+  --red:#ff4d6a;
+  --red-bg:#ff4d6a15;
+  --blue:#4f8dff;
+  --blue-bg:#4f8dff15;
+  --yellow:#ffb800;
+  --yellow-bg:#ffb80015;
+}
+html,body{height:100%;background:var(--bg)}
+body{font-family:'Inter',system-ui,sans-serif;color:var(--text);padding:0;max-width:430px;margin:0 auto;overflow-x:hidden}
+
+/* PIN SCREEN */
+#pin-screen{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 32px;gap:0}
+.pin-logo{width:72px;height:72px;border-radius:20px;background:linear-gradient(135deg,#4f8dff,#00d4a0);display:flex;align-items:center;justify-content:center;font-size:36px;margin-bottom:28px;box-shadow:0 8px 32px #4f8dff44}
+.pin-title{font-size:26px;font-weight:800;margin-bottom:8px;letter-spacing:-.5px}
+.pin-sub{font-size:14px;color:var(--muted);margin-bottom:36px;text-align:center;line-height:1.5}
+.pin-dots{display:flex;gap:14px;margin-bottom:32px}
+.pin-dot{width:14px;height:14px;border-radius:50%;border:2px solid var(--border);background:transparent;transition:all .15s}
+.pin-dot.filled{background:var(--blue);border-color:var(--blue)}
+.pin-dot.error{background:var(--red);border-color:var(--red)}
+.numpad{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;width:100%;max-width:280px}
+.key{height:72px;border-radius:16px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:24px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;font-family:inherit;transition:all .1s;user-select:none}
+.key:active{background:var(--border);transform:scale(.94)}
+.key.del{font-size:18px;color:var(--muted)}
+.key.empty{background:transparent;border-color:transparent;pointer-events:none}
+#pin-err{color:var(--red);font-size:13px;font-weight:500;margin-top:16px;opacity:0;transition:opacity .2s}
+#pin-err.show{opacity:1}
+
+/* MAIN APP */
+#main{display:none;min-height:100vh;padding-bottom:32px}
+.header{padding:20px 20px 0;display:flex;align-items:center;justify-content:space-between}
+.header-left{display:flex;align-items:center;gap:10px}
+.header-logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#4f8dff,#00d4a0);display:flex;align-items:center;justify-content:center;font-size:18px}
+.header-title{font-size:17px;font-weight:700;letter-spacing:-.3px}
+.live-pill{display:flex;align-items:center;gap:6px;background:var(--green-bg);border:1px solid #00d4a030;border-radius:99px;padding:5px 12px;font-size:12px;font-weight:600;color:var(--green)}
+.live-dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.85)}}
+
+/* PORTFOLIO HERO */
+.hero{margin:24px 16px 0;background:linear-gradient(135deg,#0e1a35 0%,#0a1628 100%);border:1px solid #1a2a4a;border-radius:24px;padding:28px 24px;position:relative;overflow:hidden}
+.hero::before{content:'';position:absolute;top:-40px;right:-40px;width:180px;height:180px;border-radius:50%;background:radial-gradient(circle,#4f8dff18 0%,transparent 70%)}
+.hero-label{font-size:12px;color:var(--muted);font-weight:500;letter-spacing:.04em;text-transform:uppercase;margin-bottom:8px}
+.hero-value{font-size:46px;font-weight:800;letter-spacing:-2px;line-height:1;margin-bottom:12px}
+.hero-row{display:flex;gap:24px}
+.hero-stat{display:flex;flex-direction:column;gap:2px}
+.hero-stat-label{font-size:11px;color:var(--muted);font-weight:500}
+.hero-stat-value{font-size:15px;font-weight:600}
+
+/* STATS GRID */
+.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 16px 0}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:16px}
+.stat-card-label{font-size:11px;color:var(--muted);font-weight:500;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
+.stat-card-value{font-size:20px;font-weight:700;letter-spacing:-.5px}
+.stat-card-sub{font-size:11px;color:var(--muted);margin-top:2px}
+
+/* SECTION */
+.section{margin:16px 16px 0}
+.section-header{font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px;padding:0 2px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:20px;overflow:hidden}
+
+/* REGIME BAR */
+.regime-bar{padding:14px 18px;display:flex;align-items:center;justify-content:space-between}
+.regime-label{font-size:13px;color:var(--muted);font-weight:500}
+.regime-value{font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px}
+
+/* POSITIONS */
+.pos-item{padding:14px 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border)}
+.pos-item:last-child{border-bottom:none}
+.pos-icon{width:38px;height:38px;border-radius:12px;background:var(--blue-bg);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;color:var(--blue);margin-right:12px;flex-shrink:0}
+.pos-left{display:flex;align-items:center}
+.pos-name{font-size:15px;font-weight:700}
+.pos-qty{font-size:12px;color:var(--muted);margin-top:1px}
+.pos-right{text-align:right}
+.pos-usd{font-size:15px;font-weight:700}
+.pos-pnl{font-size:12px;font-weight:600;margin-top:1px}
+.empty-state{padding:28px 18px;text-align:center;color:var(--muted);font-size:14px}
+
+/* TRADES */
+.trade-item{padding:14px 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border)}
+.trade-item:last-child{border-bottom:none}
+.trade-icon{width:38px;height:38px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:14px;margin-right:12px;flex-shrink:0}
+.trade-icon.entry{background:var(--blue-bg);color:var(--blue)}
+.trade-icon.exit-win{background:var(--green-bg);color:var(--green)}
+.trade-icon.exit-loss{background:var(--red-bg);color:var(--red)}
+.trade-left{display:flex;align-items:center}
+.trade-coin{font-size:15px;font-weight:700}
+.trade-meta{font-size:12px;color:var(--muted);margin-top:1px}
+.trade-right{text-align:right}
+.trade-pnl{font-size:15px;font-weight:700}
+.trade-time{font-size:12px;color:var(--muted);margin-top:1px}
+
+/* CONTROLS */
+.controls{margin:16px 16px 0;display:flex;flex-direction:column;gap:10px}
+.btn{width:100%;padding:17px;border-radius:16px;border:none;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit;letter-spacing:-.1px;transition:transform .1s,opacity .1s;display:flex;align-items:center;justify-content:center;gap:8px}
+.btn:active{transform:scale(.97);opacity:.85}
+.btn-primary{background:linear-gradient(135deg,#4f8dff,#3a6fd4);color:#fff;box-shadow:0 4px 20px #4f8dff33}
+.btn-danger{background:linear-gradient(135deg,#ff4d6a,#d43a52);color:#fff;box-shadow:0 4px 20px #ff4d6a33}
+.btn-success{background:linear-gradient(135deg,#00d4a0,#00a87d);color:#fff;box-shadow:0 4px 20px #00d4a033}
+.btn-outline{background:var(--surface);color:var(--muted);border:1px solid var(--border)}
+
+/* COLORS */
+.green{color:var(--green)}.red{color:var(--red)}.blue{color:var(--blue)}.yellow{color:var(--yellow)}.muted{color:var(--muted)}
+
+/* TOAST */
+#toast{position:fixed;bottom:32px;left:50%;transform:translateX(-50%) translateY(80px);background:#1a1f2e;border:1px solid var(--border);padding:13px 22px;border-radius:14px;font-size:14px;font-weight:500;z-index:999;white-space:nowrap;box-shadow:0 8px 32px #00000088;transition:transform .3s cubic-bezier(.34,1.56,.64,1),opacity .3s;opacity:0}
+#toast.show{transform:translateX(-50%) translateY(0);opacity:1}
+
+.updated{text-align:center;color:var(--muted);font-size:11px;margin-top:20px;opacity:.6}
 </style>
 </head>
 <body>
+
+<!-- PIN SCREEN -->
 <div id="pin-screen">
-  <h2>🤖 Trading Bot</h2>
-  <p>Enter your PIN to access the control panel</p>
-  <input id="pin-input" type="password" placeholder="PIN" inputmode="numeric" maxlength="20">
-  <div id="pin-err">Wrong PIN — try again</div>
-  <button id="pin-btn" onclick="submitPin()">Unlock</button>
+  <div class="pin-logo">📈</div>
+  <div class="pin-title">AlphaBot</div>
+  <div class="pin-sub">Enter your PIN to access<br>your trading dashboard</div>
+  <div class="pin-dots">
+    <div class="pin-dot" id="d0"></div>
+    <div class="pin-dot" id="d1"></div>
+    <div class="pin-dot" id="d2"></div>
+    <div class="pin-dot" id="d3"></div>
+  </div>
+  <div class="numpad">
+    <button class="key" onclick="numKey('1')">1</button>
+    <button class="key" onclick="numKey('2')">2</button>
+    <button class="key" onclick="numKey('3')">3</button>
+    <button class="key" onclick="numKey('4')">4</button>
+    <button class="key" onclick="numKey('5')">5</button>
+    <button class="key" onclick="numKey('6')">6</button>
+    <button class="key" onclick="numKey('7')">7</button>
+    <button class="key" onclick="numKey('8')">8</button>
+    <button class="key" onclick="numKey('9')">9</button>
+    <button class="key empty"></button>
+    <button class="key" onclick="numKey('0')">0</button>
+    <button class="key del" onclick="delKey()">⌫</button>
+  </div>
+  <div id="pin-err">Incorrect PIN — try again</div>
 </div>
 
+<!-- MAIN DASHBOARD -->
 <div id="main">
-  <h1><span class="dot"></span> Trading Bot</h1>
-
-  <div class="card">
-    <div class="card-title">Portfolio</div>
-    <div class="big" id="total-val">—</div>
-    <div class="sub" id="usdt-cash">Cash: —</div>
+  <div class="header">
+    <div class="header-left">
+      <div class="header-logo">📈</div>
+      <div class="header-title">AlphaBot</div>
+    </div>
+    <div class="live-pill"><span class="live-dot"></span>LIVE</div>
   </div>
 
-  <div class="card">
-    <div class="card-title">Status</div>
-    <div class="row"><span class="label">Mode</span><span id="mode-badge"></span></div>
-    <div class="row"><span class="label">BTC Regime</span><span class="value" id="regime">—</span></div>
-    <div class="row"><span class="label">Trading</span><span id="paused-badge"></span></div>
-    <div class="row"><span class="label">Trades today</span><span class="value" id="today-trades">—</span></div>
-    <div class="row"><span class="label">Today's P&amp;L</span><span class="value" id="today-pnl">—</span></div>
-    <div class="row"><span class="label">Win rate (last 10)</span><span class="value" id="win-rate">—</span></div>
+  <!-- Portfolio Hero -->
+  <div class="hero">
+    <div class="hero-label">Total Portfolio</div>
+    <div class="hero-value" id="total-val">—</div>
+    <div class="hero-row">
+      <div class="hero-stat">
+        <div class="hero-stat-label">Cash (USDT)</div>
+        <div class="hero-stat-value" id="usdt-cash">—</div>
+      </div>
+      <div class="hero-stat">
+        <div class="hero-stat-label">Today's P&amp;L</div>
+        <div class="hero-stat-value" id="today-pnl">—</div>
+      </div>
+      <div class="hero-stat">
+        <div class="hero-stat-label">Win Rate</div>
+        <div class="hero-stat-value" id="win-rate">—</div>
+      </div>
+    </div>
   </div>
 
-  <div class="card">
-    <div class="card-title">Open Positions</div>
-    <div id="positions">—</div>
+  <!-- Stats Grid -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-card-label">Trades Today</div>
+      <div class="stat-card-value" id="today-trades">—</div>
+      <div class="stat-card-sub">of 20 max</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card-label">Market</div>
+      <div class="stat-card-value" id="regime-val">—</div>
+      <div class="stat-card-sub" id="trading-status">—</div>
+    </div>
   </div>
 
-  <div class="card">
-    <div class="card-title">Last 5 Trades</div>
-    <div id="trades">—</div>
+  <!-- Open Positions -->
+  <div class="section">
+    <div class="section-header">Open Positions</div>
+    <div class="card" id="positions-card">
+      <div class="empty-state muted">Loading...</div>
+    </div>
   </div>
 
-  <div class="card">
-    <div class="card-title">Controls</div>
-    <button class="btn btn-blue" onclick="forceCheck()">🔍 Force Scan Now</button>
-    <button class="btn btn-red" onclick="confirmSellAll()">🚨 Sell All Positions</button>
-    <button class="btn btn-gray" id="pause-btn" onclick="togglePause()">⏸ Pause Trading</button>
+  <!-- Recent Trades -->
+  <div class="section">
+    <div class="section-header">Recent Trades</div>
+    <div class="card" id="trades-card">
+      <div class="empty-state muted">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="section">
+    <div class="section-header">Controls</div>
+  </div>
+  <div class="controls">
+    <button class="btn btn-primary" onclick="forceCheck()">🔍 &nbsp;Scan All Coins Now</button>
+    <button class="btn btn-danger" onclick="confirmSellAll()">🚨 &nbsp;Sell All Positions</button>
+    <button class="btn btn-outline" id="pause-btn" onclick="togglePause()">⏸ &nbsp;Pause Trading</button>
   </div>
 
   <div class="updated" id="updated"></div>
@@ -3431,127 +3562,155 @@ h1{font-size:22px;font-weight:700;margin-bottom:16px;display:flex;align-items:ce
 
 <script>
 let PIN = localStorage.getItem('bot_pin') || '';
-if (PIN) tryShowMain();
+let pinBuffer = '';
 
-document.getElementById('pin-input').addEventListener('keydown', e => { if(e.key==='Enter') submitPin(); });
-
-function submitPin() {
-  PIN = document.getElementById('pin-input').value.trim();
-  tryShowMain();
+function updateDots(err) {
+  for(let i=0;i<4;i++){
+    const d=document.getElementById('d'+i);
+    d.className='pin-dot'+(i<pinBuffer.length?' filled':'')+(err?' error':'');
+  }
 }
 
-async function tryShowMain() {
-  if (!PIN) return;
-  const r = await fetch('/api/status?pin=' + PIN).catch(() => null);
-  if (!r || !r.ok) {
-    document.getElementById('pin-err').style.display = 'block';
-    PIN = '';
+function numKey(n) {
+  if(pinBuffer.length>=4) return;
+  pinBuffer+=n;
+  updateDots(false);
+  if(pinBuffer.length===4) setTimeout(submitPin,120);
+}
+
+function delKey() {
+  pinBuffer=pinBuffer.slice(0,-1);
+  updateDots(false);
+}
+
+async function submitPin() {
+  const r = await fetch('/api/status?pin='+pinBuffer).catch(()=>null);
+  if(!r||!r.ok){
+    updateDots(true);
+    document.getElementById('pin-err').className='show';
+    setTimeout(()=>{ pinBuffer=''; updateDots(false); document.getElementById('pin-err').className=''; },900);
     return;
   }
-  localStorage.setItem('bot_pin', PIN);
-  document.getElementById('pin-screen').style.display = 'none';
-  document.getElementById('main').style.display = 'block';
+  localStorage.setItem('bot_pin',pinBuffer);
+  PIN=pinBuffer;
+  document.getElementById('pin-screen').style.display='none';
+  document.getElementById('main').style.display='block';
   load();
-  setInterval(load, 30000);
+  setInterval(load,30000);
 }
 
-async function apiFetch(path, method='GET') {
-  const r = await fetch(path + '?pin=' + PIN, { method });
+if(PIN){ pinBuffer=PIN; submitPin(); }
+
+async function apiFetch(path,method='GET'){
+  const r=await fetch(path+'?pin='+PIN,{method});
   return r.json();
 }
 
-function toast(msg, dur=3000) {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.style.display = 'block';
-  clearTimeout(t._timer);
-  t._timer = setTimeout(() => t.style.display='none', dur);
+function toast(msg,dur=3000){
+  const t=document.getElementById('toast');
+  t.textContent=msg;
+  t.className='show';
+  clearTimeout(t._t);
+  t._t=setTimeout(()=>t.className='',dur);
 }
 
-async function load() {
-  try {
-    const s = await apiFetch('/api/status');
+async function load(){
+  try{
+    const s=await apiFetch('/api/status');
 
-    document.getElementById('total-val').textContent = '$' + Number(s.portfolioValue).toFixed(2);
-    document.getElementById('usdt-cash').textContent = 'Cash: $' + Number(s.usdtBalance).toFixed(2);
+    const val=Number(s.portfolioValue||0);
+    document.getElementById('total-val').textContent='$'+val.toFixed(2);
+    document.getElementById('usdt-cash').textContent='$'+Number(s.usdtBalance||0).toFixed(2);
 
-    const mode = s.mode || 'LIVE';
-    document.getElementById('mode-badge').innerHTML = '<span class="badge ' + (mode==='LIVE'?'badge-green':'badge-blue') + '">' + mode + '</span>';
+    const pnl=Number(s.todayPnlUSD||0);
+    document.getElementById('today-pnl').innerHTML='<span class="'+(pnl>=0?'green':'red')+'">'+(pnl>=0?'+':'')+'$'+pnl.toFixed(2)+'</span>';
+    document.getElementById('win-rate').textContent=s.winRate||'—';
+    document.getElementById('today-trades').textContent=s.todayTrades||0;
 
-    const regime = s.regime || '—';
-    const regimeColor = regime.includes('BEAR') ? 'red' : regime.includes('BULL') ? 'green' : 'yellow';
-    document.getElementById('regime').innerHTML = '<span class="' + regimeColor + '">' + regime + '</span>';
+    const regime=s.regime||'RANGING';
+    const rc=regime.includes('BEAR')?'red':regime.includes('BULL')?'green':'yellow';
+    document.getElementById('regime-val').innerHTML='<span class="'+rc+'">'+regime+'</span>';
 
-    const paused = s.paused;
-    document.getElementById('paused-badge').innerHTML = paused
-      ? '<span class="badge badge-yellow">⏸ PAUSED</span>'
-      : '<span class="badge badge-green">▶ ACTIVE</span>';
-    document.getElementById('pause-btn').textContent = paused ? '▶️ Resume Trading' : '⏸ Pause Trading';
-    document.getElementById('pause-btn').className = paused ? 'btn btn-green' : 'btn btn-gray';
-
-    document.getElementById('today-trades').textContent = (s.todayTrades || 0) + ' / 20';
-
-    const pnl = Number(s.todayPnlUSD || 0);
-    document.getElementById('today-pnl').innerHTML = '<span class="' + (pnl>=0?'green':'red') + '">' + (pnl>=0?'+':'') + '$' + pnl.toFixed(2) + '</span>';
-
-    document.getElementById('win-rate').textContent = s.winRate || '—';
+    const paused=s.paused;
+    document.getElementById('trading-status').innerHTML=paused
+      ?'<span class="yellow">⏸ Paused</span>'
+      :'<span class="green">▶ Active</span>';
+    const pb=document.getElementById('pause-btn');
+    pb.textContent=paused?'▶️  Resume Trading':'⏸  Pause Trading';
+    pb.className=paused?'btn btn-success':'btn btn-outline';
 
     // Positions
-    const pos = s.openPositions || [];
-    document.getElementById('positions').innerHTML = pos.length === 0
-      ? '<span class="gray">All cash — no open positions</span>'
-      : pos.map(p => {
-          const pnlColor = p.pnlPct >= 0 ? 'green' : 'red';
-          return '<div class="pos-row">' +
-            '<div><div class="pos-coin">' + p.coin + '</div><div class="pos-qty">' + Number(p.qty).toFixed(4) + ' @ $' + Number(p.entryPrice).toFixed(4) + '</div></div>' +
-            '<div style="text-align:right"><div class="' + pnlColor + '" style="font-weight:700">' + (p.pnlPct>=0?'+':'') + p.pnlPct.toFixed(2) + '%</div><div class="' + pnlColor + '">$' + Number(p.usdVal).toFixed(2) + '</div></div>' +
-          '</div>';
-        }).join('');
+    const pos=s.openPositions||[];
+    document.getElementById('positions-card').innerHTML=pos.length===0
+      ?'<div class="empty-state muted">All cash — no open positions</div>'
+      :pos.map(p=>{
+        const pc=p.pnlPct>=0?'green':'red';
+        const initials=p.coin.slice(0,3);
+        return '<div class="pos-item">'+
+          '<div class="pos-left">'+
+            '<div class="pos-icon">'+initials+'</div>'+
+            '<div><div class="pos-name">'+p.coin+'</div><div class="pos-qty">'+Number(p.qty).toFixed(4)+' @ $'+Number(p.entryPrice).toFixed(4)+'</div></div>'+
+          '</div>'+
+          '<div class="pos-right">'+
+            '<div class="pos-usd">$'+Number(p.usdVal).toFixed(2)+'</div>'+
+            '<div class="pos-pnl '+pc+'">'+(p.pnlPct>=0?'+':'')+p.pnlPct.toFixed(2)+'%</div>'+
+          '</div>'+
+        '</div>';
+      }).join('');
 
     // Trades
-    const trades = (s.lastTrades || []).slice().reverse();
-    document.getElementById('trades').innerHTML = trades.length === 0
-      ? '<span class="gray">No trades yet</span>'
-      : trades.map(t => {
-          const isEntry = t.type === 'entry';
-          const pnlVal = t.pnlPct ? parseFloat(t.pnlPct) : null;
-          const pnlColor = pnlVal === null ? '' : pnlVal >= 0 ? 'green' : 'red';
-          return '<div class="trade-row">' +
-            '<div class="trade-top">' +
-              '<span><strong>' + (t.symbol||'').replace('USDT','') + '</strong> <span class="badge ' + (isEntry?'badge-blue':'badge-green') + '">' + (t.type||'').toUpperCase() + '</span></span>' +
-              (t.pnl ? '<span class="' + pnlColor + '" style="font-weight:600">' + t.pnl + '</span>' : '') +
-            '</div>' +
-            '<div class="trade-meta">$' + Number(t.price||0).toFixed(4) + ' &nbsp;·&nbsp; ' + (t.time||'').slice(11,16) + ' UTC</div>' +
-          '</div>';
-        }).join('');
+    const trades=(s.lastTrades||[]).slice().reverse();
+    document.getElementById('trades-card').innerHTML=trades.length===0
+      ?'<div class="empty-state muted">No trades yet today</div>'
+      :trades.map(t=>{
+        const isEntry=t.type==='entry';
+        const pv=t.pnlPct!=null?parseFloat(t.pnlPct):null;
+        const iconClass=isEntry?'entry':pv!=null&&pv>=0?'exit-win':'exit-loss';
+        const icon=isEntry?'↑':pv!=null&&pv>=0?'✓':'↓';
+        const pnlColor=pv==null?'muted':pv>=0?'green':'red';
+        const pnlText=t.pnl||'';
+        return '<div class="trade-item">'+
+          '<div class="trade-left">'+
+            '<div class="trade-icon '+iconClass+'">'+icon+'</div>'+
+            '<div>'+
+              '<div class="trade-coin">'+(t.symbol||'').replace('USDT','')+'</div>'+
+              '<div class="trade-meta">'+(isEntry?'Entry':'Exit')+' &nbsp;·&nbsp; $'+Number(t.price||0).toFixed(4)+'</div>'+
+            '</div>'+
+          '</div>'+
+          '<div class="trade-right">'+
+            '<div class="trade-pnl '+pnlColor+'">'+pnlText+'</div>'+
+            '<div class="trade-time">'+((t.time||'').slice(11,16)||'—')+' UTC</div>'+
+          '</div>'+
+        '</div>';
+      }).join('');
 
-    document.getElementById('updated').textContent = 'Last updated ' + new Date().toLocaleTimeString();
-  } catch(e) {
-    toast('⚠️ Failed to load — retrying');
+    document.getElementById('updated').textContent='Updated '+new Date().toLocaleTimeString();
+  }catch(e){
+    toast('⚠️ Connection error — retrying');
   }
 }
 
-async function forceCheck() {
-  toast('🔍 Triggering scan across all coins...');
-  await apiFetch('/api/force-check', 'POST');
-  setTimeout(load, 4000);
+async function forceCheck(){
+  toast('🔍 Scanning all coins...');
+  await apiFetch('/api/force-check','POST');
+  setTimeout(load,4000);
 }
 
-function confirmSellAll() {
-  if (confirm('Sell ALL open positions immediately?')) doSellAll();
+function confirmSellAll(){
+  if(confirm('Sell ALL open positions immediately?')) doSellAll();
 }
 
-async function doSellAll() {
-  toast('🚨 Selling all positions...', 6000);
-  const r = await apiFetch('/api/sell-all', 'POST');
-  toast(r.message || 'Done');
-  setTimeout(load, 4000);
+async function doSellAll(){
+  toast('🚨 Selling all positions...',6000);
+  const r=await apiFetch('/api/sell-all','POST');
+  toast(r.message||'Done');
+  setTimeout(load,4000);
 }
 
-async function togglePause() {
-  const s = await apiFetch('/api/status');
-  const r = await apiFetch(s.paused ? '/api/resume' : '/api/pause', 'POST');
-  toast(r.message || 'Done');
+async function togglePause(){
+  const s=await apiFetch('/api/status');
+  const r=await apiFetch(s.paused?'/api/resume':'/api/pause','POST');
+  toast(r.message||'Done');
   load();
 }
 </script>
