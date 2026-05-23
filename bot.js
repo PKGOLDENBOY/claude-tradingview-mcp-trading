@@ -135,6 +135,9 @@ let _tradingPaused = false;
 // Per-coin latest scan data — shown in dashboard coin detail view
 const coinSnapshots = {};
 
+// Top 10 gainers cached from last refreshTopMovers() call
+let _topGainers = [];
+
 // ─── Onboarding ───────────────────────────────────────────────────────────────
 
 function checkOnboarding() {
@@ -765,6 +768,13 @@ async function refreshTopMovers() {
       parseFloat(t.lastPr) >= 0.001 &&
       parseFloat(t.usdtVolume) > 1_000_000   // $1M+ volume — broad but liquid
     );
+
+    // Cache top 10 gainers for dashboard
+    _topGainers = allCoins
+      .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPr), change24h: parseFloat(t.change24h) * 100, vol: parseFloat(t.usdtVolume) }))
+      .filter(t => t.change24h > 0)
+      .sort((a, b) => b.change24h - a.change24h)
+      .slice(0, 10);
 
     // Score: weighted mix of volume rank + absolute 24h move (big moves = opportunity)
     const totalVol = allCoins.reduce((s, t) => s + parseFloat(t.usdtVolume), 0);
@@ -3430,6 +3440,7 @@ if (process.argv.includes("--tax-summary")) {
       lastTrades: (log.trades || []).slice(-5).reverse(),
       signals: signalLog.slice(-20).reverse(),
       coins: coinSnapshots,
+      topGainers: _topGainers,
       updatedAt: new Date().toLocaleTimeString(),
     };
   }
@@ -3570,6 +3581,28 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     </div>
   </form>
 </div>
+
+${d.topGainers && d.topGainers.length > 0 ? `
+<div class="sec">
+  <div class="sec-title">Top 10 Movers Today</div>
+  <div class="card">
+    ${d.topGainers.map((t, i) => {
+      const coin = t.symbol.replace("USDT","");
+      const vol = t.vol >= 1e9 ? (t.vol/1e9).toFixed(1)+"B" : t.vol >= 1e6 ? (t.vol/1e6).toFixed(0)+"M" : (t.vol/1e3).toFixed(0)+"K";
+      return `<a href="/coin?symbol=${t.symbol}&pin=${pin}" style="display:flex;align-items:center;justify-content:space-between;padding:12px 18px;border-bottom:1px solid #1a1f2e;text-decoration:none;color:inherit">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="width:26px;color:#4a5272;font-size:12px;font-weight:700">${i+1}</div>
+          <div style="width:36px;height:36px;border-radius:10px;background:#00d4a018;color:#00d4a0;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800">${coin.slice(0,4)}</div>
+          <div><div style="font-size:15px;font-weight:700;color:#f0f2f7">${coin}</div><div style="font-size:11px;color:#4a5272">Vol $${vol}</div></div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:16px;font-weight:800;color:#00d4a0">+${t.change24h.toFixed(1)}%</div>
+          <div style="font-size:11px;color:#4a5272">$${t.price < 0.01 ? t.price.toFixed(6) : t.price < 1 ? t.price.toFixed(4) : t.price.toFixed(2)}</div>
+        </div>
+      </a>`;
+    }).join("")}
+  </div>
+</div>` : ""}
 
 <div class="hero">
   <div class="hero-label">Total Portfolio</div>
