@@ -3497,14 +3497,14 @@ body{font-family:'Inter',system-ui,sans-serif;color:var(--text);padding:0;max-wi
 </head>
 <body>
 
-<!-- PIN SCREEN -->
+<!-- PIN SCREEN (shown only if no PIN in URL) -->
 <div id="pin-screen">
   <div class="pin-logo">📈</div>
   <div class="pin-title">AlphaBot</div>
-  <div class="pin-sub">Enter your PIN to access<br>your trading dashboard</div>
-  <input id="pin-input" type="number" inputmode="numeric" pattern="[0-9]*" placeholder="Enter PIN" autocomplete="off">
-  <button id="pin-btn" onclick="submitPin()">Unlock →</button>
-  <div id="pin-err">Incorrect PIN — try again</div>
+  <div class="pin-sub">Open your saved link to access<br>the dashboard, or enter PIN below</div>
+  <input id="pin-input" type="number" inputmode="numeric" pattern="[0-9]*" placeholder="2026" autocomplete="off" style="width:100%;max-width:300px;padding:16px;border-radius:14px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:28px;text-align:center;font-family:inherit;outline:none;margin-top:8px">
+  <button id="pin-btn" style="width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;background:linear-gradient(135deg,#4f8dff,#3a6fd4);color:#fff;font-size:16px;font-weight:700;cursor:pointer;font-family:inherit">Unlock →</button>
+  <div id="pin-err" style="color:var(--red);font-size:13px;min-height:20px"></div>
 </div>
 
 <!-- MAIN DASHBOARD -->
@@ -3610,46 +3610,42 @@ body{font-family:'Inter',system-ui,sans-serif;color:var(--text);padding:0;max-wi
 <div id="toast"></div>
 
 <script>
-let PIN = localStorage.getItem('bot_pin') || '';
+// Read PIN from URL (?pin=2026) — if present, auto-login immediately
+const PIN = new URLSearchParams(location.search).get('pin') || '';
 
-document.getElementById('pin-input').addEventListener('keydown', e => { if(e.key==='Enter') submitPin(); });
-
-async function submitPin() {
-  const val = (document.getElementById('pin-input').value || '').trim();
-  if(!val) return;
-  const btn = document.getElementById('pin-btn');
-  btn.textContent = 'Checking...';
-  btn.style.opacity = '0.7';
-  const r = await fetch('/api/status?pin='+val).catch(()=>null);
-  btn.textContent = 'Unlock →';
-  btn.style.opacity = '1';
-  if(!r||!r.ok){
-    document.getElementById('pin-err').className='show';
-    document.getElementById('pin-input').value='';
-    setTimeout(()=>{ document.getElementById('pin-err').className=''; },2000);
-    return;
-  }
-  localStorage.setItem('bot_pin', val);
-  PIN = val;
+function showMain() {
   document.getElementById('pin-screen').style.display='none';
   document.getElementById('main').style.display='block';
   load();
-  setInterval(load,30000);
+  setInterval(load, 30000);
 }
 
-if(PIN){
-  fetch('/api/status?pin='+PIN).then(r=>{
-    if(r.ok){
-      document.getElementById('pin-screen').style.display='none';
-      document.getElementById('main').style.display='block';
-      load();
-      setInterval(load,30000);
-    } else { localStorage.removeItem('bot_pin'); PIN=''; }
-  }).catch(()=>{});
+if (PIN) {
+  // PIN in URL — skip the PIN screen entirely
+  showMain();
+} else {
+  // No PIN in URL — show input form
+  document.getElementById('pin-btn').addEventListener('click', doLogin);
+  document.getElementById('pin-input').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
+}
+
+async function doLogin() {
+  const val = document.getElementById('pin-input').value.trim();
+  if (!val) return;
+  const r = await fetch('/api/status?pin=' + val).catch(() => null);
+  if (!r || !r.ok) {
+    document.getElementById('pin-err').textContent = 'Wrong PIN — try again';
+    document.getElementById('pin-input').value = '';
+    setTimeout(() => document.getElementById('pin-err').textContent = '', 2000);
+    return;
+  }
+  // Redirect to URL with PIN so it's bookmarkable
+  location.href = location.pathname + '?pin=' + val;
 }
 
 async function apiFetch(path,method='GET'){
-  const r=await fetch(path+'?pin='+PIN,{method});
+  const sep=path.includes('?')?'&':'?';
+  const r=await fetch(path+sep+'pin='+PIN,{method});
   return r.json();
 }
 
