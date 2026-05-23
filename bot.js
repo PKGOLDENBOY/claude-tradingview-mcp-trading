@@ -3561,6 +3561,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   <div class="live"><span class="dot"></span>LIVE</div>
 </div>
 
+<div style="margin:14px 16px 0">
+  <form method="GET" action="/coin" onsubmit="var v=this.symbol.value.trim().toUpperCase();if(!v)return false;if(!v.endsWith('USDT'))this.symbol.value=v+'USDT';">
+    <input type="hidden" name="pin" value="${pin}">
+    <div style="display:flex;gap:8px">
+      <input type="text" name="symbol" placeholder="Search any coin — BTC, PEPE, DOGE..." autocomplete="off" autocapitalize="characters" spellcheck="false"
+        style="flex:1;background:#0e1117;border:1px solid #1a1f2e;border-radius:12px;padding:13px 16px;color:#f0f2f7;font-size:15px;outline:none;font-family:inherit">
+      <button type="submit" style="background:linear-gradient(135deg,#4f8dff,#3a6fd4);color:#fff;border:none;border-radius:12px;padding:13px 20px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit">Go</button>
+    </div>
+  </form>
+</div>
+
 <div class="hero">
   <div class="hero-label">Total Portfolio</div>
   <div class="hero-value">$${Number(pf).toFixed(2)}</div>
@@ -3578,17 +3589,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 
 <div class="sec"><div class="sec-title">Open Positions</div><div class="card">${posHTML}</div></div>
 <div class="sec"><div class="sec-title">Recent Trades</div><div class="card">${tradesHTML}</div></div>
-<div class="sec">
-  <div class="sec-title">Search Any Coin</div>
-  <form method="GET" action="/coin" onsubmit="var v=this.symbol.value.trim().toUpperCase();if(!v)return false;if(!v.endsWith('USDT'))this.symbol.value=v+'USDT';">
-    <input type="hidden" name="pin" value="${pin}">
-    <div style="display:flex;gap:8px">
-      <input type="text" name="symbol" placeholder="BTC, ETH, SOL, PEPE..." autocomplete="off" autocapitalize="characters" spellcheck="false"
-        style="flex:1;background:#0e1117;border:1px solid #1a1f2e;border-radius:12px;padding:13px 16px;color:#f0f2f7;font-size:15px;outline:none;font-family:inherit">
-      <button type="submit" style="background:linear-gradient(135deg,#4f8dff,#3a6fd4);color:#fff;border:none;border-radius:12px;padding:13px 20px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit">Go</button>
-    </div>
-  </form>
-</div>
 <div class="sec">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
     <div class="sec-title" style="margin-bottom:0">Coins Being Watched</div>
