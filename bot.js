@@ -3959,7 +3959,11 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
             openPositions.push({ coin: a.coin, qty, usdVal, entryPrice, pnlPct });
           }
           portfolioValue = total;
-        } catch {}
+        } catch(e) {
+          console.error("[dashboard] Balance fetch error:", e.message);
+          // surface error in API so we can debug from dashboard
+          openPositions = [{ _error: e.message }];
+        }
 
         // BTC regime from last bot log entry
         const regimeMatch = log.trades?.slice(-20).reverse().find(t => t.regime);
