@@ -2828,7 +2828,7 @@ async function run(tvSignal = null, symbol = null) {
     // If a coin is up 5%+ on the day with real volume, trade the momentum instead
     // of waiting for it to become oversold. Different rules, smaller size, tight stop.
     const gainerInfo = _topGainers.find(t => t.symbol === symbol);
-    if (gainerInfo && gainerInfo.change24h >= 5 && !isAlreadyOpen) {
+    if (gainerInfo && gainerInfo.change24h >= 5 && !(position && position.open)) {
       console.log(`\n🚀 BIG MOVER — ${symbol} +${gainerInfo.change24h.toFixed(1)}% today`);
       const volRatio = vol.current / vol.avg;
       const rsiOk    = rsi3 >= 40 && rsi3 <= 82;           // healthy momentum, not exhausted
