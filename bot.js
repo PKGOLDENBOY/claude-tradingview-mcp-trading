@@ -3646,7 +3646,7 @@ async function load(){
     pb.className=paused?'btn btn-success':'btn btn-outline';
 
     // Positions
-    const pos=s.openPositions||[];
+    const pos=(s.openPositions||[]).filter(p=>p&&p.coin);
     document.getElementById('positions-card').innerHTML=pos.length===0
       ?'<div class="empty-state muted">All cash — no open positions</div>'
       :pos.map(p=>{
@@ -3930,7 +3930,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         const winRate = calcWinRate(log.trades, 10);
         const drawdown = checkDailyDrawdown(log);
 
-        // Fetch live balances from BitGet
+        // Fetch live balances from BitGet (5-second timeout so dashboard never hangs)
         let portfolioValue = log.portfolioValue || acct().portfolioValue;
         let usdtBalance = 0;
         let openPositions = [];
@@ -3938,10 +3938,13 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           const ts = Date.now().toString();
           const bPath = "/api/v2/spot/account/assets";
           const bSign = signBitGet(ts, "GET", bPath);
+          const abort = new AbortController();
+          const timer = setTimeout(() => abort.abort(), 5000);
           const [assetsRes, tickersRes] = await Promise.all([
-            fetch(`${acct().baseUrl}${bPath}`, { headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": bSign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" } }).then(r => r.json()),
-            fetch("https://api.bitget.com/api/v2/spot/market/tickers").then(r => r.json()),
+            fetch(`${acct().baseUrl}${bPath}`, { signal: abort.signal, headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": bSign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" } }).then(r => r.json()),
+            fetch("https://api.bitget.com/api/v2/spot/market/tickers", { signal: abort.signal }).then(r => r.json()),
           ]);
+          clearTimeout(timer);
           const prices = Object.fromEntries((tickersRes.data || []).map(t => [t.symbol, parseFloat(t.lastPr)]));
           let total = 0;
           for (const a of assetsRes.data || []) {
@@ -3961,8 +3964,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           portfolioValue = total;
         } catch(e) {
           console.error("[dashboard] Balance fetch error:", e.message);
-          // surface error in API so we can debug from dashboard
-          openPositions = [{ _error: e.message }];
+          // openPositions stays [] — dashboard will show "All cash" rather than crashing
         }
 
         // BTC regime from last bot log entry
