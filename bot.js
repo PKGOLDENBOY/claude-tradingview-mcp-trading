@@ -3621,6 +3621,7 @@ function toast(msg,dur=3000){
 }
 
 async function load(){
+  document.getElementById('total-val').textContent='Connecting...';
   try{
     const s=await apiFetch('/api/status');
 
@@ -3919,57 +3920,37 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       return;
     }
 
-    // Live status API — fetches real BitGet balances + local log
+    // Live status API — served entirely from local log + coinSnapshots (no network call, instant)
     if (req.method === "GET" && path === "/api/status") {
       if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Wrong PIN" })); return; }
-      (async () => {
+      try {
         const log = loadLog();
         const today = new Date().toISOString().slice(0, 10);
-        const todayTrades = log.trades.filter(t => t.timestamp?.startsWith(today) && t.orderPlaced);
-        const todayExits = log.trades.filter(t => t.type === "exit" && t.timestamp?.startsWith(today) && t.pnlUSD !== undefined);
+        const todayTrades = (log.trades || []).filter(t => t.timestamp?.startsWith(today) && t.orderPlaced);
+        const todayExits = (log.trades || []).filter(t => t.type === "exit" && t.timestamp?.startsWith(today) && t.pnlUSD !== undefined);
         const totalPnlUSD = todayExits.reduce((s, t) => s + (t.pnlUSD || 0), 0);
-        const winRate = calcWinRate(log.trades, 10);
+        const winRate = calcWinRate(log.trades || [], 10);
         const drawdown = checkDailyDrawdown(log);
 
-        // Fetch live balances from BitGet (5-second timeout so dashboard never hangs)
-        let portfolioValue = log.portfolioValue || acct().portfolioValue;
-        let usdtBalance = 0;
-        let openPositions = [];
-        try {
-          const ts = Date.now().toString();
-          const bPath = "/api/v2/spot/account/assets";
-          const bSign = signBitGet(ts, "GET", bPath);
-          const abort = new AbortController();
-          const timer = setTimeout(() => abort.abort(), 5000);
-          const [assetsRes, tickersRes] = await Promise.all([
-            fetch(`${acct().baseUrl}${bPath}`, { signal: abort.signal, headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": bSign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" } }).then(r => r.json()),
-            fetch("https://api.bitget.com/api/v2/spot/market/tickers", { signal: abort.signal }).then(r => r.json()),
-          ]);
-          clearTimeout(timer);
-          const prices = Object.fromEntries((tickersRes.data || []).map(t => [t.symbol, parseFloat(t.lastPr)]));
-          let total = 0;
-          for (const a of assetsRes.data || []) {
-            const qty = parseFloat(a.available) + parseFloat(a.frozen || 0);
-            if (qty < 0.0001) continue;
-            const price = a.coin === "USDT" ? 1 : (prices[a.coin + "USDT"] ?? 0);
-            const usdVal = qty * price;
-            if (usdVal < 0.5) continue;
-            total += usdVal;
-            if (a.coin === "USDT") { usdtBalance = usdVal; continue; }
-            if (a.coin === "BGB") continue;
-            const pos = log.positions?.[a.coin + "USDT"];
-            const entryPrice = pos?.entryPrice ?? price;
-            const pnlPct = ((price - entryPrice) / entryPrice) * 100;
-            openPositions.push({ coin: a.coin, qty, usdVal, entryPrice, pnlPct });
-          }
-          portfolioValue = total;
-        } catch(e) {
-          console.error("[dashboard] Balance fetch error:", e.message);
-          // openPositions stays [] — dashboard will show "All cash" rather than crashing
+        // Build portfolio from log data — bot keeps this synced on every scan
+        const usdtBalance = log.portfolioValue || 0;
+        const openPositions = [];
+        let portfolioValue = usdtBalance;
+
+        for (const [sym, pos] of Object.entries(log.positions || {})) {
+          if (!pos || !pos.open) continue;
+          const snap = coinSnapshots[sym];
+          const price = snap?.price ?? pos.entryPrice ?? 0;
+          const qty = parseFloat(pos.quantity || 0);
+          if (qty < 0.000001 || price < 0.000001) continue;
+          const usdVal = qty * price;
+          if (usdVal < 0.5) continue;
+          portfolioValue += usdVal;
+          const pnlPct = pos.entryPrice ? ((price - pos.entryPrice) / pos.entryPrice) * 100 : 0;
+          openPositions.push({ coin: sym.replace("USDT", ""), qty, usdVal, entryPrice: pos.entryPrice, pnlPct });
         }
 
-        // BTC regime from last bot log entry
-        const regimeMatch = log.trades?.slice(-20).reverse().find(t => t.regime);
+        const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
         const regime = regimeMatch?.regime || "RANGING";
 
         const status = {
@@ -3983,7 +3964,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           todayTrades: todayTrades.length,
           todayPnlUSD: totalPnlUSD,
           winRate: winRate ? `${winRate.wins}/${winRate.sample} (${(winRate.winRate * 100).toFixed(0)}%)` : "not enough data",
-          lastTrades: log.trades.slice(-5).map(t => ({
+          lastTrades: (log.trades || []).slice(-5).map(t => ({
             time: t.timestamp?.slice(0, 16),
             type: t.type,
             symbol: t.symbol,
@@ -3995,7 +3976,10 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         };
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(status));
-      })().catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+      } catch(e) {
+        console.error("[/api/status]", e.message);
+        res.writeHead(500); res.end(JSON.stringify({ error: e.message }));
+      }
       return;
     }
 
