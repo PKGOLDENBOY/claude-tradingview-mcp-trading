@@ -3620,7 +3620,7 @@ function filterCoins(q){
 </html>`;
   }
 
-  function coinDetailHTML(sym, c, pin) {
+  function coinDetailHTML(sym, c, pin, onWatchlist = false) {
     if (!c) return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AlphaBot</title></head><body style="background:#07090f;color:#f0f2f7;font-family:-apple-system,sans-serif;padding:32px;text-align:center"><p>No data yet for ${sym}</p><a href="/?pin=${pin}" style="color:#4f8dff">Back</a></body></html>`;
     const coin = sym.replace("USDT","");
     const rsiNum = parseFloat(c.rsi3||50);
@@ -3685,7 +3685,17 @@ ${c._live ? `<div style="margin:12px 20px 0;padding:10px 14px;background:#ffb800
 
 <div class="sec"><div class="sec-title">Recent Signals</div><div class="card" style="padding:0 16px">${sigRows}</div></div>
 
-<div style="margin:20px 20px 0"><a href="/?pin=${pin}" style="display:block;padding:14px;border-radius:14px;background:#0e1117;border:1px solid #1a1f2e;color:#4a5272;text-align:center;text-decoration:none;font-size:14px;font-weight:600">Back to Dashboard</a></div>
+<div style="margin:20px 20px 0;display:flex;flex-direction:column;gap:10px">
+  ${onWatchlist
+    ? `<form method="POST" action="/action?pin=${pin}&action=remove-coin&symbol=${sym}" onsubmit="return confirm('Remove ${sym.replace('USDT','')} from watchlist?')">
+        <button type="submit" style="width:100%;padding:14px;border-radius:14px;border:none;background:#ff4d6a22;color:#ff4d6a;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit;border:1px solid #ff4d6a44">Remove from Watchlist</button>
+       </form>`
+    : `<form method="POST" action="/action?pin=${pin}&action=add-coin&symbol=${sym}">
+        <button type="submit" style="width:100%;padding:14px;border-radius:14px;border:none;background:linear-gradient(135deg,#4f8dff,#3a6fd4);color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit">+ Add to Watchlist</button>
+       </form>`
+  }
+  <a href="/?pin=${pin}" style="display:block;padding:14px;border-radius:14px;background:#0e1117;border:1px solid #1a1f2e;color:#4a5272;text-align:center;text-decoration:none;font-size:14px;font-weight:600">Back to Dashboard</a>
+</div>
 </body></html>`;
   }
 
@@ -4302,8 +4312,9 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         }
       }
 
+      const onWatchlist = CONFIG.symbols.includes(sym);
       res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache, no-store" });
-      res.end(coinDetailHTML(sym, snapData, pin));
+      res.end(coinDetailHTML(sym, snapData, pin, onWatchlist));
       return;
     }
 
@@ -4326,6 +4337,32 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           console.log(`\n🚨 Dashboard sell-all: ${open.join(", ")}`);
           for (const sym of open) await run("SELL", sym).catch(e => console.error(`Force sell ${sym}:`, e.message));
         })();
+      } else if (action === "add-coin") {
+        const addSym = (urlObj.searchParams.get("symbol") || "").toUpperCase();
+        if (addSym && addSym.endsWith("USDT")) {
+          if (!CONFIG.symbols.includes(addSym)) {
+            CONFIG.symbols.push(addSym);
+            console.log(`\n📋 Dashboard: added ${addSym} to watchlist`);
+          }
+          // Persist in log so it survives restarts
+          const addLog = loadLog();
+          addLog.customWatchlist = [...new Set([...(addLog.customWatchlist || []), addSym])];
+          saveLog(addLog);
+          // Kick off an immediate scan of this coin
+          run(null, addSym).catch(() => {});
+        }
+        res.writeHead(302, { Location: `/coin?symbol=${addSym}&pin=${pin}` }); res.end();
+      } else if (action === "remove-coin") {
+        const rmSym = (urlObj.searchParams.get("symbol") || "").toUpperCase();
+        if (rmSym) {
+          const idx = CONFIG.symbols.indexOf(rmSym);
+          if (idx !== -1) { CONFIG.symbols.splice(idx, 1); console.log(`\n📋 Dashboard: removed ${rmSym} from watchlist`); }
+          // Remove from persisted custom list
+          const rmLog = loadLog();
+          rmLog.customWatchlist = (rmLog.customWatchlist || []).filter(s => s !== rmSym);
+          saveLog(rmLog);
+        }
+        res.writeHead(302, { Location: `/?pin=${pin}` }); res.end();
       } else { redirect(); }
       return;
     }
@@ -4900,8 +4937,22 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     writeTradeCsv(entryLog);
   }
 
+  // Merge any coins the user added via the dashboard (persisted in log.customWatchlist)
+  function mergeCustomWatchlist() {
+    try {
+      const log = loadLog();
+      const custom = (log.customWatchlist || []).filter(s => typeof s === "string");
+      let added = 0;
+      for (const sym of custom) {
+        if (!CONFIG.symbols.includes(sym)) { CONFIG.symbols.push(sym); added++; }
+      }
+      if (added > 0) console.log(`\n📋 Loaded ${added} custom watchlist coin(s) from log: ${custom.join(", ")}`);
+    } catch {}
+  }
+
   server.listen(PORT, () => {
     console.log(`\n🌐 Webhook server listening on port ${PORT}`);
+    mergeCustomWatchlist();
     console.log(`   Symbols:     ${CONFIG.symbols.join(", ")}`);
     console.log(`   Polling:     every 5 minutes\n`);
 
