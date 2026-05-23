@@ -3318,7 +3318,7 @@ if (process.argv.includes("--tax-summary")) {
   const PORT = process.env.PORT || 3000;
 
   // ─── Dashboard PIN ───────────────────────────────────────────────────────────
-  const BOT_PIN = process.env.BOT_PIN || "trade2026";
+  const BOT_PIN = process.env.BOT_PIN || "2026";
   let _tradingPaused = false;
 
   function checkPin(url) {
