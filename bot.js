@@ -3495,7 +3495,7 @@ if (process.argv.includes("--tax-summary")) {
           const rsiColor = rsiNum < 30 ? "#00d4a0" : rsiNum > 70 ? "#ff4d6a" : "#f0f2f7";
           const macdColor = c.macdBullish ? "#00d4a0" : "#ff4d6a";
           const vwapColor = parseFloat(c.price) > parseFloat(c.vwap || 0) ? "#00d4a0" : "#ff4d6a";
-          return `<a href="/coin?symbol=${sym}&pin=${pin}" style="display:block;padding:14px 18px;border-bottom:1px solid #1a1f2e;text-decoration:none;color:inherit">
+          return `<a href="/coin?symbol=${sym}&pin=${pin}" data-coin="${coin.toLowerCase()}" style="display:block;padding:14px 18px;border-bottom:1px solid #1a1f2e;text-decoration:none;color:inherit">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
               <div style="display:flex;align-items:center;gap:10px">
                 <div style="width:36px;height:36px;border-radius:10px;background:${rc}22;color:${rc};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;flex-shrink:0">${coin.slice(0,3)}</div>
@@ -3578,8 +3578,35 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 
 <div class="sec"><div class="sec-title">Open Positions</div><div class="card">${posHTML}</div></div>
 <div class="sec"><div class="sec-title">Recent Trades</div><div class="card">${tradesHTML}</div></div>
-<div class="sec"><div class="sec-title">Coins Being Watched</div><div class="card">${coinsHTML}</div></div>
+<div class="sec">
+  <div class="sec-title">Search Any Coin</div>
+  <form method="GET" action="/coin" onsubmit="var v=this.symbol.value.trim().toUpperCase();if(!v)return false;if(!v.endsWith('USDT'))this.symbol.value=v+'USDT';">
+    <input type="hidden" name="pin" value="${pin}">
+    <div style="display:flex;gap:8px">
+      <input type="text" name="symbol" placeholder="BTC, ETH, SOL, PEPE..." autocomplete="off" autocapitalize="characters" spellcheck="false"
+        style="flex:1;background:#0e1117;border:1px solid #1a1f2e;border-radius:12px;padding:13px 16px;color:#f0f2f7;font-size:15px;outline:none;font-family:inherit">
+      <button type="submit" style="background:linear-gradient(135deg,#4f8dff,#3a6fd4);color:#fff;border:none;border-radius:12px;padding:13px 20px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit">Go</button>
+    </div>
+  </form>
+</div>
+<div class="sec">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+    <div class="sec-title" style="margin-bottom:0">Coins Being Watched</div>
+    <input id="coin-filter" type="text" placeholder="Filter..." autocomplete="off"
+      style="background:#0e1117;border:1px solid #1a1f2e;border-radius:8px;padding:5px 10px;color:#f0f2f7;font-size:12px;outline:none;width:100px;font-family:inherit"
+      oninput="filterCoins(this.value)">
+  </div>
+  <div class="card" id="coins-list">${coinsHTML}</div>
+</div>
 <div class="sec"><div class="sec-title">Signal Log</div><div class="card">${sigHTML}</div></div>
+<script>
+function filterCoins(q){
+  q=q.trim().toLowerCase();
+  document.querySelectorAll('#coins-list a[data-coin]').forEach(function(el){
+    el.style.display=(!q||el.dataset.coin.includes(q))?'block':'none';
+  });
+}
+</script>
 
 <div class="sec"><div class="sec-title">Controls</div></div>
 <div class="btn-row">
@@ -3624,6 +3651,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   <div style="font-size:18px;font-weight:800">${coin}</div>
   <div style="margin-left:auto;font-size:20px;font-weight:800">$${Number(c.price||0).toFixed(4)}</div>
 </div>
+${c._live ? `<div style="margin:12px 20px 0;padding:10px 14px;background:#ffb80015;border:1px solid #ffb80030;border-radius:12px;font-size:12px;color:#ffb800">Live lookup — not on watchlist. Bot won't auto-trade this coin.</div>` : ""}
 
 <div class="sec"><div class="sec-title">Price &amp; Trend</div><div class="card">
   ${row("Price", "$"+Number(c.price||0).toFixed(4))}
@@ -4212,12 +4240,70 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
 
     // Coin detail page — GET /coin?symbol=BTCUSDT&pin=...
+    // Works for any coin on the market, not just watchlist — fetches live Binance data if needed
     if (req.method === "GET" && path === "/coin") {
       if (!checkPin(req.url)) { res.writeHead(302, { Location: "/" }); res.end(); return; }
-      const sym = (urlObj.searchParams.get("symbol") || "").toUpperCase();
+      let sym = (urlObj.searchParams.get("symbol") || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+      if (sym && !sym.endsWith("USDT")) sym += "USDT";
       const pin = urlObj.searchParams.get("pin");
+      if (!sym) { res.writeHead(302, { Location: `/?pin=${pin}` }); res.end(); return; }
+
+      let snapData = coinSnapshots[sym] || null;
+
+      // Not in watchlist — fetch live data from Binance right now
+      if (!snapData) {
+        try {
+          const [c1h, c4h, c15m] = await Promise.all([
+            fetchCandles(sym, "1H", 60).catch(() => []),
+            fetchCandles(sym, "4H", 30).catch(() => []),
+            fetchCandles(sym, "15m", 30).catch(() => []),
+          ]);
+          if (c1h.length >= 20) {
+            const closes1h = c1h.map(c => c.close);
+            const closes4h = c4h.map(c => c.close);
+            const closes15m = c15m.map(c => c.close);
+            const price = closes1h[closes1h.length - 1];
+            const ema8_1h  = calcEMA(closes1h, 8);
+            const ema21_1h = calcEMA(closes1h, 21);
+            const ema8_4h  = closes4h.length >= 8  ? calcEMA(closes4h, 8)  : null;
+            const ema21_4h = closes4h.length >= 21 ? calcEMA(closes4h, 21) : null;
+            const ema8_15m  = closes15m.length >= 8  ? calcEMA(closes15m, 8)  : null;
+            const ema21_15m = closes15m.length >= 21 ? calcEMA(closes15m, 21) : null;
+            const rsi3val  = calcRSI(closes1h, 3);
+            const rsi14val = calcRSI(closes1h, 14);
+            const macdData = calcMACD(closes1h);
+            const vwapVal  = calcVWAP(c1h);
+            const stoch    = calcStochRSI(closes1h);
+            const stochK   = stoch?.k ?? null;
+            snapData = {
+              price,
+              vwap: vwapVal,
+              rsi3: rsi3val != null ? rsi3val.toFixed(1) : null,
+              rsi14: rsi14val != null ? rsi14val.toFixed(1) : null,
+              macdBullish: macdData?.bullish ?? false,
+              macdLine: macdData?.macd?.toFixed(4) ?? null,
+              stochK: stochK != null ? stochK.toFixed(1) : null,
+              stochOversold: stochK != null && stochK < 20,
+              trend15m: ema8_15m && ema21_15m ? (ema8_15m > ema21_15m ? "up" : "down") : null,
+              trend1h: ema8_1h > ema21_1h ? "up" : "down",
+              trend4h: ema8_4h && ema21_4h ? (ema8_4h > ema21_4h ? "up" : "down") : null,
+              trendWeekly: null,
+              adxTrending: false,
+              divergence: false,
+              bbPct: null,
+              obvTrend: null,
+              nearestSupport: null,
+              nearestResistance: null,
+              _live: true,
+            };
+          }
+        } catch(e) {
+          console.error(`[/coin live fetch] ${sym}:`, e.message);
+        }
+      }
+
       res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache, no-store" });
-      res.end(coinDetailHTML(sym, coinSnapshots[sym] || null, pin));
+      res.end(coinDetailHTML(sym, snapData, pin));
       return;
     }
 
