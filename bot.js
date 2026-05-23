@@ -4257,63 +4257,53 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       const pin = urlObj.searchParams.get("pin");
       if (!sym) { res.writeHead(302, { Location: `/?pin=${pin}` }); res.end(); return; }
 
-      let snapData = coinSnapshots[sym] || null;
-
-      // Not in watchlist — fetch live data from Binance right now
-      if (!snapData) {
-        try {
-          const [c1h, c4h, c15m] = await Promise.all([
-            fetchCandles(sym, "1H", 60).catch(() => []),
-            fetchCandles(sym, "4H", 30).catch(() => []),
-            fetchCandles(sym, "15m", 30).catch(() => []),
-          ]);
-          if (c1h.length >= 20) {
-            const closes1h = c1h.map(c => c.close);
-            const closes4h = c4h.map(c => c.close);
-            const closes15m = c15m.map(c => c.close);
-            const price = closes1h[closes1h.length - 1];
-            const ema8_1h  = calcEMA(closes1h, 8);
-            const ema21_1h = calcEMA(closes1h, 21);
-            const ema8_4h  = closes4h.length >= 8  ? calcEMA(closes4h, 8)  : null;
-            const ema21_4h = closes4h.length >= 21 ? calcEMA(closes4h, 21) : null;
-            const ema8_15m  = closes15m.length >= 8  ? calcEMA(closes15m, 8)  : null;
-            const ema21_15m = closes15m.length >= 21 ? calcEMA(closes15m, 21) : null;
-            const rsi3val  = calcRSI(closes1h, 3);
-            const rsi14val = calcRSI(closes1h, 14);
-            const macdData = calcMACD(closes1h);
-            const vwapVal  = calcVWAP(c1h);
-            const stoch    = calcStochRSI(closes1h);
-            const stochK   = stoch?.k ?? null;
-            snapData = {
-              price,
-              vwap: vwapVal,
-              rsi3: rsi3val != null ? rsi3val.toFixed(1) : null,
-              rsi14: rsi14val != null ? rsi14val.toFixed(1) : null,
-              macdBullish: macdData?.bullish ?? false,
-              macdLine: macdData?.macd?.toFixed(4) ?? null,
-              stochK: stochK != null ? stochK.toFixed(1) : null,
-              stochOversold: stochK != null && stochK < 20,
-              trend15m: ema8_15m && ema21_15m ? (ema8_15m > ema21_15m ? "up" : "down") : null,
-              trend1h: ema8_1h > ema21_1h ? "up" : "down",
-              trend4h: ema8_4h && ema21_4h ? (ema8_4h > ema21_4h ? "up" : "down") : null,
-              trendWeekly: null,
-              adxTrending: false,
-              divergence: false,
-              bbPct: null,
-              obvTrend: null,
-              nearestSupport: null,
-              nearestResistance: null,
-              _live: true,
-            };
-          }
-        } catch(e) {
-          console.error(`[/coin live fetch] ${sym}:`, e.message);
+      (async () => {
+        let snapData = coinSnapshots[sym] || null;
+        if (!snapData) {
+          try {
+            const [c1h, c4h, c15m] = await Promise.all([
+              fetchCandles(sym, "1H", 60).catch(() => []),
+              fetchCandles(sym, "4H", 30).catch(() => []),
+              fetchCandles(sym, "15m", 30).catch(() => []),
+            ]);
+            if (c1h.length >= 20) {
+              const closes1h  = c1h.map(c => c.close);
+              const closes4h  = c4h.map(c => c.close);
+              const closes15m = c15m.map(c => c.close);
+              const price     = closes1h[closes1h.length - 1];
+              const ema8_1h   = calcEMA(closes1h, 8);
+              const ema21_1h  = calcEMA(closes1h, 21);
+              const ema8_4h   = closes4h.length >= 8  ? calcEMA(closes4h,  8)  : null;
+              const ema21_4h  = closes4h.length >= 21 ? calcEMA(closes4h,  21) : null;
+              const ema8_15m  = closes15m.length >= 8  ? calcEMA(closes15m, 8)  : null;
+              const ema21_15m = closes15m.length >= 21 ? calcEMA(closes15m, 21) : null;
+              const rsi3val   = calcRSI(closes1h, 3);
+              const rsi14val  = calcRSI(closes1h, 14);
+              const macdData  = calcMACD(closes1h);
+              const vwapVal   = calcVWAP(c1h);
+              const stoch     = calcStochRSI(closes1h);
+              const stochK    = stoch?.k ?? null;
+              snapData = {
+                price, vwap: vwapVal,
+                rsi3: rsi3val  != null ? rsi3val.toFixed(1)  : null,
+                rsi14: rsi14val != null ? rsi14val.toFixed(1) : null,
+                macdBullish: macdData?.bullish ?? false,
+                stochK: stochK != null ? stochK.toFixed(1) : null,
+                stochOversold: stochK != null && stochK < 20,
+                trend15m: ema8_15m && ema21_15m ? (ema8_15m > ema21_15m ? "up" : "down") : null,
+                trend1h: ema8_1h > ema21_1h ? "up" : "down",
+                trend4h: ema8_4h && ema21_4h  ? (ema8_4h  > ema21_4h  ? "up" : "down") : null,
+                trendWeekly: null, adxTrending: false, divergence: false,
+                bbPct: null, obvTrend: null, nearestSupport: null, nearestResistance: null,
+                _live: true,
+              };
+            }
+          } catch(e) { console.error(`[/coin live fetch] ${sym}:`, e.message); }
         }
-      }
-
-      const onWatchlist = CONFIG.symbols.includes(sym);
-      res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache, no-store" });
-      res.end(coinDetailHTML(sym, snapData, pin, onWatchlist));
+        const onWatchlist = CONFIG.symbols.includes(sym);
+        res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache, no-store" });
+        res.end(coinDetailHTML(sym, snapData, pin, onWatchlist));
+      })();
       return;
     }
 
