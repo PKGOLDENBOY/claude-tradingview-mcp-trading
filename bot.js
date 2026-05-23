@@ -1232,7 +1232,7 @@ async function detectMarketRegime() {
     }
     const avgATR = atrCount > 0 ? atrSum / atrCount : curATR;
     const volRatio = curATR / avgATR;
-    const btcTrend = ema8 > ema21 * 1.002 ? "bull" : ema8 < ema21 * 0.998 ? "bear" : "neutral";
+    const btcTrend = ema8 > ema21 * 1.005 ? "bull" : ema8 < ema21 * 0.995 ? "bear" : "neutral";
     const volatility = volRatio > 1.8 ? "high" : volRatio < 0.6 ? "low" : "normal";
     // BTC pump bypass — if the last 4H candle surged 2%+, treat as neutral even if EMA says bear.
     // This lets the bot catch breakout moves without waiting for slow EMAs to catch up.
@@ -2811,12 +2811,11 @@ async function run(tvSignal = null, symbol = null) {
     }
 
     // Bear market block — no new scalp entries when BTC macro trend is bearish.
-    // Exception: extreme oversold snap-backs (RSI < 20 + StochRSI oversold + MACD bullish)
+    // Exception: oversold snap-backs (RSI < 28 + StochRSI oversold OR MACD bullish)
     // These are high-probability rubber-band bounces that work even in downtrends.
     const bearSnapBack = regime.btcTrend === "bear" &&
-      rsi3 !== null && rsi3 < 20 &&
-      stochRsi?.oversold === true &&
-      macd.bullish === true;
+      rsi3 !== null && rsi3 < 28 &&
+      (stochRsi?.oversold === true || macd.bullish === true);
     if (regime.btcTrend === "bear" && !bearSnapBack) {
       console.log(`🚫 BEAR MARKET BLOCK — BTC regime is BEAR. Scalp entries blocked; exits still monitored.`);
       pushSignal(symbol, "BLOCKED", "Bear market — BTC regime is BEAR");
@@ -2824,7 +2823,7 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
     if (bearSnapBack) {
-      console.log(`⚡ BEAR SNAP-BACK — RSI(3)=${rsi3.toFixed(1)} + StochRSI oversold + MACD bull. Allowing small position (40% size, TP 3%, SL 2%).`);
+      console.log(`⚡ BEAR SNAP-BACK — RSI(3)=${rsi3.toFixed(1)} + (StochRSI oversold=${stochRsi?.oversold} | MACD bull=${macd.bullish}). Allowing small position (40% size, TP 3%, SL 2%).`);
     }
 
     // Upgrade 1: ETH correlation filter — ETH leads altcoins; if ETH dropped >2% last hour, skip
