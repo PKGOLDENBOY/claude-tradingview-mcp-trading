@@ -2388,6 +2388,12 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
+  // Manual pause via dashboard
+  if (_tradingPaused && tvSignal !== "SELL") {
+    console.log("\n⏸ Trading paused via dashboard — skipping entry");
+    return;
+  }
+
   // Drawdown stop — pause all trading if down 10% on the day
   const drawdown = checkDailyDrawdown(log);
   if (drawdown.paused) {
@@ -3311,63 +3317,399 @@ if (process.argv.includes("--tax-summary")) {
 } else {
   const PORT = process.env.PORT || 3000;
 
+  // ─── Dashboard PIN ───────────────────────────────────────────────────────────
+  const BOT_PIN = process.env.BOT_PIN || "trade2026";
+  let _tradingPaused = false;
+
+  function checkPin(url) {
+    const pin = new URL(url, "http://localhost").searchParams.get("pin");
+    return pin === BOT_PIN;
+  }
+
+  function dashboardHTML() {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trading Bot</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;padding:16px;max-width:480px;margin:0 auto}
+h1{font-size:22px;font-weight:700;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.card{background:#1e293b;border-radius:14px;padding:16px;margin-bottom:12px}
+.card-title{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;font-weight:600}
+.big{font-size:36px;font-weight:700;letter-spacing:-1px}
+.sub{font-size:13px;color:#94a3b8;margin-top:4px}
+.row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #1e3a5f22}
+.row:last-child{border-bottom:none}
+.label{font-size:14px;color:#94a3b8}
+.value{font-size:14px;font-weight:500}
+.green{color:#4ade80}.red{color:#f87171}.yellow{color:#fbbf24}.gray{color:#64748b}
+.badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:700}
+.badge-green{background:#14532d;color:#4ade80}
+.badge-red{background:#450a0a;color:#f87171}
+.badge-blue{background:#1e3a8a;color:#93c5fd}
+.badge-yellow{background:#451a03;color:#fbbf24}
+.dot{width:9px;height:9px;border-radius:50%;background:#4ade80;display:inline-block;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.pos-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #1e3a5f22}
+.pos-row:last-child{border-bottom:none}
+.pos-coin{font-size:16px;font-weight:700}
+.pos-qty{font-size:12px;color:#64748b}
+.trade-row{padding:10px 0;border-bottom:1px solid #1e3a5f22}
+.trade-row:last-child{border-bottom:none}
+.trade-top{display:flex;justify-content:space-between;align-items:center}
+.trade-meta{font-size:12px;color:#64748b;margin-top:3px}
+.btn{width:100%;padding:15px;border-radius:12px;border:none;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:10px;transition:opacity .2s}
+.btn:active{opacity:.7}
+.btn:last-child{margin-bottom:0}
+.btn-blue{background:#2563eb;color:#fff}
+.btn-red{background:#dc2626;color:#fff}
+.btn-green{background:#16a34a;color:#fff}
+.btn-gray{background:#1e293b;color:#94a3b8;border:1px solid #334155}
+.updated{text-align:center;color:#334155;font-size:11px;margin-top:8px;padding-bottom:24px}
+#pin-screen{position:fixed;inset:0;background:#0f172a;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:32px}
+#pin-screen h2{font-size:24px;font-weight:700}
+#pin-screen p{color:#64748b;text-align:center;font-size:14px}
+#pin-input{width:100%;max-width:300px;padding:14px;border-radius:12px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font-size:18px;text-align:center;letter-spacing:2px}
+#pin-btn{width:100%;max-width:300px;padding:14px;border-radius:12px;border:none;background:#2563eb;color:#fff;font-size:16px;font-weight:700;cursor:pointer}
+#pin-err{color:#f87171;font-size:13px;display:none}
+#main{display:none}
+#toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1e293b;border:1px solid #334155;padding:12px 20px;border-radius:10px;font-size:14px;display:none;z-index:99;white-space:nowrap;box-shadow:0 4px 24px #0008}
+</style>
+</head>
+<body>
+<div id="pin-screen">
+  <h2>🤖 Trading Bot</h2>
+  <p>Enter your PIN to access the control panel</p>
+  <input id="pin-input" type="password" placeholder="PIN" inputmode="numeric" maxlength="20">
+  <div id="pin-err">Wrong PIN — try again</div>
+  <button id="pin-btn" onclick="submitPin()">Unlock</button>
+</div>
+
+<div id="main">
+  <h1><span class="dot"></span> Trading Bot</h1>
+
+  <div class="card">
+    <div class="card-title">Portfolio</div>
+    <div class="big" id="total-val">—</div>
+    <div class="sub" id="usdt-cash">Cash: —</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Status</div>
+    <div class="row"><span class="label">Mode</span><span id="mode-badge"></span></div>
+    <div class="row"><span class="label">BTC Regime</span><span class="value" id="regime">—</span></div>
+    <div class="row"><span class="label">Trading</span><span id="paused-badge"></span></div>
+    <div class="row"><span class="label">Trades today</span><span class="value" id="today-trades">—</span></div>
+    <div class="row"><span class="label">Today's P&amp;L</span><span class="value" id="today-pnl">—</span></div>
+    <div class="row"><span class="label">Win rate (last 10)</span><span class="value" id="win-rate">—</span></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Open Positions</div>
+    <div id="positions">—</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Last 5 Trades</div>
+    <div id="trades">—</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Controls</div>
+    <button class="btn btn-blue" onclick="forceCheck()">🔍 Force Scan Now</button>
+    <button class="btn btn-red" onclick="confirmSellAll()">🚨 Sell All Positions</button>
+    <button class="btn btn-gray" id="pause-btn" onclick="togglePause()">⏸ Pause Trading</button>
+  </div>
+
+  <div class="updated" id="updated"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+let PIN = localStorage.getItem('bot_pin') || '';
+if (PIN) tryShowMain();
+
+document.getElementById('pin-input').addEventListener('keydown', e => { if(e.key==='Enter') submitPin(); });
+
+function submitPin() {
+  PIN = document.getElementById('pin-input').value.trim();
+  tryShowMain();
+}
+
+async function tryShowMain() {
+  if (!PIN) return;
+  const r = await fetch('/api/status?pin=' + PIN).catch(() => null);
+  if (!r || !r.ok) {
+    document.getElementById('pin-err').style.display = 'block';
+    PIN = '';
+    return;
+  }
+  localStorage.setItem('bot_pin', PIN);
+  document.getElementById('pin-screen').style.display = 'none';
+  document.getElementById('main').style.display = 'block';
+  load();
+  setInterval(load, 30000);
+}
+
+async function apiFetch(path, method='GET') {
+  const r = await fetch(path + '?pin=' + PIN, { method });
+  return r.json();
+}
+
+function toast(msg, dur=3000) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.style.display='none', dur);
+}
+
+async function load() {
+  try {
+    const s = await apiFetch('/api/status');
+
+    document.getElementById('total-val').textContent = '$' + Number(s.portfolioValue).toFixed(2);
+    document.getElementById('usdt-cash').textContent = 'Cash: $' + Number(s.usdtBalance).toFixed(2);
+
+    const mode = s.mode || 'LIVE';
+    document.getElementById('mode-badge').innerHTML = '<span class="badge ' + (mode==='LIVE'?'badge-green':'badge-blue') + '">' + mode + '</span>';
+
+    const regime = s.regime || '—';
+    const regimeColor = regime.includes('BEAR') ? 'red' : regime.includes('BULL') ? 'green' : 'yellow';
+    document.getElementById('regime').innerHTML = '<span class="' + regimeColor + '">' + regime + '</span>';
+
+    const paused = s.paused;
+    document.getElementById('paused-badge').innerHTML = paused
+      ? '<span class="badge badge-yellow">⏸ PAUSED</span>'
+      : '<span class="badge badge-green">▶ ACTIVE</span>';
+    document.getElementById('pause-btn').textContent = paused ? '▶️ Resume Trading' : '⏸ Pause Trading';
+    document.getElementById('pause-btn').className = paused ? 'btn btn-green' : 'btn btn-gray';
+
+    document.getElementById('today-trades').textContent = (s.todayTrades || 0) + ' / 20';
+
+    const pnl = Number(s.todayPnlUSD || 0);
+    document.getElementById('today-pnl').innerHTML = '<span class="' + (pnl>=0?'green':'red') + '">' + (pnl>=0?'+':'') + '$' + pnl.toFixed(2) + '</span>';
+
+    document.getElementById('win-rate').textContent = s.winRate || '—';
+
+    // Positions
+    const pos = s.openPositions || [];
+    document.getElementById('positions').innerHTML = pos.length === 0
+      ? '<span class="gray">All cash — no open positions</span>'
+      : pos.map(p => {
+          const pnlColor = p.pnlPct >= 0 ? 'green' : 'red';
+          return '<div class="pos-row">' +
+            '<div><div class="pos-coin">' + p.coin + '</div><div class="pos-qty">' + Number(p.qty).toFixed(4) + ' @ $' + Number(p.entryPrice).toFixed(4) + '</div></div>' +
+            '<div style="text-align:right"><div class="' + pnlColor + '" style="font-weight:700">' + (p.pnlPct>=0?'+':'') + p.pnlPct.toFixed(2) + '%</div><div class="' + pnlColor + '">$' + Number(p.usdVal).toFixed(2) + '</div></div>' +
+          '</div>';
+        }).join('');
+
+    // Trades
+    const trades = (s.lastTrades || []).slice().reverse();
+    document.getElementById('trades').innerHTML = trades.length === 0
+      ? '<span class="gray">No trades yet</span>'
+      : trades.map(t => {
+          const isEntry = t.type === 'entry';
+          const pnlVal = t.pnlPct ? parseFloat(t.pnlPct) : null;
+          const pnlColor = pnlVal === null ? '' : pnlVal >= 0 ? 'green' : 'red';
+          return '<div class="trade-row">' +
+            '<div class="trade-top">' +
+              '<span><strong>' + (t.symbol||'').replace('USDT','') + '</strong> <span class="badge ' + (isEntry?'badge-blue':'badge-green') + '">' + (t.type||'').toUpperCase() + '</span></span>' +
+              (t.pnl ? '<span class="' + pnlColor + '" style="font-weight:600">' + t.pnl + '</span>' : '') +
+            '</div>' +
+            '<div class="trade-meta">$' + Number(t.price||0).toFixed(4) + ' &nbsp;·&nbsp; ' + (t.time||'').slice(11,16) + ' UTC</div>' +
+          '</div>';
+        }).join('');
+
+    document.getElementById('updated').textContent = 'Last updated ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    toast('⚠️ Failed to load — retrying');
+  }
+}
+
+async function forceCheck() {
+  toast('🔍 Triggering scan across all coins...');
+  await apiFetch('/api/force-check', 'POST');
+  setTimeout(load, 4000);
+}
+
+function confirmSellAll() {
+  if (confirm('Sell ALL open positions immediately?')) doSellAll();
+}
+
+async function doSellAll() {
+  toast('🚨 Selling all positions...', 6000);
+  const r = await apiFetch('/api/sell-all', 'POST');
+  toast(r.message || 'Done');
+  setTimeout(load, 4000);
+}
+
+async function togglePause() {
+  const s = await apiFetch('/api/status');
+  const r = await apiFetch(s.paused ? '/api/resume' : '/api/pause', 'POST');
+  toast(r.message || 'Done');
+  load();
+}
+</script>
+</body>
+</html>`;
+  }
+
   const server = http.createServer((req, res) => {
-    // Health check — Railway uses this to confirm the service is up
-    if (req.method === "GET" && (req.url === "/" || req.url === "/health")) {
+    const urlObj = new URL(req.url, "http://localhost");
+    const path = urlObj.pathname;
+
+    // Railway health check — must stay unprotected
+    if (req.method === "GET" && (path === "/health")) {
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end("OK");
       return;
     }
 
-    // Status endpoint — shows current bot state, positions, last decisions
-    if (req.method === "GET" && req.url === "/status") {
-      const log = loadLog();
-      const today = new Date().toISOString().slice(0, 10);
-      const todayTrades = log.trades.filter(t => t.timestamp.startsWith(today) && t.orderPlaced);
-      const todayExits = log.trades.filter(t => t.type === "exit" && t.timestamp.startsWith(today) && t.pnlUSD !== undefined);
-      const totalPnl = todayExits.reduce((s, t) => s + (t.pnlUSD || 0), 0);
-      const winRate = calcWinRate(log.trades, 10);
-      const drawdown = checkDailyDrawdown(log);
-      const adaptive = getAdaptiveMode(log.trades);
-      const dailyProfit = checkDailyProfitTarget(log);
-      const status = {
-        time: new Date().toISOString(),
-        version: "v5-per-coin-adaptive",
-        mode: CONFIG.paperTrading ? "PAPER" : "LIVE",
-        symbols: CONFIG.symbols,
-        coinConfig: CONFIG.symbols.reduce((acc, s) => {
-          const b = BACKTEST[s];
-          acc[s] = b ? `${b.timeframe} | WR ${b.winRate}% | PF ${b.profitFactor}` : `${CONFIG.timeframe} | no backtest`;
-          return acc;
-        }, {}),
-        portfolio: `$${(log.portfolioValue || acct().portfolioValue).toFixed(4)}`,
-        dailyGoal: `$${dailyProfit.startValue.toFixed(2)} → $${(dailyProfit.startValue * 1.3).toFixed(2)} | ${dailyProfit.gainPct >= 0 ? "+" : ""}${dailyProfit.gainPct.toFixed(2)}% ${dailyProfit.targetHit ? "🏆 TARGET HIT" : ""}`,
-        positions: log.positions || {},
-        todayTrades: todayTrades.length,
-        todayPnl: `$${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)}`,
-        drawdown: `${drawdown.drawdownPct.toFixed(2)}% / ${drawdown.limit}%`,
-        paused: drawdown.paused,
-        winRate: winRate ? `${winRate.wins}/${winRate.sample} (${(winRate.winRate*100).toFixed(0)}%)` : "not enough data",
-        strategyMode: adaptive.label,
-        lastTrades: log.trades.slice(-5).map(t => ({
-          time: t.timestamp?.slice(0,16),
-          type: t.type,
-          symbol: t.symbol,
-          price: t.price,
-          pnl: t.pnlPct ? `${t.pnlPct >= 0 ? "+" : ""}${t.pnlPct.toFixed(2)}%` : null,
-          decision: t.claudeAnalysis?.action || (t.shouldExit ? "EXIT" : "HOLD"),
-          placed: t.orderPlaced,
-          blockedBy: !t.orderPlaced && t.conditions ? t.conditions.filter(c => !c.pass).map(c => c.label) : undefined,
-          claudeReason: t.claudeAnalysis?.reasoning || undefined,
-        })),
-      };
+    // Mobile dashboard — PIN entered in browser
+    if (req.method === "GET" && path === "/") {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(dashboardHTML());
+      return;
+    }
+
+    // Live status API — fetches real BitGet balances + local log
+    if (req.method === "GET" && path === "/api/status") {
+      if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Wrong PIN" })); return; }
+      (async () => {
+        const log = loadLog();
+        const today = new Date().toISOString().slice(0, 10);
+        const todayTrades = log.trades.filter(t => t.timestamp?.startsWith(today) && t.orderPlaced);
+        const todayExits = log.trades.filter(t => t.type === "exit" && t.timestamp?.startsWith(today) && t.pnlUSD !== undefined);
+        const totalPnlUSD = todayExits.reduce((s, t) => s + (t.pnlUSD || 0), 0);
+        const winRate = calcWinRate(log.trades, 10);
+        const drawdown = checkDailyDrawdown(log);
+
+        // Fetch live balances from BitGet
+        let portfolioValue = log.portfolioValue || acct().portfolioValue;
+        let usdtBalance = 0;
+        let openPositions = [];
+        try {
+          const ts = Date.now().toString();
+          const bPath = "/api/v2/spot/account/assets";
+          const bSign = signBitGet(ts, "GET", bPath);
+          const [assetsRes, tickersRes] = await Promise.all([
+            fetch(`${acct().baseUrl}${bPath}`, { headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": bSign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" } }).then(r => r.json()),
+            fetch("https://api.bitget.com/api/v2/spot/market/tickers").then(r => r.json()),
+          ]);
+          const prices = Object.fromEntries((tickersRes.data || []).map(t => [t.symbol, parseFloat(t.lastPr)]));
+          let total = 0;
+          for (const a of assetsRes.data || []) {
+            const qty = parseFloat(a.available) + parseFloat(a.frozen || 0);
+            if (qty < 0.0001) continue;
+            const price = a.coin === "USDT" ? 1 : (prices[a.coin + "USDT"] ?? 0);
+            const usdVal = qty * price;
+            if (usdVal < 0.5) continue;
+            total += usdVal;
+            if (a.coin === "USDT") { usdtBalance = usdVal; continue; }
+            if (a.coin === "BGB") continue;
+            const pos = log.positions?.[a.coin + "USDT"];
+            const entryPrice = pos?.entryPrice ?? price;
+            const pnlPct = ((price - entryPrice) / entryPrice) * 100;
+            openPositions.push({ coin: a.coin, qty, usdVal, entryPrice, pnlPct });
+          }
+          portfolioValue = total;
+        } catch {}
+
+        // BTC regime from last bot log entry
+        const regimeMatch = log.trades?.slice(-20).reverse().find(t => t.regime);
+        const regime = regimeMatch?.regime || "RANGING";
+
+        const status = {
+          time: new Date().toISOString(),
+          mode: CONFIG.paperTrading ? "PAPER" : "LIVE",
+          paused: _tradingPaused || drawdown.paused,
+          regime,
+          portfolioValue,
+          usdtBalance,
+          openPositions,
+          todayTrades: todayTrades.length,
+          todayPnlUSD: totalPnlUSD,
+          winRate: winRate ? `${winRate.wins}/${winRate.sample} (${(winRate.winRate * 100).toFixed(0)}%)` : "not enough data",
+          lastTrades: log.trades.slice(-5).map(t => ({
+            time: t.timestamp?.slice(0, 16),
+            type: t.type,
+            symbol: t.symbol,
+            price: t.price,
+            pnlPct: t.pnlPct,
+            pnl: t.pnlPct != null ? `${t.pnlPct >= 0 ? "+" : ""}${t.pnlPct.toFixed(2)}%` : null,
+          })),
+        };
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(status));
+      })().catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+      return;
+    }
+
+    // Force scan all symbols immediately
+    if (req.method === "POST" && path === "/api/force-check") {
+      if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Wrong PIN" })); return; }
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(status, null, 2));
+      res.end(JSON.stringify({ message: "Scan triggered" }));
+      (async () => {
+        for (const sym of CONFIG.symbols) {
+          await run(null, sym).catch(() => {});
+        }
+      })();
+      return;
+    }
+
+    // Sell all open positions
+    if (req.method === "POST" && path === "/api/sell-all") {
+      if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Wrong PIN" })); return; }
+      (async () => {
+        const log = loadLog();
+        const open = Object.entries(log.positions || {}).filter(([, p]) => p && p.open).map(([sym]) => sym);
+        if (open.length === 0) { res.writeHead(200); res.end(JSON.stringify({ message: "No open positions to sell" })); return; }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ message: `Selling ${open.length} position(s)...` }));
+        console.log(`\n🚨 Dashboard: force sell-all triggered (${open.join(", ")})`);
+        for (const sym of open) {
+          await run("SELL", sym).catch(e => console.error(`Force sell ${sym}:`, e.message));
+        }
+      })().catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+      return;
+    }
+
+    // Pause trading
+    if (req.method === "POST" && path === "/api/pause") {
+      if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Wrong PIN" })); return; }
+      _tradingPaused = true;
+      console.log("⏸ Trading paused via dashboard");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ message: "⏸ Trading paused" }));
+      return;
+    }
+
+    // Resume trading
+    if (req.method === "POST" && path === "/api/resume") {
+      if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Wrong PIN" })); return; }
+      _tradingPaused = false;
+      console.log("▶ Trading resumed via dashboard");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ message: "▶️ Trading resumed" }));
+      return;
+    }
+
+    // Legacy status endpoint
+    if (req.method === "GET" && path === "/status") {
+      const log = loadLog();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ portfolio: log.portfolioValue, positions: log.positions, paused: _tradingPaused }));
       return;
     }
 
     // TradingView webhook
-    if (req.method === "POST" && req.url === "/webhook") {
+    if (req.method === "POST" && path === "/webhook") {
       let body = "";
       req.on("data", (chunk) => (body += chunk.toString()));
       req.on("end", async () => {
