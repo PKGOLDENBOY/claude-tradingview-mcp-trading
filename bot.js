@@ -132,6 +132,9 @@ function pushSignal(symbol, result, reason, indicators = {}) {
 // Dashboard pause flag — toggled via /api/pause and /api/resume
 let _tradingPaused = false;
 
+// Per-coin latest scan data — shown in dashboard coin detail view
+const coinSnapshots = {};
+
 // ─── Onboarding ───────────────────────────────────────────────────────────────
 
 function checkOnboarding() {
@@ -2511,6 +2514,30 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
+  // Store snapshot for dashboard coin detail view
+  coinSnapshots[symbol] = {
+    symbol, price, updatedAt: new Date().toISOString(),
+    rsi3: rsi3?.toFixed(2), rsi15m: rsi15m?.toFixed(2),
+    vwap: vwap?.toFixed(4),
+    ema8: ema8?.toFixed(4), ema21: ema21?.toFixed(4),
+    trend15m: ema8 > ema21 ? "up" : "down",
+    trend1h: bullTrend1h ? "up" : "down",
+    trend4h: bullTrend4h ? "up" : "down",
+    trendWeekly: bullTrendWeekly === null ? null : bullTrendWeekly ? "up" : "down",
+    macdBullish: macd.bullish, macdHist: macd.histogram?.toFixed(4),
+    bbPct: (bb.pct * 100)?.toFixed(1), bbWidth: bb.width?.toFixed(2),
+    adx: adx?.adx?.toFixed(1), adxTrending: adx?.trending,
+    stochK: stochRsi?.k?.toFixed(1), stochOversold: stochRsi?.oversold, stochOverbought: stochRsi?.overbought,
+    volAboveAvg: vol.aboveAvg, volPct: (vol.current / vol.avg * 100)?.toFixed(0),
+    divergence: !!divergence, obvRising: obv.rising,
+    support: sr.nearestSupport?.toFixed(4), distToSupport: sr.distToSupport?.toFixed(2), nearSupport: sr.nearSupport,
+    resistance: sr.nearestResistance?.toFixed(4), distToResistance: sr.distToResistance?.toFixed(2),
+    patterns: patterns.length ? patterns.join(", ") : null,
+    doubleBottom: doubleBottom?.detected || false,
+    regime: regime?.regime,
+    lastSignal: signalLog.filter(s => s.symbol === symbol).slice(-1)[0] || null,
+  };
+
   const currentPortfolio = log.portfolioValue || acct().portfolioValue;
   // Kelly Criterion sizing — optimal fraction based on live win rate + payoff ratio per coin
   const kellySizePct = kellyPositionPct(log, symbol, CONFIG.maxTradeSizePct || 0.25);
@@ -3564,11 +3591,30 @@ body{font-family:'Inter',system-ui,sans-serif;color:var(--text);padding:0;max-wi
     </div>
   </div>
 
+  <!-- Coins Being Watched -->
+  <div class="section">
+    <div class="section-header">Coins Being Watched</div>
+    <div class="card" id="coins-card">
+      <div class="empty-state muted">Loading...</div>
+    </div>
+  </div>
+
   <!-- Signal Log -->
   <div class="section">
     <div class="section-header">Signal Log</div>
     <div class="card" id="signals-card">
       <div class="empty-state muted">Loading signals...</div>
+    </div>
+  </div>
+
+  <!-- Coin Detail Modal -->
+  <div id="modal-overlay" style="display:none;position:fixed;inset:0;background:#000000cc;z-index:200;overflow-y:auto;padding:20px" onclick="closeModal(event)">
+    <div id="modal" style="background:#0e1117;border:1px solid #1a1f2e;border-radius:24px;max-width:430px;margin:0 auto;overflow:hidden">
+      <div style="padding:20px 20px 0;display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:20px;font-weight:800;letter-spacing:-.5px" id="modal-title">—</div>
+        <button onclick="closeModal()" style="background:#1a1f2e;border:none;color:#94a3b8;width:32px;height:32px;border-radius:50%;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center">×</button>
+      </div>
+      <div id="modal-body" style="padding:16px 20px 24px"></div>
     </div>
   </div>
 
@@ -3726,7 +3772,7 @@ async function load(){
         const dotColor=isEntry?'var(--blue)':isWin?'var(--green)':isLoss?'var(--red)':isHold?'var(--muted)':'var(--yellow)';
         const coin=(sig.symbol||'').replace('USDT','');
         const timeStr=(sig.time||'').slice(11,16);
-        return '<div class="trade-item">'+
+        return '<div class="trade-item" style="cursor:pointer" onclick="showCoin(\''+sig.symbol+'\')">'+
           '<div class="trade-left">'+
             '<div class="trade-icon '+iconClass+'" style="background:'+dotColor+'22;color:'+dotColor+'">'+icon+'</div>'+
             '<div>'+
@@ -3742,9 +3788,137 @@ async function load(){
       }).join('');
 
     document.getElementById('updated').textContent='Updated '+new Date().toLocaleTimeString();
+    loadCoins();
   }catch(e){
     toast('⚠️ Connection error — retrying');
   }
+}
+
+// ── Coins watched grid ──
+async function loadCoins(){
+  try{
+    const coins=await apiFetch('/api/coins');
+    const syms=Object.keys(coins);
+    if(syms.length===0){ document.getElementById('coins-card').innerHTML='<div class="empty-state muted">Waiting for first scan...</div>'; return; }
+    document.getElementById('coins-card').innerHTML=syms.map(sym=>{
+      const c=coins[sym];
+      const coin=sym.replace('USDT','');
+      const sig=c.lastSignal;
+      const res=sig?sig.result:'—';
+      const rc=res==='ENTRY'?'var(--blue)':res==='EXIT_WIN'?'var(--green)':res==='EXIT_LOSS'?'var(--red)':res==='HOLD'?'var(--muted)':'var(--yellow)';
+      const t15=c.trend15m==='up'?'↑':'↓'; const tc15=c.trend15m==='up'?'var(--green)':'var(--red)';
+      const t1h=c.trend1h==='up'?'↑':'↓'; const tc1h=c.trend1h==='up'?'var(--green)':'var(--red)';
+      return '<div class="trade-item" style="cursor:pointer" onclick="showCoin(\''+sym+'\')">'+
+        '<div class="trade-left">'+
+          '<div class="trade-icon" style="background:'+rc+'22;color:'+rc+';font-size:11px;font-weight:800">'+coin.slice(0,3)+'</div>'+
+          '<div>'+
+            '<div class="trade-coin">'+coin+'</div>'+
+            '<div class="trade-meta">RSI '+c.rsi3+' &nbsp;·&nbsp; <span style="color:'+tc15+'">15m '+t15+'</span> <span style="color:'+tc1h+'">1H '+t1h+'</span></div>'+
+          '</div>'+
+        '</div>'+
+        '<div class="trade-right">'+
+          '<div style="font-size:13px;font-weight:700;color:'+rc+'">'+res+'</div>'+
+          '<div class="trade-time">$'+Number(c.price).toFixed(3)+'</div>'+
+        '</div>'+
+      '</div>';
+    }).join('');
+  }catch(e){}
+}
+
+// ── Coin detail modal ──
+function ind(label,val,good){
+  const color=good===true?'var(--green)':good===false?'var(--red)':'var(--muted)';
+  return '<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #1a1f2e22">'+
+    '<span style="color:#64748b;font-size:13px">'+label+'</span>'+
+    '<span style="font-size:13px;font-weight:600;color:'+color+'">'+val+'</span>'+
+  '</div>';
+}
+
+async function showCoin(sym){
+  document.getElementById('modal-title').textContent=sym.replace('USDT','')+' — Live Analysis';
+  document.getElementById('modal-body').innerHTML='<div style="text-align:center;padding:24px;color:#64748b">Loading...</div>';
+  document.getElementById('modal-overlay').style.display='block';
+  document.body.style.overflow='hidden';
+  try{
+    const [c, allSigs] = await Promise.all([
+      apiFetch('/api/coin?symbol='+sym),
+      apiFetch('/api/status'),
+    ]);
+    if(c.error){ document.getElementById('modal-body').innerHTML='<div style="color:#f87171;padding:16px">'+c.error+'</div>'; return; }
+    const coinSigs=(allSigs.signals||[]).filter(s=>s.symbol===sym);
+    const lastSig=c.lastSignal;
+    const sigColor=lastSig?{ENTRY:'var(--blue)',EXIT_WIN:'var(--green)',EXIT_LOSS:'var(--red)',BLOCKED:'var(--red)',HOLD:'var(--muted)'}[lastSig.result]||'var(--muted)':'var(--muted)';
+
+    let html='';
+
+    // Price + last signal
+    html+='<div style="background:#1a1f2e;border-radius:14px;padding:14px;margin-bottom:14px">';
+    html+='<div style="font-size:28px;font-weight:800;letter-spacing:-1px">$'+Number(c.price).toFixed(4)+'</div>';
+    if(lastSig) html+='<div style="margin-top:4px;font-size:13px;font-weight:600;color:'+sigColor+'">'+lastSig.result+' — '+lastSig.reason+'</div>';
+    html+='<div style="font-size:11px;color:#475569;margin-top:4px">Updated '+new Date(c.updatedAt).toLocaleTimeString()+'</div>';
+    html+='</div>';
+
+    // Trend section
+    html+='<div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:6px">Trend</div>';
+    html+='<div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:0 14px;margin-bottom:14px">';
+    html+=ind('15m',c.trend15m==='up'?'↑ Uptrend':'↓ Downtrend',c.trend15m==='up');
+    html+=ind('1 Hour',c.trend1h==='up'?'↑ Uptrend':'↓ Downtrend',c.trend1h==='up');
+    html+=ind('4 Hour',c.trend4h==='up'?'↑ Uptrend':'↓ Downtrend',c.trend4h==='up');
+    if(c.trendWeekly!==null) html+=ind('Weekly',c.trendWeekly==='up'?'↑ Bull Market':'↓ Bear Market',c.trendWeekly==='up');
+    html+='</div>';
+
+    // Indicators
+    html+='<div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:6px">Indicators</div>';
+    html+='<div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:0 14px;margin-bottom:14px">';
+    html+=ind('RSI(3)',c.rsi3, parseFloat(c.rsi3)<30?true:parseFloat(c.rsi3)>70?false:null);
+    if(c.rsi15m) html+=ind('RSI(15m)',c.rsi15m,parseFloat(c.rsi15m)<40?true:parseFloat(c.rsi15m)>60?false:null);
+    html+=ind('VWAP','$'+c.vwap,parseFloat(c.price)>parseFloat(c.vwap)?true:false);
+    html+=ind('MACD',c.macdBullish?'Bullish ↑':'Bearish ↓',c.macdBullish);
+    html+=ind('StochRSI','K='+c.stochK+(c.stochOversold?' (oversold)':c.stochOverbought?' (overbought)':''),c.stochOversold?true:c.stochOverbought?false:null);
+    html+=ind('BB%',c.bbPct+'%',parseFloat(c.bbPct)<25?true:parseFloat(c.bbPct)>80?false:null);
+    html+=ind('ADX',c.adx+(c.adxTrending?' (trending)'?' (choppy)'),c.adxTrending);
+    html+=ind('Volume',c.volPct+'% of avg',c.volAboveAvg);
+    html+=ind('OBV',c.obvRising?'Rising ↑':'Falling ↓',c.obvRising);
+    if(c.divergence) html+=ind('Divergence','✅ Bullish detected',true);
+    if(c.doubleBottom) html+=ind('Pattern','✅ Double Bottom',true);
+    if(c.patterns) html+=ind('Patterns',c.patterns,null);
+    html+='</div>';
+
+    // Support & Resistance
+    html+='<div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:6px">Support &amp; Resistance</div>';
+    html+='<div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:0 14px;margin-bottom:14px">';
+    html+=ind('Support','$'+c.support+' ('+c.distToSupport+'% below)',c.nearSupport?true:null);
+    html+=ind('Resistance','$'+c.resistance+' ('+c.distToResistance+'% above)',null);
+    html+='</div>';
+
+    // Signal history for this coin
+    if(coinSigs.length>0){
+      html+='<div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:6px">Signal History</div>';
+      html+='<div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:0 14px;margin-bottom:4px">';
+      html+=coinSigs.map(s=>{
+        const sc={ENTRY:'var(--blue)',EXIT_WIN:'var(--green)',EXIT_LOSS:'var(--red)',BLOCKED:'var(--red)',HOLD:'var(--muted)'}[s.result]||'var(--muted)';
+        return '<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:8px 0;border-bottom:1px solid #1a1f2e22">'+
+          '<span style="font-size:12px;color:#94a3b8;max-width:220px;line-height:1.4">'+s.reason+'</span>'+
+          '<div style="text-align:right;flex-shrink:0;margin-left:8px">'+
+            '<div style="font-size:11px;font-weight:700;color:'+sc+'">'+s.result+'</div>'+
+            '<div style="font-size:10px;color:#475569">'+s.time.slice(11,16)+' UTC</div>'+
+          '</div>'+
+        '</div>';
+      }).join('');
+      html+='</div>';
+    }
+
+    document.getElementById('modal-body').innerHTML=html;
+  }catch(e){
+    document.getElementById('modal-body').innerHTML='<div style="color:#f87171;padding:16px">Failed to load coin data</div>';
+  }
+}
+
+function closeModal(e){
+  if(e&&e.target!==document.getElementById('modal-overlay')&&!e.target.closest('#modal-overlay>:not(#modal)')) return;
+  if(e&&document.getElementById('modal').contains(e.target)&&e.target.id!=='modal-overlay') return;
+  document.getElementById('modal-overlay').style.display='none';
+  document.body.style.overflow='';
 }
 
 async function forceCheck(){
@@ -3864,6 +4038,24 @@ async function togglePause(){
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(status));
       })().catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+      return;
+    }
+
+    // Coin detail — latest snapshot for a specific coin
+    if (req.method === "GET" && path === "/api/coin") {
+      if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Wrong PIN" })); return; }
+      const sym = urlObj.searchParams.get("symbol");
+      const snap = sym ? coinSnapshots[sym.toUpperCase()] : null;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(snap || { error: "No data yet for " + sym }));
+      return;
+    }
+
+    // All coin snapshots list
+    if (req.method === "GET" && path === "/api/coins") {
+      if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Wrong PIN" })); return; }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(coinSnapshots));
       return;
     }
 
