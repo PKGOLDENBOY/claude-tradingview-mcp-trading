@@ -2868,7 +2868,7 @@ async function run(tvSignal = null, symbol = null) {
     } catch { /* non-critical */ }
 
     // Permanent exclusion — coins with proven negative edge across all live trades
-    const PERMANENT_EXCLUDE = ["ARBUSDT", "VIRTUALUSDT", "SUIUSDT"];
+    const PERMANENT_EXCLUDE = ["ARBUSDT"];
     if (PERMANENT_EXCLUDE.includes(symbol)) {
       console.log(`🚫 EXCLUDED — ${symbol} has a proven negative edge in live trading. Skipping permanently.`);
       pushSignal(symbol, "BLOCKED", "Permanently excluded — negative edge");;
@@ -2911,16 +2911,15 @@ async function run(tvSignal = null, symbol = null) {
       console.log(`  ✅ VWAP BOUNCE MODE — price $${price.toFixed(4)} is ${_vwapPct.toFixed(2)}% from VWAP $${vwap.toFixed(4)}`);
     }
 
-    // Upgrade 4: Weekly trend filter — in a weekly bear, require RSI < 30 with extra confirmation
-    // Bypassed in VWAP bounce mode — a VWAP touch is universal support regardless of weekly trend
-    // Bypassed in bear snap-back mode — extreme oversold already confirmed above
-    const weeklyBearRsiOk = rsi3 < 30 && (stochRsi?.oversold || macd.bullish);
-    if (!vwapBounceMode && !bearSnapBack && bullTrendWeekly === false && !weeklyBearRsiOk) {
-      console.log(`🚫 WEEKLY BEAR FILTER — weekly trend is bearish and RSI(3)=${rsi3.toFixed(1)} is not low enough (need < 30 with StochRSI/MACD confirmation).`);
+    // Weekly trend filter — only strict in confirmed BEAR regime, relaxed in RANGING/TRENDING
+    const weeklyBearRsiOk = rsi3 < 40 && (stochRsi?.oversold || macd.bullish || vwapBounceMode);
+    const weeklyFilterActive = regime.btcTrend === "bear"; // only hard-block in confirmed bear macro
+    if (weeklyFilterActive && !bearSnapBack && bullTrendWeekly === false && !weeklyBearRsiOk) {
+      console.log(`🚫 WEEKLY BEAR FILTER — weekly trend is bearish and RSI(3)=${rsi3.toFixed(1)} is not low enough (need < 40 with StochRSI/MACD/VWAP confirmation).`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
-    if (bullTrendWeekly !== null) console.log(`  Weekly trend: ${bullTrendWeekly ? "✅ Bull market — normal filters" : vwapBounceMode ? "⚠️  Bear market — bypassed (VWAP bounce active)" : "⚠️  Bear market — RSI < 25 required"}`);
+    if (bullTrendWeekly !== null) console.log(`  Weekly trend: ${bullTrendWeekly ? "✅ Bull market — normal filters" : weeklyFilterActive ? "⚠️  Weekly bear (BEAR regime) — RSI < 40 required" : "⚠️  Weekly bear — relaxed in RANGING"}`);
 
     // Upgrade 5: Support proximity — only enter within 3% of a key support level
     if (sr.nearestSupport && sr.distToSupport !== null && sr.distToSupport > 4) {
