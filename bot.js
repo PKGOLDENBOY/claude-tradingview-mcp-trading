@@ -3465,13 +3465,29 @@ if (process.argv.includes("--tax-summary")) {
           const rc = res === "ENTRY" ? "#4f8dff" : res === "EXIT_WIN" ? "#00d4a0" : res === "EXIT_LOSS" ? "#ff4d6a" : "#4a5272";
           const t15 = c.trend15m === "up" ? "↑" : "↓"; const tc15 = c.trend15m === "up" ? "#00d4a0" : "#ff4d6a";
           const t1h = c.trend1h === "up" ? "↑" : "↓"; const tc1h = c.trend1h === "up" ? "#00d4a0" : "#ff4d6a";
-          return `<div style="padding:12px 18px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1a1f2e">
-            <div style="display:flex;align-items:center;gap:10px">
-              <div style="width:36px;height:36px;border-radius:10px;background:${rc}18;color:${rc};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800">${coin.slice(0,3)}</div>
-              <div><div style="font-size:14px;font-weight:700">${coin}</div><div style="font-size:11px;color:#4a5272">RSI ${c.rsi3||"—"} &nbsp;<span style="color:${tc15}">15m ${t15}</span> <span style="color:${tc1h}">1H ${t1h}</span></div></div>
+          const t4h = c.trend4h === "up" ? "↑" : "↓"; const tc4h = c.trend4h === "up" ? "#00d4a0" : "#ff4d6a";
+          const rsiNum = parseFloat(c.rsi3 || 50);
+          const rsiColor = rsiNum < 30 ? "#00d4a0" : rsiNum > 70 ? "#ff4d6a" : "#f0f2f7";
+          const macdColor = c.macdBullish ? "#00d4a0" : "#ff4d6a";
+          const vwapColor = parseFloat(c.price) > parseFloat(c.vwap || 0) ? "#00d4a0" : "#ff4d6a";
+          return `<a href="/coin?symbol=${sym}&pin=${pin}" style="display:block;padding:14px 18px;border-bottom:1px solid #1a1f2e;text-decoration:none;color:inherit">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <div style="display:flex;align-items:center;gap:10px">
+                <div style="width:36px;height:36px;border-radius:10px;background:${rc}22;color:${rc};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;flex-shrink:0">${coin.slice(0,3)}</div>
+                <div><div style="font-size:15px;font-weight:700">${coin}</div><div style="font-size:11px;color:#4a5272">$${Number(c.price||0).toFixed(4)} &nbsp;&#x25B8; details</div></div>
+              </div>
+              <div style="text-align:right"><div style="font-size:13px;font-weight:700;color:${rc}">${res}</div></div>
             </div>
-            <div style="text-align:right"><div style="font-size:13px;font-weight:700;color:${rc}">${res}</div><div style="font-size:11px;color:#4a5272">$${Number(c.price||0).toFixed(3)}</div></div>
-          </div>`;
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              <span style="background:#1a1f2e;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;color:${rsiColor}">RSI ${c.rsi3||"—"}</span>
+              <span style="background:#1a1f2e;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;color:${macdColor}">MACD ${c.macdBullish ? "Bull" : "Bear"}</span>
+              <span style="background:#1a1f2e;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;color:${vwapColor}">VWAP ${parseFloat(c.price) > parseFloat(c.vwap||0) ? "Above" : "Below"}</span>
+              <span style="background:#1a1f2e;border-radius:6px;padding:3px 8px;font-size:11px;color:#94a3b8">15m<span style="color:${tc15}">${t15}</span> 1H<span style="color:${tc1h}">${t1h}</span> 4H<span style="color:${tc4h}">${t4h}</span></span>
+              ${c.stochOversold ? `<span style="background:#00d4a018;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;color:#00d4a0">StochRSI OS</span>` : ""}
+              ${c.adxTrending ? `<span style="background:#4f8dff18;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;color:#4f8dff">ADX Trend</span>` : ""}
+              ${c.divergence ? `<span style="background:#00d4a018;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;color:#00d4a0">Divergence</span>` : ""}
+            </div>
+          </a>`;
         }).join("");
 
     return `<!DOCTYPE html>
@@ -3550,6 +3566,74 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div class="upd">Updated ${d.updatedAt} &middot; auto-refreshes every 30s</div>
 </body>
 </html>`;
+  }
+
+  function coinDetailHTML(sym, c, pin) {
+    if (!c) return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AlphaBot</title></head><body style="background:#07090f;color:#f0f2f7;font-family:-apple-system,sans-serif;padding:32px;text-align:center"><p>No data yet for ${sym}</p><a href="/?pin=${pin}" style="color:#4f8dff">Back</a></body></html>`;
+    const coin = sym.replace("USDT","");
+    const rsiNum = parseFloat(c.rsi3||50);
+    const rsiColor = rsiNum < 30 ? "#00d4a0" : rsiNum > 70 ? "#ff4d6a" : "#f0f2f7";
+    const row = (label, val, color="#f0f2f7") =>
+      `<div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #1a1f2e22"><span style="color:#4a5272;font-size:13px">${label}</span><span style="font-size:13px;font-weight:600;color:${color}">${val}</span></div>`;
+    const trend = v => v === "up" ? `<span style="color:#00d4a0">↑ Up</span>` : `<span style="color:#ff4d6a">↓ Down</span>`;
+    const lastSigs = signalLog.filter(s => s.symbol === sym).slice(-5).reverse();
+    const sigRows = lastSigs.length === 0 ? `<div style="padding:12px 0;color:#4a5272;font-size:13px">No recent signals</div>`
+      : lastSigs.map(s => {
+          const sc = s.result==="ENTRY"?"#4f8dff":s.result==="EXIT_WIN"?"#00d4a0":s.result==="EXIT_LOSS"?"#ff4d6a":"#4a5272";
+          return `<div style="padding:10px 0;border-bottom:1px solid #1a1f2e22;display:flex;justify-content:space-between;align-items:flex-start">
+            <div style="font-size:12px;color:#94a3b8;max-width:240px;line-height:1.5">${s.reason||""}</div>
+            <div style="text-align:right;flex-shrink:0;margin-left:8px"><div style="font-size:11px;font-weight:700;color:${sc}">${s.result}</div><div style="font-size:10px;color:#4a5272">${(s.time||"").slice(11,16)}</div></div>
+          </div>`;
+        }).join("");
+    return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${coin} — AlphaBot</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#07090f;color:#f0f2f7;max-width:430px;margin:0 auto;padding-bottom:40px}
+.hdr{padding:16px 20px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #1a1f2e}
+.back{color:#4f8dff;font-size:14px;text-decoration:none;display:flex;align-items:center;gap:4px}
+.sec{margin:16px 20px 0}.sec-title{font-size:11px;font-weight:600;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
+.card{background:#0e1117;border:1px solid #1a1f2e;border-radius:16px;padding:0 16px}
+</style></head><body>
+<div class="hdr">
+  <a class="back" href="/?pin=${pin}">&#8592; Back</a>
+  <div style="font-size:18px;font-weight:800">${coin}</div>
+  <div style="margin-left:auto;font-size:20px;font-weight:800">$${Number(c.price||0).toFixed(4)}</div>
+</div>
+
+<div class="sec"><div class="sec-title">Price &amp; Trend</div><div class="card">
+  ${row("Price", "$"+Number(c.price||0).toFixed(4))}
+  ${row("VWAP", "$"+(c.vwap||"—"), parseFloat(c.price)>parseFloat(c.vwap||0)?"#00d4a0":"#ff4d6a")}
+  ${row("15m Trend", trend(c.trend15m))}
+  ${row("1H Trend", trend(c.trend1h))}
+  ${row("4H Trend", trend(c.trend4h))}
+  ${c.trendWeekly !== null ? row("Weekly Trend", trend(c.trendWeekly)) : ""}
+</div></div>
+
+<div class="sec"><div class="sec-title">Momentum</div><div class="card">
+  ${row("RSI(3)", c.rsi3||"—", rsiColor)}
+  ${c.rsi15m ? row("RSI(15m)", c.rsi15m, parseFloat(c.rsi15m)<40?"#00d4a0":parseFloat(c.rsi15m)>65?"#ff4d6a":"#f0f2f7") : ""}
+  ${row("MACD", c.macdBullish?"Bullish ↑":"Bearish ↓", c.macdBullish?"#00d4a0":"#ff4d6a")}
+  ${row("StochRSI K", (c.stochK||"—")+(c.stochOversold?" (oversold)":c.stochOverbought?" (overbought)":""), c.stochOversold?"#00d4a0":c.stochOverbought?"#ff4d6a":"#f0f2f7")}
+  ${row("BB%", (c.bbPct||"—")+"%", parseFloat(c.bbPct)<25?"#00d4a0":parseFloat(c.bbPct)>80?"#ff4d6a":"#f0f2f7")}
+</div></div>
+
+<div class="sec"><div class="sec-title">Volume &amp; Strength</div><div class="card">
+  ${row("ADX", (c.adx||"—")+(c.adxTrending?" (trending)":" (choppy)"), c.adxTrending?"#4f8dff":"#4a5272")}
+  ${row("Volume", (c.volPct||"—")+"% of avg", c.volAboveAvg?"#00d4a0":"#4a5272")}
+  ${row("OBV", c.obvRising?"Rising ↑":"Falling ↓", c.obvRising?"#00d4a0":"#ff4d6a")}
+  ${c.divergence ? row("Divergence", "Bullish detected", "#00d4a0") : ""}
+  ${c.doubleBottom ? row("Pattern", "Double Bottom", "#00d4a0") : ""}
+</div></div>
+
+<div class="sec"><div class="sec-title">Support &amp; Resistance</div><div class="card">
+  ${row("Support", "$"+(c.support||"—")+" ("+(c.distToSupport||"?")+"% below)", c.nearSupport?"#00d4a0":"#f0f2f7")}
+  ${row("Resistance", "$"+(c.resistance||"—")+" ("+(c.distToResistance||"?")+"% above)")}
+</div></div>
+
+<div class="sec"><div class="sec-title">Recent Signals</div><div class="card" style="padding:0 16px">${sigRows}</div></div>
+
+<div style="margin:20px 20px 0"><a href="/?pin=${pin}" style="display:block;padding:14px;border-radius:14px;background:#0e1117;border:1px solid #1a1f2e;color:#4a5272;text-align:center;text-decoration:none;font-size:14px;font-weight:600">Back to Dashboard</a></div>
+</body></html>`;
   }
 
   function _oldDashboardHTML() {
@@ -4099,6 +4183,16 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 <button type="submit">Open Dashboard</button>
 </form></body></html>`);
       }
+      return;
+    }
+
+    // Coin detail page — GET /coin?symbol=BTCUSDT&pin=...
+    if (req.method === "GET" && path === "/coin") {
+      if (!checkPin(req.url)) { res.writeHead(302, { Location: "/" }); res.end(); return; }
+      const sym = (urlObj.searchParams.get("symbol") || "").toUpperCase();
+      const pin = urlObj.searchParams.get("pin");
+      res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache, no-store" });
+      res.end(coinDetailHTML(sym, coinSnapshots[sym] || null, pin));
       return;
     }
 
