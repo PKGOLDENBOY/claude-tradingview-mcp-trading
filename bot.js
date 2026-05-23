@@ -3372,7 +3372,187 @@ if (process.argv.includes("--tax-summary")) {
     return pin === BOT_PIN;
   }
 
-  function dashboardHTML() {
+  function buildStatusData() {
+    const log = loadLog();
+    const today = new Date().toISOString().slice(0, 10);
+    const todayExits = (log.trades || []).filter(t => t.type === "exit" && t.timestamp?.startsWith(today) && t.pnlUSD !== undefined);
+    const todayTrades = (log.trades || []).filter(t => t.timestamp?.startsWith(today) && t.orderPlaced);
+    const totalPnlUSD = todayExits.reduce((s, t) => s + (t.pnlUSD || 0), 0);
+    const winRate = calcWinRate(log.trades || [], 10);
+    const drawdown = checkDailyDrawdown(log);
+    const usdtBalance = log.portfolioValue || 0;
+    const openPositions = [];
+    let portfolioValue = usdtBalance;
+    for (const [sym, pos] of Object.entries(log.positions || {})) {
+      if (!pos || !pos.open) continue;
+      const snap = coinSnapshots[sym];
+      const price = snap?.price ?? pos.entryPrice ?? 0;
+      const qty = parseFloat(pos.quantity || 0);
+      if (qty < 0.000001 || price < 0.000001) continue;
+      const usdVal = qty * price;
+      if (usdVal < 0.5) continue;
+      portfolioValue += usdVal;
+      const pnlPct = pos.entryPrice ? ((price - pos.entryPrice) / pos.entryPrice) * 100 : 0;
+      openPositions.push({ coin: sym.replace("USDT", ""), qty, usdVal, entryPrice: pos.entryPrice, pnlPct });
+    }
+    const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
+    return {
+      portfolioValue, usdtBalance, openPositions,
+      regime: regimeMatch?.regime || "RANGING",
+      paused: _tradingPaused || drawdown.paused,
+      todayTrades: todayTrades.length,
+      todayPnlUSD: totalPnlUSD,
+      winRate: winRate ? `${winRate.wins}/${winRate.sample} (${(winRate.winRate * 100).toFixed(0)}%)` : "—",
+      lastTrades: (log.trades || []).slice(-5).reverse(),
+      signals: signalLog.slice(-20).reverse(),
+      coins: coinSnapshots,
+      updatedAt: new Date().toLocaleTimeString(),
+    };
+  }
+
+  function dashboardHTML(d, pin) {
+    const pf = d.portfolioValue;
+    const pnlColor = d.todayPnlUSD >= 0 ? "#00d4a0" : "#ff4d6a";
+    const regColor = d.regime.includes("BEAR") ? "#ff4d6a" : d.regime.includes("BULL") ? "#00d4a0" : "#ffb800";
+
+    const posHTML = d.openPositions.length === 0
+      ? `<div style="padding:24px;text-align:center;color:#4a5272;font-size:14px">All cash — no open positions</div>`
+      : d.openPositions.map(p => {
+          const pc = p.pnlPct >= 0 ? "#00d4a0" : "#ff4d6a";
+          return `<div style="padding:14px 18px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1a1f2e">
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="width:38px;height:38px;border-radius:12px;background:#4f8dff18;color:#4f8dff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800">${p.coin.slice(0,3)}</div>
+              <div><div style="font-size:15px;font-weight:700">${p.coin}</div><div style="font-size:12px;color:#4a5272">${Number(p.qty).toFixed(4)} @ $${Number(p.entryPrice).toFixed(4)}</div></div>
+            </div>
+            <div style="text-align:right"><div style="font-size:15px;font-weight:700">$${Number(p.usdVal).toFixed(2)}</div><div style="font-size:12px;font-weight:600;color:${pc}">${p.pnlPct >= 0 ? "+" : ""}${Number(p.pnlPct).toFixed(2)}%</div></div>
+          </div>`;
+        }).join("");
+
+    const tradesHTML = d.lastTrades.length === 0
+      ? `<div style="padding:24px;text-align:center;color:#4a5272;font-size:14px">No trades yet</div>`
+      : d.lastTrades.map(t => {
+          const isEntry = t.type === "entry";
+          const pv = t.pnlPct != null ? parseFloat(t.pnlPct) : null;
+          const pc = pv == null ? "#4a5272" : pv >= 0 ? "#00d4a0" : "#ff4d6a";
+          const icon = isEntry ? "↑" : pv != null && pv >= 0 ? "✓" : "↓";
+          const iconBg = isEntry ? "#4f8dff18" : pv != null && pv >= 0 ? "#00d4a018" : "#ff4d6a18";
+          const iconColor = isEntry ? "#4f8dff" : pv != null && pv >= 0 ? "#00d4a0" : "#ff4d6a";
+          return `<div style="padding:14px 18px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1a1f2e">
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="width:38px;height:38px;border-radius:12px;background:${iconBg};color:${iconColor};display:flex;align-items:center;justify-content:center;font-size:16px">${icon}</div>
+              <div><div style="font-size:15px;font-weight:700">${(t.symbol||"").replace("USDT","")}</div><div style="font-size:12px;color:#4a5272">${isEntry?"Entry":"Exit"} &middot; $${Number(t.price||0).toFixed(4)}</div></div>
+            </div>
+            <div style="text-align:right"><div style="font-size:14px;font-weight:700;color:${pc}">${t.pnlPct != null ? (t.pnlPct >= 0 ? "+" : "") + Number(t.pnlPct).toFixed(2) + "%" : ""}</div><div style="font-size:12px;color:#4a5272">${(t.timestamp||"").slice(11,16)} UTC</div></div>
+          </div>`;
+        }).join("");
+
+    const sigHTML = d.signals.length === 0
+      ? `<div style="padding:24px;text-align:center;color:#4a5272;font-size:14px">Bot is scanning...</div>`
+      : d.signals.map(s => {
+          const sc = s.result === "ENTRY" ? "#4f8dff" : s.result === "EXIT_WIN" ? "#00d4a0" : s.result === "EXIT_LOSS" ? "#ff4d6a" : "#4a5272";
+          return `<div style="padding:12px 18px;display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #1a1f2e">
+            <div style="font-size:12px;color:#94a3b8;max-width:220px;line-height:1.5"><b style="color:#f0f2f7">${(s.symbol||"").replace("USDT","")}</b> ${s.reason||""}</div>
+            <div style="text-align:right;flex-shrink:0;margin-left:8px"><div style="font-size:11px;font-weight:700;color:${sc}">${s.result}</div><div style="font-size:10px;color:#4a5272">${(s.time||"").slice(11,16)}</div></div>
+          </div>`;
+        }).join("");
+
+    const coinsArr = Object.entries(d.coins || {});
+    const coinsHTML = coinsArr.length === 0
+      ? `<div style="padding:24px;text-align:center;color:#4a5272;font-size:14px">Waiting for first scan...</div>`
+      : coinsArr.map(([sym, c]) => {
+          const coin = sym.replace("USDT","");
+          const res = c.lastSignal?.result || "—";
+          const rc = res === "ENTRY" ? "#4f8dff" : res === "EXIT_WIN" ? "#00d4a0" : res === "EXIT_LOSS" ? "#ff4d6a" : "#4a5272";
+          const t15 = c.trend15m === "up" ? "↑" : "↓"; const tc15 = c.trend15m === "up" ? "#00d4a0" : "#ff4d6a";
+          const t1h = c.trend1h === "up" ? "↑" : "↓"; const tc1h = c.trend1h === "up" ? "#00d4a0" : "#ff4d6a";
+          return `<div style="padding:12px 18px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1a1f2e">
+            <div style="display:flex;align-items:center;gap:10px">
+              <div style="width:36px;height:36px;border-radius:10px;background:${rc}18;color:${rc};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800">${coin.slice(0,3)}</div>
+              <div><div style="font-size:14px;font-weight:700">${coin}</div><div style="font-size:11px;color:#4a5272">RSI ${c.rsi3||"—"} &nbsp;<span style="color:${tc15}">15m ${t15}</span> <span style="color:${tc1h}">1H ${t1h}</span></div></div>
+            </div>
+            <div style="text-align:right"><div style="font-size:13px;font-weight:700;color:${rc}">${res}</div><div style="font-size:11px;color:#4a5272">$${Number(c.price||0).toFixed(3)}</div></div>
+          </div>`;
+        }).join("");
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta http-equiv="refresh" content="30; url=/?pin=${pin}">
+<title>AlphaBot</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#07090f;color:#f0f2f7;max-width:430px;margin:0 auto;padding-bottom:40px}
+.hdr{padding:18px 20px 0;display:flex;align-items:center;justify-content:space-between}
+.hdr-left{display:flex;align-items:center;gap:10px}
+.hdr-logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#4f8dff,#00d4a0);display:flex;align-items:center;justify-content:center;font-size:18px}
+.hdr-title{font-size:17px;font-weight:700}
+.live{display:flex;align-items:center;gap:6px;background:#00d4a015;border:1px solid #00d4a030;border-radius:99px;padding:5px 12px;font-size:12px;font-weight:600;color:#00d4a0}
+.dot{width:6px;height:6px;border-radius:50%;background:#00d4a0;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.hero{margin:20px 16px 0;background:linear-gradient(135deg,#0e1a35,#0a1628);border:1px solid #1a2a4a;border-radius:22px;padding:24px}
+.hero-label{font-size:11px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+.hero-value{font-size:42px;font-weight:800;letter-spacing:-2px;line-height:1;margin-bottom:14px}
+.hero-row{display:flex;gap:20px}
+.hs-label{font-size:11px;color:#4a5272}
+.hs-value{font-size:14px;font-weight:600;margin-top:2px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 16px 0}
+.card-sm{background:#0e1117;border:1px solid #1a1f2e;border-radius:16px;padding:14px}
+.card-sm-label{font-size:10px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
+.card-sm-val{font-size:20px;font-weight:700}
+.card-sm-sub{font-size:11px;color:#4a5272;margin-top:2px}
+.sec{margin:14px 16px 0}
+.sec-title{font-size:12px;font-weight:600;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;padding:0 2px}
+.card{background:#0e1117;border:1px solid #1a1f2e;border-radius:18px;overflow:hidden}
+.card>div:last-child{border-bottom:none!important}
+.upd{text-align:center;color:#4a5272;font-size:11px;margin-top:16px}
+.btn-row{margin:10px 16px 0;display:flex;flex-direction:column;gap:8px}
+.btn{display:block;width:100%;padding:16px;border-radius:14px;border:none;font-size:15px;font-weight:700;cursor:pointer;text-align:center;text-decoration:none;font-family:inherit}
+.btn-blue{background:linear-gradient(135deg,#4f8dff,#3a6fd4);color:#fff}
+.btn-red{background:linear-gradient(135deg,#ff4d6a,#d43a52);color:#fff}
+.btn-grey{background:#0e1117;color:#4a5272;border:1px solid #1a1f2e}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <div class="hdr-left"><div class="hdr-logo">📈</div><div class="hdr-title">AlphaBot</div></div>
+  <div class="live"><span class="dot"></span>LIVE</div>
+</div>
+
+<div class="hero">
+  <div class="hero-label">Total Portfolio</div>
+  <div class="hero-value">$${Number(pf).toFixed(2)}</div>
+  <div class="hero-row">
+    <div><div class="hs-label">Cash (USDT)</div><div class="hs-value">$${Number(d.usdtBalance).toFixed(2)}</div></div>
+    <div><div class="hs-label">Today's P&amp;L</div><div class="hs-value" style="color:${pnlColor}">${d.todayPnlUSD >= 0 ? "+" : ""}$${Math.abs(d.todayPnlUSD).toFixed(2)}</div></div>
+    <div><div class="hs-label">Win Rate</div><div class="hs-value">${d.winRate}</div></div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card-sm"><div class="card-sm-label">Trades Today</div><div class="card-sm-val">${d.todayTrades}</div><div class="card-sm-sub">of 20 max</div></div>
+  <div class="card-sm"><div class="card-sm-label">Market</div><div class="card-sm-val" style="color:${regColor};font-size:15px">${d.regime}</div><div class="card-sm-sub" style="color:${d.paused ? "#ffb800" : "#00d4a0"}">${d.paused ? "Paused" : "Active"}</div></div>
+</div>
+
+<div class="sec"><div class="sec-title">Open Positions</div><div class="card">${posHTML}</div></div>
+<div class="sec"><div class="sec-title">Recent Trades</div><div class="card">${tradesHTML}</div></div>
+<div class="sec"><div class="sec-title">Coins Being Watched</div><div class="card">${coinsHTML}</div></div>
+<div class="sec"><div class="sec-title">Signal Log</div><div class="card">${sigHTML}</div></div>
+
+<div class="sec"><div class="sec-title">Controls</div></div>
+<div class="btn-row">
+  <form method="POST" action="/action?pin=${pin}&action=scan" style="display:contents"><button class="btn btn-blue" type="submit">Scan All Coins Now</button></form>
+  <form method="POST" action="/action?pin=${pin}&action=sell-all" style="display:contents" onsubmit="return confirm('Sell ALL open positions?')"><button class="btn btn-red" type="submit">Sell All Positions</button></form>
+  <form method="POST" action="/action?pin=${pin}&action=${d.paused ? "resume" : "pause"}" style="display:contents"><button class="btn btn-grey" type="submit">${d.paused ? "Resume Trading" : "Pause Trading"}</button></form>
+</div>
+
+<div class="upd">Updated ${d.updatedAt} &middot; auto-refreshes every 30s</div>
+</body>
+</html>`;
+  }
+
+  function _oldDashboardHTML() {
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3895,11 +4075,13 @@ async function togglePause(){
       return;
     }
 
-    // Mobile dashboard
+    // Mobile dashboard — server-side rendered, no JS required
     if (req.method === "GET" && path === "/") {
       if (checkPin(req.url)) {
+        const pin = urlObj.searchParams.get("pin");
+        const data = buildStatusData();
         res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache, no-store, must-revalidate" });
-        res.end(dashboardHTML());
+        res.end(dashboardHTML(data, pin));
       } else {
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -3917,6 +4099,29 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 <button type="submit">Open Dashboard</button>
 </form></body></html>`);
       }
+      return;
+    }
+
+    // Dashboard button actions — POST /action?pin=...&action=scan|sell-all|pause|resume
+    if (req.method === "POST" && path === "/action") {
+      if (!checkPin(req.url)) { res.writeHead(302, { Location: "/" }); res.end(); return; }
+      const pin = urlObj.searchParams.get("pin");
+      const action = urlObj.searchParams.get("action");
+      const redirect = () => { res.writeHead(302, { Location: `/?pin=${pin}` }); res.end(); };
+      if (action === "pause") { _tradingPaused = true; console.log("⏸ Dashboard: trading paused"); redirect(); }
+      else if (action === "resume") { _tradingPaused = false; console.log("▶ Dashboard: trading resumed"); redirect(); }
+      else if (action === "scan") {
+        redirect();
+        (async () => { for (const sym of CONFIG.symbols) await run(null, sym).catch(() => {}); })();
+      } else if (action === "sell-all") {
+        redirect();
+        (async () => {
+          const log = loadLog();
+          const open = Object.entries(log.positions || {}).filter(([, p]) => p && p.open).map(([sym]) => sym);
+          console.log(`\n🚨 Dashboard sell-all: ${open.join(", ")}`);
+          for (const sym of open) await run("SELL", sym).catch(e => console.error(`Force sell ${sym}:`, e.message));
+        })();
+      } else { redirect(); }
       return;
     }
 
