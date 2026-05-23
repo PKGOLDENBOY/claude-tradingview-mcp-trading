@@ -819,7 +819,11 @@ async function refreshTopMovers() {
     const newListings = await scanNewListings(json.data || []);
     if (newListings.length === 0) console.log("  None found.");
 
-    const combined = [...new Set([...qualified, ...heldSymbols, ...WATCHLIST, ...newListings])];
+    // Add top daily gainers (5%+) directly — they get the momentum path in run(), skip backtest gate
+    const bigMovers = _topGainers.filter(t => t.change24h >= 5).map(t => t.symbol);
+    if (bigMovers.length > 0) console.log(`\n🚀 Big movers today (5%+): ${bigMovers.join(", ")}`);
+
+    const combined = [...new Set([...qualified, ...heldSymbols, ...WATCHLIST, ...newListings, ...bigMovers])];
 
     if (combined.length === 0) {
       console.log(`\n   ⚠️  No movers qualified — keeping previous symbol list\n`);
@@ -2818,6 +2822,66 @@ async function run(tvSignal = null, symbol = null) {
       pushSignal(symbol, "BLOCKED", `Daily block — lost ${todayLosses}x today`);;
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
+    }
+
+    // ── Big Daily Mover — momentum path (bypasses mean-reversion filters) ────────
+    // If a coin is up 5%+ on the day with real volume, trade the momentum instead
+    // of waiting for it to become oversold. Different rules, smaller size, tight stop.
+    const gainerInfo = _topGainers.find(t => t.symbol === symbol);
+    if (gainerInfo && gainerInfo.change24h >= 5 && !isAlreadyOpen) {
+      console.log(`\n🚀 BIG MOVER — ${symbol} +${gainerInfo.change24h.toFixed(1)}% today`);
+      const volRatio = vol.current / vol.avg;
+      const rsiOk    = rsi3 >= 40 && rsi3 <= 82;           // healthy momentum, not exhausted
+      const stochOk  = !stochRsi || stochRsi.k < 90;       // not at extreme top
+      const priceOk  = price > ema8;                        // price above fast EMA
+      const volOk    = volRatio >= 1.5;                     // real buying, not thin air
+      const notTooHot = gainerInfo.change24h <= 40;         // cap at 40% — beyond that is exit liquidity
+
+      console.log(`  Vol: ${volRatio.toFixed(1)}x avg | RSI(3): ${rsi3?.toFixed(1)} | StochRSI K: ${stochRsi?.k?.toFixed(1) ?? "—"} | Above EMA8: ${price > ema8 ? "yes" : "no"}`);
+
+      if (rsiOk && stochOk && priceOk && volOk && notTooHot) {
+        console.log(`\n✅ MOMENTUM ENTRY — big mover conditions met. Small position (30% size, 2% SL, 6% TP).`);
+        pushSignal(symbol, "ENTRY", `Big mover +${gainerInfo.change24h.toFixed(1)}% — momentum entry`);
+        const momSize = Math.min(currentPortfolio * sizePct * 0.30, CONFIG.maxTradeSizeUSD ?? Infinity);
+        const momEntry = {
+          timestamp: new Date().toISOString(), type: "entry", symbol,
+          timeframe: CONFIG.timeframe, price, indicators: { ema8, vwap, rsi3 },
+          allPass: true, claudeAnalysis: null, tradeSize: momSize, orderPlaced: false, orderId: null,
+          paperTrading: CONFIG.paperTrading,
+          limits: { maxTradeSizeUSD: CONFIG.maxTradeSizeUSD, maxTradesPerDay: CONFIG.maxTradesPerDay, tradesToday: countTodaysTrades(log) },
+        };
+        if (CONFIG.paperTrading) {
+          momEntry.orderPlaced = true; momEntry.orderId = `PAPER-${Date.now()}`;
+          log.positions[symbol] = { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (momSize / price).toFixed(6), orderId: momEntry.orderId, entryType: "momentum" };
+        } else {
+          try {
+            const order = await placeOrder(symbol, "buy", momSize, price);
+            const qty = order.confirmedQty ?? (momSize / price);
+            momEntry.orderPlaced = true; momEntry.orderId = order.orderId;
+            log.positions[symbol] = { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId: order.orderId, entryType: "momentum" };
+            await emailEntry({ symbol, price, tradeSize: momSize, orderId: order.orderId });
+          } catch(err) {
+            console.error(`\n❌ Momentum order failed: ${err.message}`);
+            momEntry.notes = `Error: ${err.message}`;
+          }
+        }
+        log.trades.push(momEntry);
+        saveLog(log);
+        writeTradeCsv(momEntry);
+        console.log("═══════════════════════════════════════════════════════════\n");
+        return;
+      } else {
+        const reasons = [];
+        if (!rsiOk)    reasons.push(`RSI ${rsi3?.toFixed(1)} not in 40-82 range`);
+        if (!stochOk)  reasons.push(`StochRSI K=${stochRsi?.k?.toFixed(1)} too high (>90)`);
+        if (!priceOk)  reasons.push(`price below EMA8`);
+        if (!volOk)    reasons.push(`volume only ${volRatio.toFixed(1)}x avg (need 1.5x)`);
+        if (!notTooHot) reasons.push(`up ${gainerInfo.change24h.toFixed(0)}% — too extended`);
+        console.log(`🚫 MOMENTUM BLOCK — ${reasons.join(", ")}`);
+        pushSignal(symbol, "BLOCKED", `Big mover but: ${reasons[0]}`);
+        console.log("═══════════════════════════════════════════════════════════\n");
+        return;
+      }
     }
 
     // Bear market block — no new scalp entries when BTC macro trend is bearish.
