@@ -1515,9 +1515,14 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     // ── Snap-back / standard exit logic ──────────────────────────────────
     // Per-coin stop-loss from backtest (default 4%)
     const btSl = (typeof BACKTEST !== "undefined") ? BACKTEST[position.symbol || ""] : null;
-    const slPct = position.bearMarket ? 0.02 : (btSl?.stopLoss ?? 0.04);
+    const slPct = position.bearSnapBack ? 0.02 : position.bearMarket ? 0.02 : (btSl?.stopLoss ?? 0.04);
     const slPrice = position.entryPrice * (1 - slPct);
-    check(`Stop-loss hit — $${slPrice.toFixed(4)} (-${(slPct*100).toFixed(0)}%${position.bearMarket ? " bear market" : ""})`, price <= slPrice);
+    check(`Stop-loss hit — $${slPrice.toFixed(4)} (-${(slPct*100).toFixed(0)}%${position.bearSnapBack ? " snap-back" : position.bearMarket ? " bear market" : ""})`, price <= slPrice);
+    // Bear snap-back: take profit quickly at 3% — don't hold for a full swing in a downtrend
+    if (position.bearSnapBack) {
+      const snapTpPrice = position.entryPrice * 1.03;
+      check(`Bear snap-back TP hit — $${snapTpPrice.toFixed(4)} (+3%)`, price >= snapTpPrice && pnlPct >= 3);
+    }
 
     // Soft exits — only fire once gain is meaningful. Prevents fee-losing exits.
     // SOFT_MIN = 0.75%: hold through weak overbought signals, extract more from winners.
@@ -2542,10 +2547,11 @@ async function run(tvSignal = null, symbol = null) {
   // Kelly Criterion sizing — optimal fraction based on live win rate + payoff ratio per coin
   const kellySizePct = kellyPositionPct(log, symbol, CONFIG.maxTradeSizePct || 0.25);
   const sizePct = kellySizePct;
-  // Scale down as daily losses accumulate + volatile regime
-  const regimeScale   = regime.volatility === "high" ? 0.50 : 1.0; // halve size in volatile markets
+  // Scale down as daily losses accumulate + volatile regime + bear snap-backs
+  const regimeScale   = regime.volatility === "high" ? 0.50 : 1.0;
   const drawdownScale = drawdown.drawdownPct > 7 ? 0.30 : drawdown.drawdownPct > 5 ? 0.50 : drawdown.drawdownPct > 3 ? 0.75 : 1.0;
-  const rawSize = currentPortfolio * sizePct * adaptive.sizeMultiplier * drawdownScale * regimeScale;
+  const bearScale     = bearSnapBack ? 0.40 : 1.0; // bear snap-back = 40% size only
+  const rawSize = currentPortfolio * sizePct * adaptive.sizeMultiplier * drawdownScale * regimeScale * bearScale;
   const tradeSize = CONFIG.maxTradeSizeUSD ? Math.min(rawSize, CONFIG.maxTradeSizeUSD) : rawSize;
   if (drawdownScale < 1.0) console.log(`\n⚠️  Drawdown scaling: ${(drawdownScale * 100).toFixed(0)}% position size (down ${drawdown.drawdownPct.toFixed(1)}% today)`);
   if (regimeScale < 1.0)   console.log(`⚠️  Volatile regime: 50% position size`);
@@ -2798,12 +2804,21 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
 
-    // Bear market block — no new scalp entries when BTC macro trend is bearish
-    if (regime.btcTrend === "bear") {
-      console.log(`🚫 BEAR MARKET BLOCK — BTC regime is BEAR (${regime.regime}). Scalp entries blocked; exits still monitored.`);
-      pushSignal(symbol, "BLOCKED", "Bear market — BTC regime is BEAR");;
+    // Bear market block — no new scalp entries when BTC macro trend is bearish.
+    // Exception: extreme oversold snap-backs (RSI < 20 + StochRSI oversold + MACD bullish)
+    // These are high-probability rubber-band bounces that work even in downtrends.
+    const bearSnapBack = regime.btcTrend === "bear" &&
+      rsi3 !== null && rsi3 < 20 &&
+      stochRsi?.oversold === true &&
+      macd.bullish === true;
+    if (regime.btcTrend === "bear" && !bearSnapBack) {
+      console.log(`🚫 BEAR MARKET BLOCK — BTC regime is BEAR. Scalp entries blocked; exits still monitored.`);
+      pushSignal(symbol, "BLOCKED", "Bear market — BTC regime is BEAR");
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
+    }
+    if (bearSnapBack) {
+      console.log(`⚡ BEAR SNAP-BACK — RSI(3)=${rsi3.toFixed(1)} + StochRSI oversold + MACD bull. Allowing small position (40% size, TP 3%, SL 2%).`);
     }
 
     // Upgrade 1: ETH correlation filter — ETH leads altcoins; if ETH dropped >2% last hour, skip
@@ -2812,7 +2827,7 @@ async function run(tvSignal = null, symbol = null) {
       if (ethCandles.length >= 2) {
         const ethHourChange = (ethCandles[ethCandles.length - 1].close - ethCandles[ethCandles.length - 2].close) / ethCandles[ethCandles.length - 2].close * 100;
         console.log(`  ETH 1H change: ${ethHourChange >= 0 ? "+" : ""}${ethHourChange.toFixed(2)}%`);
-        if (ethHourChange <= -2) {
+        if (ethHourChange <= -3) {
           console.log(`🚫 ETH CORRELATION BLOCK — ETH dropped ${ethHourChange.toFixed(2)}% in the last hour. Altcoins will follow.`);
           console.log("═══════════════════════════════════════════════════════════\n");
           return;
@@ -2888,10 +2903,12 @@ async function run(tvSignal = null, symbol = null) {
       console.log(`  ✅ VWAP BOUNCE MODE — price $${price.toFixed(4)} is ${_vwapPct.toFixed(2)}% from VWAP $${vwap.toFixed(4)}`);
     }
 
-    // Upgrade 4: Weekly trend filter — in a weekly bear, require RSI < 25 (oversold only)
+    // Upgrade 4: Weekly trend filter — in a weekly bear, require RSI < 30 with extra confirmation
     // Bypassed in VWAP bounce mode — a VWAP touch is universal support regardless of weekly trend
-    if (!vwapBounceMode && bullTrendWeekly === false && rsi3 > 25) {
-      console.log(`🚫 WEEKLY BEAR FILTER — weekly trend is bearish and RSI(3)=${rsi3.toFixed(1)} is not low enough (need < 25 in bear market).`);
+    // Bypassed in bear snap-back mode — extreme oversold already confirmed above
+    const weeklyBearRsiOk = rsi3 < 30 && (stochRsi?.oversold || macd.bullish);
+    if (!vwapBounceMode && !bearSnapBack && bullTrendWeekly === false && !weeklyBearRsiOk) {
+      console.log(`🚫 WEEKLY BEAR FILTER — weekly trend is bearish and RSI(3)=${rsi3.toFixed(1)} is not low enough (need < 30 with StochRSI/MACD confirmation).`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
@@ -3315,7 +3332,7 @@ async function run(tvSignal = null, symbol = null) {
         console.log(`   (Set PAPER_TRADING=false in .env to place real orders)`);
         logEntry.orderPlaced = true;
         logEntry.orderId = `PAPER-${Date.now()}`;
-        log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (finalTradeSize / price).toFixed(6), orderId: logEntry.orderId, entryType, bearMarket: bullTrendWeekly === false } };
+        log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (finalTradeSize / price).toFixed(6), orderId: logEntry.orderId, entryType, bearMarket: bullTrendWeekly === false, bearSnapBack } };
       } else if (slippageOk) {
         console.log(`\n🔴 PLACING LIVE ORDER — $${finalTradeSize.toFixed(2)} BUY ${symbol}`);
         try {
@@ -3330,7 +3347,7 @@ async function run(tvSignal = null, symbol = null) {
           const actualQty = order.confirmedQty ?? (finalTradeSize / price);
           logEntry.orderPlaced = true;
           logEntry.orderId = order.orderId;
-          log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: actualQty.toFixed(6), orderId: order.orderId, entryType, bearMarket: bullTrendWeekly === false } };
+          log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: actualQty.toFixed(6), orderId: order.orderId, entryType, bearMarket: bullTrendWeekly === false, bearSnapBack } };
           console.log(`✅ ORDER PLACED — ${order.orderId} | qty: ${actualQty.toFixed(6)}`);
           pushSignal(symbol, "ENTRY", `Bought @ $${price.toFixed(4)} — $${finalTradeSize.toFixed(2)}`);
         } catch (err) {
