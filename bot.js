@@ -3723,7 +3723,8 @@ async function load(){
     document.getElementById('updated').textContent='Updated '+new Date().toLocaleTimeString();
     loadCoins();
   }catch(e){
-    toast('⚠️ Connection error — retrying');
+    document.getElementById('positions-card').innerHTML='<div style="padding:16px;color:#ff4d6a;font-size:13px">⚠️ '+e.message+'</div>';
+    toast('⚠️ '+e.message);
   }
 }
 
@@ -3896,7 +3897,7 @@ async function togglePause(){
     // Mobile dashboard
     if (req.method === "GET" && path === "/") {
       if (checkPin(req.url)) {
-        res.writeHead(200, { "Content-Type": "text/html" });
+        res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache, no-store, must-revalidate" });
         res.end(dashboardHTML());
       } else {
         res.writeHead(200, { "Content-Type": "text/html" });
