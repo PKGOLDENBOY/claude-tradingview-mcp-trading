@@ -122,6 +122,13 @@ const livePrices = new Map(); // symbol → { price, timestamp }
 let priceStreamWs = null;
 const _processingStops = new Set(); // guard against double-exits
 
+// Signal log — ring buffer of last 60 scan decisions shown on dashboard
+const signalLog = [];
+function pushSignal(symbol, result, reason, indicators = {}) {
+  signalLog.push({ time: new Date().toISOString(), symbol, result, reason, indicators });
+  if (signalLog.length > 60) signalLog.shift();
+}
+
 // ─── Onboarding ───────────────────────────────────────────────────────────────
 
 function checkOnboarding() {
@@ -2700,6 +2707,7 @@ async function run(tvSignal = null, symbol = null) {
           log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
           console.log(`✅ SELL ORDER PLACED — ${order.orderId}`);
           console.log(`💰 Portfolio updated: $${log.portfolioValue.toFixed(4)} (${pnlUSD >= 0 ? "+" : ""}$${pnlUSD.toFixed(4)})`);
+          pushSignal(symbol, pnlPct >= 0 ? "EXIT_WIN" : "EXIT_LOSS", `Sold @ $${price.toFixed(4)} | P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% ($${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(2)})`);
         } catch (err) {
           console.log(`❌ SELL ORDER FAILED — ${err.message}`);
           logEntry.error = err.message;
@@ -2755,6 +2763,7 @@ async function run(tvSignal = null, symbol = null) {
     ).length;
     if (todayLosses >= 2) {
       console.log(`🚫 DAILY BLOCK — ${symbol} has lost ${todayLosses}x today. Skipping for rest of day.`);
+      pushSignal(symbol, "BLOCKED", `Daily block — lost ${todayLosses}x today`);;
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
@@ -2762,6 +2771,7 @@ async function run(tvSignal = null, symbol = null) {
     // Bear market block — no new scalp entries when BTC macro trend is bearish
     if (regime.btcTrend === "bear") {
       console.log(`🚫 BEAR MARKET BLOCK — BTC regime is BEAR (${regime.regime}). Scalp entries blocked; exits still monitored.`);
+      pushSignal(symbol, "BLOCKED", "Bear market — BTC regime is BEAR");;
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
@@ -2811,6 +2821,7 @@ async function run(tvSignal = null, symbol = null) {
     const PERMANENT_EXCLUDE = ["ARBUSDT", "VIRTUALUSDT", "SUIUSDT"];
     if (PERMANENT_EXCLUDE.includes(symbol)) {
       console.log(`🚫 EXCLUDED — ${symbol} has a proven negative edge in live trading. Skipping permanently.`);
+      pushSignal(symbol, "BLOCKED", "Permanently excluded — negative edge");;
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
@@ -2859,6 +2870,7 @@ async function run(tvSignal = null, symbol = null) {
     // Upgrade 5: Support proximity — only enter within 3% of a key support level
     if (sr.nearestSupport && sr.distToSupport !== null && sr.distToSupport > 4) {
       console.log(`🚫 SUPPORT BLOCK — price is ${sr.distToSupport.toFixed(2)}% above nearest support ($${sr.nearestSupport.toFixed(4)}). Need to be within 4% of support.`);
+      pushSignal(symbol, "BLOCKED", `${sr.distToSupport.toFixed(1)}% above support — need within 4%`);;
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
@@ -2870,6 +2882,7 @@ async function run(tvSignal = null, symbol = null) {
     if (openCount >= 3) {
       const held = openPositions.map(([s]) => s).join(", ");
       console.log(`🚫 MAX POSITIONS — already holding ${held}. Max 3 positions at a time.`);
+      pushSignal(symbol, "BLOCKED", `Max positions (${held}/3) reached`);;
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
@@ -3209,11 +3222,13 @@ async function run(tvSignal = null, symbol = null) {
       if (claudeAnalysis) {
         console.log(`🚫 CLAUDE: HOLD — ${claudeAnalysis.reasoning}`);
         if (rulesPass) console.log(`   (Rules said PASS — Claude overrode based on trade history)`);
+        pushSignal(symbol, "HOLD", `Claude: ${claudeAnalysis.reasoning}`);
       } else {
         const failed = results.filter((r) => !r.pass).map((r) => r.label);
         console.log(`🚫 TRADE BLOCKED`);
         console.log(`   Failed conditions:`);
         failed.forEach((f) => console.log(`   - ${f}`));
+        pushSignal(symbol, "BLOCKED", failed.slice(0, 2).join(" · ") || "Conditions not met");
       }
     } else {
       if (claudeAnalysis) {
@@ -3287,9 +3302,11 @@ async function run(tvSignal = null, symbol = null) {
           logEntry.orderId = order.orderId;
           log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: actualQty.toFixed(6), orderId: order.orderId, entryType, bearMarket: bullTrendWeekly === false } };
           console.log(`✅ ORDER PLACED — ${order.orderId} | qty: ${actualQty.toFixed(6)}`);
+          pushSignal(symbol, "ENTRY", `Bought @ $${price.toFixed(4)} — $${finalTradeSize.toFixed(2)}`);
         } catch (err) {
           console.log(`❌ ORDER FAILED — ${err.message}`);
           logEntry.error = err.message;
+          pushSignal(symbol, "ERROR", `Order failed: ${err.message}`);
         }
       }
     }
@@ -3545,6 +3562,14 @@ body{font-family:'Inter',system-ui,sans-serif;color:var(--text);padding:0;max-wi
     </div>
   </div>
 
+  <!-- Signal Log -->
+  <div class="section">
+    <div class="section-header">Signal Log</div>
+    <div class="card" id="signals-card">
+      <div class="empty-state muted">Loading signals...</div>
+    </div>
+  </div>
+
   <!-- Controls -->
   <div class="section">
     <div class="section-header">Controls</div>
@@ -3684,6 +3709,36 @@ async function load(){
         '</div>';
       }).join('');
 
+    // Signals
+    const signals=s.signals||[];
+    document.getElementById('signals-card').innerHTML=signals.length===0
+      ?'<div class="empty-state muted">No signals yet — bot is scanning</div>'
+      :signals.map(sig=>{
+        const isEntry=sig.result==='ENTRY';
+        const isWin=sig.result==='EXIT_WIN';
+        const isLoss=sig.result==='EXIT_LOSS';
+        const isHold=sig.result==='HOLD';
+        const isError=sig.result==='ERROR';
+        const iconClass=isEntry?'entry':isWin?'exit-win':isLoss?'exit-loss':'';
+        const icon=isEntry?'↑':isWin?'✓':isLoss?'↓':isHold?'—':'!';
+        const dotColor=isEntry?'var(--blue)':isWin?'var(--green)':isLoss?'var(--red)':isHold?'var(--muted)':'var(--yellow)';
+        const coin=(sig.symbol||'').replace('USDT','');
+        const timeStr=(sig.time||'').slice(11,16);
+        return '<div class="trade-item">'+
+          '<div class="trade-left">'+
+            '<div class="trade-icon '+iconClass+'" style="background:'+dotColor+'22;color:'+dotColor+'">'+icon+'</div>'+
+            '<div>'+
+              '<div class="trade-coin">'+coin+'</div>'+
+              '<div class="trade-meta" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+sig.reason+'</div>'+
+            '</div>'+
+          '</div>'+
+          '<div class="trade-right">'+
+            '<div class="trade-pnl" style="color:'+dotColor+';font-size:12px">'+sig.result+'</div>'+
+            '<div class="trade-time">'+timeStr+' UTC</div>'+
+          '</div>'+
+        '</div>';
+      }).join('');
+
     document.getElementById('updated').textContent='Updated '+new Date().toLocaleTimeString();
   }catch(e){
     toast('⚠️ Connection error — retrying');
@@ -3802,6 +3857,7 @@ async function togglePause(){
             pnlPct: t.pnlPct,
             pnl: t.pnlPct != null ? `${t.pnlPct >= 0 ? "+" : ""}${t.pnlPct.toFixed(2)}%` : null,
           })),
+          signals: signalLog.slice(-30).reverse(),
         };
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(status));
