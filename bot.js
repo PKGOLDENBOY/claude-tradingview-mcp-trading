@@ -1216,7 +1216,7 @@ function calcIchimoku(candles, tenkanP = 9, kijunP = 26, senkouBP = 52) {
 // is one of the key edges of professional multi-strategy systems.
 const _regimeCache = { value: null, ts: 0 };
 async function detectMarketRegime() {
-  if (_regimeCache.value && Date.now() - _regimeCache.ts < 30 * 60 * 1000) return _regimeCache.value;
+  if (_regimeCache.value && Date.now() - _regimeCache.ts < 10 * 60 * 1000) return _regimeCache.value;
   try {
     const btc = await fetchCandles("BTCUSDT", "4H", 60);
     if (!btc || btc.length < 30) return { regime: "UNKNOWN", btcTrend: "neutral", volatility: "normal" };
@@ -1232,10 +1232,16 @@ async function detectMarketRegime() {
     }
     const avgATR = atrCount > 0 ? atrSum / atrCount : curATR;
     const volRatio = curATR / avgATR;
-    const btcTrend = ema8 > ema21 * 1.005 ? "bull" : ema8 < ema21 * 0.995 ? "bear" : "neutral";
+    const btcTrend = ema8 > ema21 * 1.002 ? "bull" : ema8 < ema21 * 0.998 ? "bear" : "neutral";
     const volatility = volRatio > 1.8 ? "high" : volRatio < 0.6 ? "low" : "normal";
-    const regime = volatility === "high" ? "VOLATILE" : btcTrend === "bull" ? "TRENDING" : btcTrend === "bear" ? "BEAR" : "RANGING";
-    _regimeCache.value = { regime, btcTrend, volatility, volRatio: +volRatio.toFixed(2) };
+    // BTC pump bypass — if the last 4H candle surged 2%+, treat as neutral even if EMA says bear.
+    // This lets the bot catch breakout moves without waiting for slow EMAs to catch up.
+    const last4hChange = (btc[btc.length - 1].close - btc[btc.length - 2].close) / btc[btc.length - 2].close;
+    const btcPumping = last4hChange >= 0.02;
+    const effectiveTrend = (btcTrend === "bear" && btcPumping) ? "neutral" : btcTrend;
+    const regime = volatility === "high" ? "VOLATILE" : effectiveTrend === "bull" ? "TRENDING" : effectiveTrend === "bear" ? "BEAR" : "RANGING";
+    if (btcPumping && btcTrend === "bear") console.log(`  ⚡ BTC pump bypass: last 4H +${(last4hChange*100).toFixed(1)}% — treating regime as RANGING despite BEAR EMA`);
+    _regimeCache.value = { regime, btcTrend: effectiveTrend, volatility, volRatio: +volRatio.toFixed(2) };
     _regimeCache.ts = Date.now();
     return _regimeCache.value;
   } catch { return { regime: "UNKNOWN", btcTrend: "neutral", volatility: "normal" }; }
