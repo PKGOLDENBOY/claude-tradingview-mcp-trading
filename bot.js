@@ -1811,7 +1811,7 @@ async function getSpotBalance(coin) {
       "ACCESS-KEY": acct().apiKey,
       "ACCESS-SIGN": sign,
       "ACCESS-TIMESTAMP": timestamp,
-      "ACCESS-PASSPHRASE": signBitGetPassphrase(),
+      "ACCESS-PASSPHRASE": acct().passphrase,
       "locale": "en-US",
     },
   });
@@ -1922,7 +1922,7 @@ async function reconcilePositions(log) {
     const path = "/api/v2/spot/account/assets";
     const sign = signBitGet(ts, "GET", path);
     const res = await fetch(`${acct().baseUrl}${path}`, {
-      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": signBitGetPassphrase(), "locale": "en-US" }
+      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" }
     });
     const data = await res.json();
     if (!data.data) return;
@@ -2031,6 +2031,7 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
   });
 
   const signature = signBitGet(timestamp, "POST", path, body);
+  console.log(`[ORDER DEBUG] ts=${timestamp} keyLen=${acct().secretKey?.length} path=${path} bodyLen=${body.length}`);
 
   const res = await fetch(`${acct().baseUrl}${path}`, {
     method: "POST",
@@ -2039,7 +2040,7 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
       "ACCESS-KEY": acct().apiKey,
       "ACCESS-SIGN": signature,
       "ACCESS-TIMESTAMP": timestamp,
-      "ACCESS-PASSPHRASE": signBitGetPassphrase(),
+      "ACCESS-PASSPHRASE": acct().passphrase,
       "locale": "en-US",
     },
     body,
@@ -2047,6 +2048,7 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
 
   const data = await res.json();
   if (data.code !== "00000") {
+    console.error(`[ORDER DEBUG] ts=${timestamp} path=${path} body=${body} code=${data.code} msg=${data.msg}`);
     throw new Error(`BitGet order failed: ${data.msg}`);
   }
 
@@ -2348,7 +2350,7 @@ async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
     const signature = signBitGet(timestamp, "POST", path, body);
     const res = await fetch(`${acct().baseUrl}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": signature, "ACCESS-TIMESTAMP": timestamp, "ACCESS-PASSPHRASE": signBitGetPassphrase(), "locale": "en-US" },
+      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": signature, "ACCESS-TIMESTAMP": timestamp, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
       body,
     });
     const orderData = await res.json();
@@ -2363,7 +2365,7 @@ async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
       const checkPath = `/api/v2/spot/trade/orderInfo?orderId=${orderId}&symbol=${symbol}`;
       const checkSign = signBitGet(ts2, "GET", checkPath);
       const checkRes = await fetch(`${acct().baseUrl}${checkPath}`, {
-        headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": checkSign, "ACCESS-TIMESTAMP": ts2, "ACCESS-PASSPHRASE": signBitGetPassphrase(), "locale": "en-US" },
+        headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": checkSign, "ACCESS-TIMESTAMP": ts2, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
       });
       const checkData = await checkRes.json();
       const status = checkData.data?.status;
@@ -2383,7 +2385,7 @@ async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
     const cancelSign = signBitGet(cancelTs, "POST", cancelPath, cancelBody);
     await fetch(`${acct().baseUrl}${cancelPath}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": cancelSign, "ACCESS-TIMESTAMP": cancelTs, "ACCESS-PASSPHRASE": signBitGetPassphrase(), "locale": "en-US" },
+      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": cancelSign, "ACCESS-TIMESTAMP": cancelTs, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
       body: cancelBody,
     });
     console.log(`  ⚠️  Limit not filled — cancelled, falling back to market`);
