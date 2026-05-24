@@ -3531,14 +3531,25 @@ if (process.argv.includes("--tax-summary")) {
         }
       } catch {}
     }
+    // Build a quick lookup of live BitGet coin qtys (for phantom-position filtering)
+    const liveQty = {};
+    for (const asset of liveAssets) {
+      const qty = parseFloat(asset.available) + parseFloat(asset.frozen || 0);
+      if (qty > 0.000001) liveQty[asset.coin] = qty;
+    }
+
     const openPositions = [];
     let openPositionValue = 0;
     const seenSyms = new Set();
     for (const [sym, pos] of Object.entries(log.positions || {})) {
       if (!pos || !pos.open) continue;
+      const baseCoin = sym.replace("USDT", "");
+      // Skip phantom positions — log says open but coin no longer in BitGet account
+      if (liveAssets.length > 0 && !liveQty[baseCoin]) continue;
       const snap = coinSnapshots[sym];
       const price = snap?.price ?? pos.entryPrice ?? 0;
-      const qty = parseFloat(pos.quantity || 0);
+      // Use live qty if available (more accurate than log quantity after partial fills)
+      const qty = liveQty[baseCoin] ?? parseFloat(pos.quantity || 0);
       if (qty < 0.000001 || price < 0.000001) continue;
       const usdVal = qty * price;
       if (usdVal < 0.5) continue;
@@ -3555,7 +3566,7 @@ if (process.argv.includes("--tax-summary")) {
         : pos.entryPrice * (1 - slPct);
       const minsOpen = pos.entryTime ? Math.round((Date.now() - new Date(pos.entryTime).getTime()) / 60000) : null;
       const pnlUSD = pos.entryPrice ? qty * (price - pos.entryPrice) : 0;
-      openPositions.push({ coin: sym.replace("USDT", ""), sym, qty, usdVal, price, entryPrice: pos.entryPrice, pnlPct, pnlUSD, slPct, tpPct, trailStop, breakEvenActive, minsOpen, entryType: pos.entryType || "scalp" });
+      openPositions.push({ coin: baseCoin, sym, qty, usdVal, price, entryPrice: pos.entryPrice, pnlPct, pnlUSD, slPct, tpPct, trailStop, breakEvenActive, minsOpen, entryType: pos.entryType || "scalp" });
     }
     // Add live BitGet coin holdings not yet tracked in log
     for (const asset of liveAssets) {
@@ -4966,29 +4977,38 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           } catch {}
         }
 
+        // Build live qty lookup for phantom-position filtering
+        const liveQty = {};
+        for (const asset of liveAssets) {
+          const q = parseFloat(asset.available) + parseFloat(asset.frozen || 0);
+          if (q > 0.000001) liveQty[asset.coin] = q;
+        }
+
         const openPositions = [];
         let openPositionValue = 0;
         const seenSyms = new Set();
 
-        // Show positions from log (has entry price metadata)
+        // Show positions from log, verified against live balance (skip phantoms)
         for (const [sym, pos] of Object.entries(log.positions || {})) {
           if (!pos || !pos.open) continue;
+          const baseCoin = sym.replace("USDT", "");
+          if (liveAssets.length > 0 && !liveQty[baseCoin]) continue; // phantom — sold but log stale
           const snap = coinSnapshots[sym];
           const price = snap?.price ?? pos.entryPrice ?? 0;
-          const qty = parseFloat(pos.quantity || 0);
+          const qty = liveQty[baseCoin] ?? parseFloat(pos.quantity || 0);
           if (qty < 0.000001 || price < 0.000001) continue;
           const usdVal = qty * price;
           if (usdVal < 0.5) continue;
           openPositionValue += usdVal;
           seenSyms.add(sym);
           const pnlPct = pos.entryPrice ? ((price - pos.entryPrice) / pos.entryPrice) * 100 : 0;
-          openPositions.push({ coin: sym.replace("USDT", ""), qty, usdVal, entryPrice: pos.entryPrice, pnlPct });
+          openPositions.push({ coin: baseCoin, qty, usdVal, entryPrice: pos.entryPrice, pnlPct });
         }
 
-        // Also show live BitGet coin holdings not yet in the log (caught by live balance)
+        // Also show live BitGet holdings not in the log
         for (const asset of liveAssets) {
           if (asset.coin === "USDT" || asset.coin === "BGB") continue;
-          const qty = parseFloat(asset.available) + parseFloat(asset.frozen || 0);
+          const qty = liveQty[asset.coin] ?? 0;
           if (qty < 0.000001) continue;
           const sym = asset.coin + "USDT";
           if (seenSyms.has(sym)) continue;
@@ -4996,7 +5016,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           const price = snap?.price ?? 0;
           if (price < 0.000001) continue;
           const usdVal = qty * price;
-          if (usdVal < 5) continue; // skip dust
+          if (usdVal < 5) continue;
           openPositionValue += usdVal;
           openPositions.push({ coin: asset.coin, qty, usdVal, entryPrice: null, pnlPct: null });
         }
