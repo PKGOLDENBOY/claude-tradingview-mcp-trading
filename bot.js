@@ -3506,7 +3506,7 @@ if (process.argv.includes("--tax-summary")) {
     return pin === BOT_PIN;
   }
 
-  function buildStatusData() {
+  async function buildStatusData() {
     const log = loadLog();
     const today = new Date().toISOString().slice(0, 10);
     const todayExits = (log.trades || []).filter(t => t.type === "exit" && t.timestamp?.startsWith(today) && t.pnlUSD !== undefined);
@@ -3514,9 +3514,26 @@ if (process.argv.includes("--tax-summary")) {
     const totalPnlUSD = todayExits.reduce((s, t) => s + (t.pnlUSD || 0), 0);
     const winRate = calcWinRate(log.trades || [], 10);
     const drawdown = checkDailyDrawdown(log);
-    const usdtBalance = log.portfolioValue || 0;
+    let usdtBalance = log.portfolioValue || 0;
+    let liveAssets = [];
+    if (!CONFIG.paperTrading) {
+      try {
+        const bg = ACCOUNTS.find(a => a.exchange === "bitget");
+        if (bg) {
+          const ts = Date.now().toString();
+          const bPath = "/api/v2/spot/account/assets";
+          const bSign = crypto.createHmac("sha256", bg.secretKey).update(ts + "GET" + bPath).digest("base64");
+          const bRes = await fetch(`${bg.baseUrl}${bPath}`, { headers: { "ACCESS-KEY": bg.apiKey, "ACCESS-SIGN": bSign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": bg.passphrase, "locale": "en-US" }, signal: AbortSignal.timeout(5000) });
+          const bData = await bRes.json();
+          liveAssets = bData.data || [];
+          const usdt = liveAssets.find(a => a.coin === "USDT");
+          if (usdt) usdtBalance = parseFloat(usdt.available) + parseFloat(usdt.frozen || 0);
+        }
+      } catch {}
+    }
     const openPositions = [];
-    let portfolioValue = usdtBalance;
+    let openPositionValue = 0;
+    const seenSyms = new Set();
     for (const [sym, pos] of Object.entries(log.positions || {})) {
       if (!pos || !pos.open) continue;
       const snap = coinSnapshots[sym];
@@ -3525,7 +3542,8 @@ if (process.argv.includes("--tax-summary")) {
       if (qty < 0.000001 || price < 0.000001) continue;
       const usdVal = qty * price;
       if (usdVal < 0.5) continue;
-      portfolioValue += usdVal;
+      openPositionValue += usdVal;
+      seenSyms.add(sym);
       const pnlPct = pos.entryPrice ? ((price - pos.entryPrice) / pos.entryPrice) * 100 : 0;
       const bt = BACKTEST[sym];
       const slPct = (pos.bearSnapBack || pos.bearMarket) ? 0.02 : (bt?.stopLoss ?? 0.04);
@@ -3539,6 +3557,22 @@ if (process.argv.includes("--tax-summary")) {
       const pnlUSD = pos.entryPrice ? qty * (price - pos.entryPrice) : 0;
       openPositions.push({ coin: sym.replace("USDT", ""), sym, qty, usdVal, price, entryPrice: pos.entryPrice, pnlPct, pnlUSD, slPct, tpPct, trailStop, breakEvenActive, minsOpen, entryType: pos.entryType || "scalp" });
     }
+    // Add live BitGet coin holdings not yet tracked in log
+    for (const asset of liveAssets) {
+      if (asset.coin === "USDT" || asset.coin === "BGB") continue;
+      const qty = parseFloat(asset.available) + parseFloat(asset.frozen || 0);
+      if (qty < 0.000001) continue;
+      const sym = asset.coin + "USDT";
+      if (seenSyms.has(sym)) continue;
+      const snap = coinSnapshots[sym];
+      const price = snap?.price ?? 0;
+      if (price < 0.000001) continue;
+      const usdVal = qty * price;
+      if (usdVal < 5) continue;
+      openPositionValue += usdVal;
+      openPositions.push({ coin: asset.coin, sym, qty, usdVal, price, entryPrice: null, pnlPct: null, pnlUSD: null, entryType: "untracked" });
+    }
+    const portfolioValue = usdtBalance + openPositionValue;
     const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
     const adaptiveMode = getAdaptiveMode(log.trades || []);
     const heat = calcPortfolioHeat(log);
@@ -4769,9 +4803,10 @@ async function togglePause(){
     if (req.method === "GET" && path === "/") {
       if (checkPin(req.url)) {
         const pin = urlObj.searchParams.get("pin");
-        const data = buildStatusData();
-        res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate", "Pragma": "no-cache", "Expires": "0" });
-        res.end(dashboardHTML(data, pin));
+        buildStatusData().then(data => {
+          res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate", "Pragma": "no-cache", "Expires": "0" });
+          res.end(dashboardHTML(data, pin));
+        }).catch(e => { res.writeHead(500); res.end("Dashboard error: " + e.message); });
       } else {
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -4900,10 +4935,10 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       return;
     }
 
-    // Live status API — served entirely from local log + coinSnapshots (no network call, instant)
+    // Live status API — fetches live USDT balance from BitGet for accurate portfolio display
     if (req.method === "GET" && path === "/api/status") {
       if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Wrong PIN" })); return; }
-      try {
+      (async () => {
         const log = loadLog();
         const today = new Date().toISOString().slice(0, 10);
         const todayTrades = (log.trades || []).filter(t => t.timestamp?.startsWith(today) && t.orderPlaced);
@@ -4912,11 +4947,30 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         const winRate = calcWinRate(log.trades || [], 10);
         const drawdown = checkDailyDrawdown(log);
 
-        // Build portfolio from log data — bot keeps this synced on every scan
-        const usdtBalance = log.portfolioValue || 0;
-        const openPositions = [];
-        let portfolioValue = usdtBalance;
+        // Fetch live BitGet balances — USDT + all coin holdings for accurate display
+        let usdtBalance = log.portfolioValue || 0;
+        let liveAssets = [];
+        if (!CONFIG.paperTrading) {
+          try {
+            const bg = ACCOUNTS.find(a => a.exchange === "bitget");
+            if (bg) {
+              const ts = Date.now().toString();
+              const bPath = "/api/v2/spot/account/assets";
+              const bSign = crypto.createHmac("sha256", bg.secretKey).update(ts + "GET" + bPath).digest("base64");
+              const bRes = await fetch(`${bg.baseUrl}${bPath}`, { headers: { "ACCESS-KEY": bg.apiKey, "ACCESS-SIGN": bSign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": bg.passphrase, "locale": "en-US" }, signal: AbortSignal.timeout(5000) });
+              const bData = await bRes.json();
+              liveAssets = bData.data || [];
+              const usdt = liveAssets.find(a => a.coin === "USDT");
+              if (usdt) usdtBalance = parseFloat(usdt.available) + parseFloat(usdt.frozen || 0);
+            }
+          } catch {}
+        }
 
+        const openPositions = [];
+        let openPositionValue = 0;
+        const seenSyms = new Set();
+
+        // Show positions from log (has entry price metadata)
         for (const [sym, pos] of Object.entries(log.positions || {})) {
           if (!pos || !pos.open) continue;
           const snap = coinSnapshots[sym];
@@ -4925,11 +4979,29 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           if (qty < 0.000001 || price < 0.000001) continue;
           const usdVal = qty * price;
           if (usdVal < 0.5) continue;
-          portfolioValue += usdVal;
+          openPositionValue += usdVal;
+          seenSyms.add(sym);
           const pnlPct = pos.entryPrice ? ((price - pos.entryPrice) / pos.entryPrice) * 100 : 0;
           openPositions.push({ coin: sym.replace("USDT", ""), qty, usdVal, entryPrice: pos.entryPrice, pnlPct });
         }
 
+        // Also show live BitGet coin holdings not yet in the log (caught by live balance)
+        for (const asset of liveAssets) {
+          if (asset.coin === "USDT" || asset.coin === "BGB") continue;
+          const qty = parseFloat(asset.available) + parseFloat(asset.frozen || 0);
+          if (qty < 0.000001) continue;
+          const sym = asset.coin + "USDT";
+          if (seenSyms.has(sym)) continue;
+          const snap = coinSnapshots[sym];
+          const price = snap?.price ?? 0;
+          if (price < 0.000001) continue;
+          const usdVal = qty * price;
+          if (usdVal < 5) continue; // skip dust
+          openPositionValue += usdVal;
+          openPositions.push({ coin: asset.coin, qty, usdVal, entryPrice: null, pnlPct: null });
+        }
+
+        const portfolioValue = usdtBalance + openPositionValue;
         const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
         const regime = regimeMatch?.regime || "RANGING";
 
@@ -4956,10 +5028,10 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         };
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(status));
-      } catch(e) {
+      })().catch(e => {
         console.error("[/api/status]", e.message);
         res.writeHead(500); res.end(JSON.stringify({ error: e.message }));
-      }
+      });
       return;
     }
 
