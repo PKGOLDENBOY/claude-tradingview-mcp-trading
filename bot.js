@@ -3638,38 +3638,117 @@ if (process.argv.includes("--tax-summary")) {
         missing = [rsiGap > 0 && `RSI ${rsi.toFixed(0)}→<30`, !trendOk && "4H↓", !nearVwap && "Far VWAP", !volOk && "Low vol"].filter(Boolean);
       }
       return { sym, coin: sym.replace("USDT",""), score, type, label, missing };
-    }).sort((a, b) => b.score - a.score).slice(0, 5);
+    }).sort((a, b) => b.score - a.score).slice(0, 8);
 
     const readinessHTML = readiness.length === 0
       ? `<div style="padding:24px;text-align:center;color:#4a5272;font-size:13px">Waiting for first scan…</div>`
-      : readiness.map((r, i) => {
+      : readiness.map((r) => {
+          const c = d.coins[r.sym] || {};
           const pct = Math.round(r.score * 100);
-          const barFill = Math.round(r.score * 16);
           const barColor = pct >= 75 ? "#00d4a0" : pct >= 50 ? "#ffb800" : "#4a5272";
-          const typeColor = r.type === "momentum" ? "#4f8dff" : "#00d4a0";
-          const lastSig = (d.coins[r.sym] || {}).lastSignal;
+          const typeColor = r.type === "momentum" ? "#4f8dff" : "#a78bfa";
+          const lastSig = c.lastSignal;
           const lastResult = lastSig?.result || null;
           const lastReason = lastSig?.reason || "";
-          const missingStr = lastResult === "ENTRY" ? "✅ Bought — position open"
-            : lastResult === "BLOCKED" ? `🚫 ${lastReason.slice(0, 60)}`
-            : lastResult === "HOLD" ? `🤖 ${lastReason.slice(0, 60)}`
+          const statusColor = lastResult === "ENTRY" ? "#4f8dff" : lastResult === "BLOCKED" ? "#ff4d6a" : lastResult === "HOLD" ? "#ffb800" : pct >= 75 ? "#00d4a0" : "#4a5272";
+          const statusLine = lastResult === "ENTRY" ? "✅ Bought — position open"
+            : lastResult === "BLOCKED" ? `🚫 ${lastReason.slice(0, 80)}`
+            : lastResult === "HOLD" ? `🤖 ${lastReason.slice(0, 80)}`
             : r.missing.length === 0 ? "⏳ Ready — waiting for next scan"
-            : r.missing.slice(0,2).join(" · ");
-          return `<div style="padding:13px 18px;border-bottom:1px solid #1a1f2e">
+            : `Needs: ${r.missing.join(" · ")}`;
+
+          const rsi = parseFloat(c.rsi3 || 50);
+          const price = parseFloat(c.price || 0);
+          const vwap = parseFloat(c.vwap || 0);
+          const ema8 = parseFloat(c.ema8 || 0);
+          const volPct = parseFloat(c.volPct || 0);
+          const stochK = parseFloat(c.stochK || 50);
+          const priceStr = price < 0.01 ? price.toFixed(6) : price < 1 ? price.toFixed(4) : price.toFixed(2);
+
+          // Per-type condition checks with ✓/✗
+          let conditions;
+          if (r.type === "momentum") {
+            conditions = [
+              { label: `RSI ${rsi.toFixed(0)}`, sub: "40–82",     ok: rsi >= 40 && rsi <= 82 },
+              { label: `EMA8 ${price > ema8 && ema8 > 0 ? "Above" : "Below"}`, sub: "above",  ok: price > ema8 && ema8 > 0 },
+              { label: `Vol ${volPct.toFixed(0)}%`,   sub: ">150%",    ok: volPct >= 150 },
+              { label: `StochK ${stochK.toFixed(0)}`, sub: "<90",      ok: stochK < 90 },
+              { label: `MACD ${c.macdBullish ? "Bull" : "Bear"}`, sub: "bull", ok: !!c.macdBullish },
+              { label: `4H ${c.trend4h === "up" ? "↑" : "↓"}`,   sub: "up",   ok: c.trend4h === "up" },
+              { label: `ADX ${c.adx != null ? Number(c.adx).toFixed(0) : "—"}`, sub: ">20",  ok: !!c.adxTrending },
+              { label: `VWAP ${price > vwap && vwap > 0 ? "Above" : "Below"}`, sub: "above", ok: price > vwap && vwap > 0 },
+            ];
+          } else {
+            const nearVwap = vwap > 0 && Math.abs((price - vwap) / vwap * 100) < 3;
+            conditions = [
+              { label: `RSI ${rsi.toFixed(0)}`,        sub: "<30",    ok: rsi < 30 },
+              { label: `StochK ${stochK.toFixed(0)}`,  sub: "OS<20",  ok: !!c.stochOversold },
+              { label: `MACD ${c.macdBullish ? "Bull" : "Bear"}`, sub: "bull", ok: !!c.macdBullish },
+              { label: `4H ${c.trend4h === "up" ? "↑" : "↓"}`,   sub: "up",   ok: c.trend4h === "up" },
+              { label: `VWAP ${nearVwap ? "Near" : price > vwap ? "Above" : "Below"}`, sub: "<3%", ok: nearVwap },
+              { label: `EMA8 ${price > ema8 && ema8 > 0 ? "Above" : "Below"}`, sub: "above", ok: price > ema8 && ema8 > 0 },
+              { label: `Vol ${c.volAboveAvg ? "High" : "Low"}`,  sub: ">avg",  ok: !!c.volAboveAvg },
+              { label: `ADX ${c.adx != null ? Number(c.adx).toFixed(0) : "—"}`, sub: ">20",  ok: !!c.adxTrending },
+            ];
+          }
+          const condHTML = conditions.map(cond =>
+            `<div style="display:flex;align-items:center;gap:3px;background:${cond.ok ? "#00d4a012" : "#1a1f2e"};border:1px solid ${cond.ok ? "#00d4a035" : "#252a3a"};border-radius:6px;padding:4px 7px">
+              <span style="font-size:9px;font-weight:800;color:${cond.ok ? "#00d4a0" : "#ff4d6a"}">${cond.ok ? "✓" : "✗"}</span>
+              <span style="font-size:10px;color:${cond.ok ? "#e2f9f5" : "#525870"};white-space:nowrap">${cond.label}</span>
+            </div>`).join("");
+
+          // Bonus signals
+          const bonus = [];
+          if (c.divergence)              bonus.push(`<span style="background:#00d4a012;border:1px solid #00d4a035;border-radius:6px;padding:3px 7px;font-size:10px;color:#00d4a0;font-weight:600">⚡ Divergence</span>`);
+          if (c.doubleBottom?.detected && c.doubleBottom.strongConfirmation)
+                                         bonus.push(`<span style="background:#4f8dff12;border:1px solid #4f8dff35;border-radius:6px;padding:3px 7px;font-size:10px;color:#4f8dff;font-weight:600">📐 Double Bottom ✓</span>`);
+          else if (c.doubleBottom?.detected)
+                                         bonus.push(`<span style="background:#4f8dff12;border:1px solid #4f8dff35;border-radius:6px;padding:3px 7px;font-size:10px;color:#4f8dff;font-weight:600">📐 Double Bottom</span>`);
+          if (c.obvRising)               bonus.push(`<span style="background:#4f8dff12;border:1px solid #4f8dff35;border-radius:6px;padding:3px 7px;font-size:10px;color:#4f8dff;font-weight:600">📈 OBV Rising</span>`);
+          if (c.nearSupport)             bonus.push(`<span style="background:#ffb80012;border:1px solid #ffb80035;border-radius:6px;padding:3px 7px;font-size:10px;color:#ffb800;font-weight:600">🏗️ Near Support</span>`);
+          if (Array.isArray(c.patterns)) c.patterns.slice(0, 3).forEach(p =>
+                                         bonus.push(`<span style="background:#a78bfa12;border:1px solid #a78bfa35;border-radius:6px;padding:3px 7px;font-size:10px;color:#a78bfa;font-weight:600">📊 ${p}</span>`));
+
+          // Trend matrix
+          const tc = (t) => t === "up" ? "#00d4a0" : "#ff4d6a";
+          const ta = (t) => t === "up" ? "↑" : "↓";
+          const trendBar = ["15m","1h","4h","Wk"].map((lbl, i) => {
+            const t = [c.trend15m, c.trend1h, c.trend4h, c.trendWeekly][i];
+            return `<span style="font-size:10px;color:#4a5272;white-space:nowrap">${lbl}<span style="color:${tc(t)};font-weight:700">${ta(t)}</span></span>`;
+          }).join("");
+
+          // S/R distances
+          const srParts = [];
+          if (c.distToSupport  != null) srParts.push(`<span style="font-size:10px;color:#4a5272">Sup: <span style="color:${c.nearSupport ? "#00d4a0" : "#94a3b8"}">${Number(c.distToSupport).toFixed(1)}% away</span></span>`);
+          if (c.distToResistance != null) srParts.push(`<span style="font-size:10px;color:#4a5272">Res: <span style="color:#ff4d6a">${Number(c.distToResistance).toFixed(1)}% away</span></span>`);
+
+          return `<div style="padding:14px 16px;border-bottom:1px solid #1a1f2e">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:7px">
-              <div style="display:flex;align-items:center;gap:10px">
-                <div style="width:28px;height:28px;border-radius:8px;background:${barColor}18;color:${barColor};display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:800">${r.coin.slice(0,3)}</div>
-                <div><div style="font-size:14px;font-weight:700">${r.coin}</div><div style="font-size:11px;color:#4a5272">${r.label}</div></div>
+              <div style="display:flex;align-items:center;gap:9px">
+                <div style="width:34px;height:34px;border-radius:10px;background:${barColor}18;color:${barColor};display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:800;flex-shrink:0">${r.coin.slice(0,4)}</div>
+                <div>
+                  <div style="font-size:14px;font-weight:700;display:flex;align-items:center;gap:6px">
+                    ${r.coin}
+                    <span style="font-size:9px;font-weight:700;color:${typeColor};background:${typeColor}18;padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:.04em">${r.type}</span>
+                  </div>
+                  <div style="font-size:11px;color:#4a5272">$${priceStr} &nbsp;·&nbsp; ${r.label}</div>
+                </div>
               </div>
-              <div style="text-align:right">
-                <div style="font-size:16px;font-weight:800;color:${barColor}">${pct}%</div>
-                <div style="font-size:10px;font-weight:600;color:${typeColor};text-transform:uppercase;letter-spacing:.04em">${r.type}</div>
+              <div style="text-align:right;flex-shrink:0">
+                <div style="font-size:20px;font-weight:800;color:${barColor}">${pct}%</div>
+                <div style="font-size:9px;color:#4a5272;letter-spacing:.04em">READY</div>
               </div>
             </div>
-            <div style="background:#1a1f2e;border-radius:99px;height:5px;overflow:hidden">
-              <div style="width:${pct}%;height:100%;background:${barColor};border-radius:99px;transition:width .3s"></div>
+            <div style="background:#1a1f2e;border-radius:99px;height:4px;overflow:hidden;margin-bottom:8px">
+              <div style="width:${pct}%;height:100%;background:${barColor};border-radius:99px"></div>
             </div>
-            <div style="font-size:11px;color:#4a5272;margin-top:6px">${missingStr}</div>
+            <div style="font-size:11px;color:${statusColor};margin-bottom:9px;line-height:1.4">${statusLine}</div>
+            <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:${bonus.length ? "7px" : "0"}">${condHTML}</div>
+            ${bonus.length ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:7px">${bonus.join("")}</div>` : ""}
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:${bonus.length ? "0" : "7px"}">
+              <div style="display:flex;gap:8px">${trendBar}</div>
+              <div style="display:flex;gap:8px">${srParts.join(" ")}</div>
+            </div>
           </div>`;
         }).join("");
 
