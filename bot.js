@@ -2031,7 +2031,6 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
   });
 
   const signature = signBitGet(timestamp, "POST", path, body);
-  console.log(`[ORDER DEBUG] ts=${timestamp} keyLen=${acct().secretKey?.length} path=${path} bodyLen=${body.length}`);
 
   const res = await fetch(`${acct().baseUrl}${path}`, {
     method: "POST",
@@ -2048,7 +2047,6 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
 
   const data = await res.json();
   if (data.code !== "00000") {
-    console.error(`[ORDER DEBUG] ts=${timestamp} path=${path} body=${body} code=${data.code} msg=${data.msg}`);
     throw new Error(`BitGet order failed: ${data.msg}`);
   }
 
