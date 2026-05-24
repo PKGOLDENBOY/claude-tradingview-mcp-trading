@@ -769,12 +769,12 @@ async function refreshTopMovers() {
       parseFloat(t.usdtVolume) > 1_000_000   // $1M+ volume — broad but liquid
     );
 
-    // Cache top 10 gainers for dashboard
+    // Cache top 20 gainers for dashboard + momentum path
     _topGainers = allCoins
       .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPr), change24h: parseFloat(t.change24h) * 100, vol: parseFloat(t.usdtVolume) }))
       .filter(t => t.change24h > 0)
       .sort((a, b) => b.change24h - a.change24h)
-      .slice(0, 10);
+      .slice(0, 20);
 
     // Score: weighted mix of volume rank + absolute 24h move (big moves = opportunity)
     const totalVol = allCoins.reduce((s, t) => s + parseFloat(t.usdtVolume), 0);
@@ -786,8 +786,8 @@ async function refreshTopMovers() {
       return { symbol: t.symbol, score: volScore * 0.4 + chgScore * 0.6, vol, chg: parseFloat(t.change24h) };
     }).sort((a, b) => b.score - a.score);
 
-    // Take top 40 by score — mix of high-volume stalwarts + big movers
-    const candidates = scored.slice(0, 40).map(t => t.symbol);
+    // Take top 80 by score — broad market coverage: high-volume stalwarts + big movers
+    const candidates = scored.slice(0, 80).map(t => t.symbol);
     console.log(`\n🌐 Full market scan — ${allCoins.length} liquid coins → top ${candidates.length} candidates`);
 
     // Backtest all candidates — 20H cache means most results are instant
