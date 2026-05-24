@@ -3917,6 +3917,42 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   </div>
 </div>
 
+<!-- ── DAILY GOAL ──────────────────────────────────────────────── -->
+${(() => {
+  const goalPct = 50;
+  const goalUSD = pf * goalPct / 100;
+  const earnedUSD = d.todayPnlUSD || 0;
+  const progress = Math.min(100, Math.max(0, (earnedUSD / goalUSD) * 100));
+  const remaining = Math.max(0, goalUSD - earnedUSD);
+  const goalColor = progress >= 100 ? "#00d4a0" : progress >= 50 ? "#ffb800" : "#4f8dff";
+  const goalIcon = progress >= 100 ? "🏆" : progress >= 75 ? "🔥" : progress >= 50 ? "⚡" : "🎯";
+  const tradesNeeded = d.totalTrades > 0 && d.avgWin > 0
+    ? Math.ceil(remaining / (pf * parseFloat(d.avgWin) / 100 * 0.25))
+    : null;
+  return `<div style="margin:10px 16px 0;background:linear-gradient(135deg,#0d1f0d,#091209);border:1px solid #1a3a1a;border-radius:18px;padding:18px">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
+    <div>
+      <div style="font-size:10px;color:#4a7a4a;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Daily Goal ${goalIcon}</div>
+      <div style="font-size:28px;font-weight:800;letter-spacing:-1px;color:${goalColor}">${progress.toFixed(0)}%</div>
+      <div style="font-size:11px;color:#4a7a4a;margin-top:2px">${progress >= 100 ? "Goal smashed! 🏆" : `$${earnedUSD >= 0 ? "+" : ""}${earnedUSD.toFixed(2)} of $+${goalUSD.toFixed(2)} target`}</div>
+    </div>
+    <div style="text-align:right">
+      <div style="font-size:11px;color:#4a7a4a;margin-bottom:4px">Target +${goalPct}%/day</div>
+      <div style="font-size:22px;font-weight:800;color:#00d4a0">+$${goalUSD.toFixed(2)}</div>
+      ${remaining > 0 ? `<div style="font-size:11px;color:#4a7a4a">$${remaining.toFixed(2)} to go</div>` : ""}
+    </div>
+  </div>
+  <div style="background:#0a1f0a;border-radius:99px;height:8px;overflow:hidden;margin-bottom:8px">
+    <div style="width:${progress}%;height:100%;background:linear-gradient(90deg,#00d4a0,${goalColor});border-radius:99px;transition:width .5s"></div>
+  </div>
+  <div style="display:flex;justify-content:space-between;font-size:10px;color:#4a7a4a">
+    <span>$0</span>
+    ${tradesNeeded ? `<span>~${tradesNeeded} more trade${tradesNeeded !== 1 ? "s" : ""} needed</span>` : ""}
+    <span>$+${goalUSD.toFixed(2)}</span>
+  </div>
+</div>`;
+})()}
+
 <!-- ── PERFORMANCE STATS ──────────────────────────────────────── -->
 <div style="margin:10px 16px 0;display:grid;grid-template-columns:1fr 1fr;gap:8px">
   <div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:13px">
