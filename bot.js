@@ -2444,14 +2444,10 @@ async function run(tvSignal = null, symbol = null) {
     console.log(`\n⚠️  Daily drawdown: ${drawdown.drawdownPct.toFixed(2)}% / ${drawdown.limit}% limit`);
   }
 
-  // Adaptive mode — auto-adjusts strategy based on recent win rate
+  // Adaptive mode — computed now, early-return check moved to after coinSnapshots
+  // so the dashboard always shows live prices/indicators even when trading is paused
   const adaptive = getAdaptiveMode(log.trades);
   console.log(`\n🧠 Strategy mode: ${adaptive.label}`);
-  if (adaptive.mode === "paused") {
-    console.log(`   Win rate too low — trading paused to protect capital.`);
-    console.log("═══════════════════════════════════════════════════════════\n");
-    return;
-  }
 
   // Market regime + portfolio heat — logged once per scan cycle
   const regime = await detectMarketRegime().catch(() => ({ regime: "UNKNOWN", btcTrend: "neutral", volatility: "normal" }));
@@ -2562,6 +2558,14 @@ async function run(tvSignal = null, symbol = null) {
     regime: regime?.regime,
     lastSignal: signalLog.filter(s => s.symbol === symbol).slice(-1)[0] || null,
   };
+
+  // Adaptive pause — checked here (after coinSnapshots) so dashboard always shows live data
+  if (adaptive.mode === "paused") {
+    console.log(`   Win rate too low — trading paused to protect capital.`);
+    pushSignal(symbol, "BLOCKED", `Adaptive pause — win rate too low (need ≥25%)`);
+    console.log("═══════════════════════════════════════════════════════════\n");
+    return;
+  }
 
   const currentPortfolio = log.portfolioValue || acct().portfolioValue;
   // Kelly Criterion sizing — optimal fraction based on live win rate + payoff ratio per coin
@@ -3487,10 +3491,12 @@ if (process.argv.includes("--tax-summary")) {
       openPositions.push({ coin: sym.replace("USDT", ""), qty, usdVal, entryPrice: pos.entryPrice, pnlPct });
     }
     const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
+    const adaptiveMode = getAdaptiveMode(log.trades || []);
     return {
       portfolioValue, usdtBalance, openPositions,
       regime: regimeMatch?.regime || "RANGING",
-      paused: _tradingPaused || drawdown.paused,
+      paused: _tradingPaused || drawdown.paused || adaptiveMode.mode === "paused",
+      pauseReason: adaptiveMode.mode === "paused" ? "Win rate too low — adaptive pause" : drawdown.paused ? "Drawdown limit hit" : _tradingPaused ? "Manually paused" : null,
       todayTrades: todayTrades.length,
       todayPnlUSD: totalPnlUSD,
       winRate: winRate ? `${winRate.wins}/${winRate.sample} (${(winRate.winRate * 100).toFixed(0)}%)` : "—",
@@ -3673,8 +3679,10 @@ ${d.topGainers && d.topGainers.length > 0 ? `
 
 <div class="grid">
   <div class="card-sm"><div class="card-sm-label">Trades Today</div><div class="card-sm-val">${d.todayTrades}</div><div class="card-sm-sub">of 20 max</div></div>
-  <div class="card-sm"><div class="card-sm-label">Market</div><div class="card-sm-val" style="color:${regColor};font-size:15px">${d.regime}</div><div class="card-sm-sub" style="color:${d.paused ? "#ffb800" : "#00d4a0"}">${d.paused ? "Paused" : "Active"}</div></div>
+  <div class="card-sm"><div class="card-sm-label">Market</div><div class="card-sm-val" style="color:${regColor};font-size:15px">${d.regime}</div><div class="card-sm-sub" style="color:${d.paused ? "#ffb800" : "#00d4a0"}" title="${d.pauseReason || ""}">${d.paused ? "⚠️ Paused" : "Active"}</div></div>
 </div>
+
+${d.pauseReason ? `<div style="margin:10px 16px 0;padding:10px 14px;background:#ffb80015;border:1px solid #ffb80040;border-radius:12px;font-size:12px;color:#ffb800;text-align:center">⚠️ ${d.pauseReason}</div>` : ""}
 
 <div class="sec"><div class="sec-title">Open Positions</div><div class="card">${posHTML}</div></div>
 <div class="sec"><div class="sec-title">Recent Trades</div><div class="card">${tradesHTML}</div></div>
