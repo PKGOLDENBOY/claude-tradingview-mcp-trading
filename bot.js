@@ -219,7 +219,7 @@ const CONFIG = {
   portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD || "1000"),
   maxTradeSizePct: (() => { const v = process.env.MAX_TRADE_SIZE_USD || "25%"; return v.trim().endsWith("%") ? parseFloat(v) / 100 : null; })(),
   maxTradeSizeUSD: (() => { const v = process.env.MAX_TRADE_SIZE_USD || "25%"; return v.trim().endsWith("%") ? null : parseFloat(v); })(),
-  maxTradesPerDay: Math.min(parseInt(process.env.MAX_TRADES_PER_DAY || "20"), 20),
+  maxTradesPerDay: parseInt(process.env.MAX_TRADES_PER_DAY || "40"),
   paperTrading: process.env.PAPER_TRADING !== "false",
   tradeMode: process.env.TRADE_MODE || "spot",
   bitget: {
@@ -3007,13 +3007,13 @@ async function run(tvSignal = null, symbol = null) {
       else console.log(`  ✅ Support ok — $${sr.nearestSupport.toFixed(4)} (${sr.distToSupport?.toFixed(2)}% below price, ${sr.supportConf} TF confluences)`);
     }
 
-    // Fix 4: Max 3 concurrent positions
+    // Fix 4: Max 5 concurrent positions
     const openPositions = Object.entries(log.positions || {}).filter(([,p]) => p && p.open);
     const openCount = openPositions.length;
-    if (openCount >= 3) {
+    if (openCount >= 5) {
       const held = openPositions.map(([s]) => s).join(", ");
-      console.log(`🚫 MAX POSITIONS — already holding ${held}. Max 3 positions at a time.`);
-      pushSignal(symbol, "BLOCKED", `Max positions (${held}/3) reached`);;
+      console.log(`🚫 MAX POSITIONS — already holding ${held}. Max 5 positions at a time.`);
+      pushSignal(symbol, "BLOCKED", `Max positions (5/5) reached`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
@@ -3911,7 +3911,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   <div style="font-size:13px;font-weight:600;color:${pnlColor};margin-bottom:18px">${d.todayPnlUSD >= 0 ? "+" : ""}$${Math.abs(d.todayPnlUSD).toFixed(2)} today ${d.todayPnlUSD !== 0 ? "(" + (d.todayPnlUSD/pf*100).toFixed(2) + "%)" : ""}</div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 20px">
     <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">CASH</div><div style="font-size:14px;font-weight:700">$${Number(d.usdtBalance).toFixed(2)}</div></div>
-    <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">POSITIONS</div><div style="font-size:14px;font-weight:700">${d.openPositions.length} / 3</div></div>
+    <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">POSITIONS</div><div style="font-size:14px;font-weight:700">${d.openPositions.length} / 5</div></div>
     <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">TODAY TRADES</div><div style="font-size:14px;font-weight:700">${d.todayTrades}</div></div>
     <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">LAST TRADE</div><div style="font-size:14px;font-weight:700" id="last-trade-ago">${d.lastTradeAt ? "—" : "—"}</div></div>
   </div>
