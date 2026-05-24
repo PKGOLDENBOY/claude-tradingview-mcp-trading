@@ -1544,23 +1544,23 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
       check(`Bear snap-back TP hit — $${snapTpPrice.toFixed(4)} (+3%)`, price >= snapTpPrice && pnlPct >= 3);
     }
 
-    // Soft exits — only fire once gain is meaningful AND min hold time has passed.
-    // MIN_HOLD: 20 min — prevents fee-eating exits on scalps that haven't moved yet.
-    // SOFT_MIN: 0.75% — won't exit an overbought signal unless gain covers fees.
-    const SOFT_MIN = 0.75;
-    const minsHeld = position.entryTime
-      ? (Date.now() - new Date(position.entryTime).getTime()) / (1000 * 60)
-      : 999;
-    const MIN_HOLD_MINS = 20;
-    const holdOk = minsHeld >= MIN_HOLD_MINS;
-    if (!holdOk) console.log(`  ⏳ Min hold not met — ${minsHeld.toFixed(0)}/${MIN_HOLD_MINS} min. Soft exits suppressed.`);
+    // Soft exits — fire on real market signals, not arbitrary timers.
+    // Rule: if price is STILL above EMA8 AND VWAP, the trend is intact — hold through
+    // overbought oscillator readings. Only exit on exhaustion when trend actually weakens.
+    // SOFT_MIN = 1.0%: profit must cover fees + buffer before any soft exit fires.
+    const SOFT_MIN = 1.0;
+    const trendIntact = price > ema8 && price > vwap;
+    if (trendIntact) console.log(`  📈 Trend intact (price > EMA8 & VWAP) — holding through overbought signals`);
 
-    check(`RSI(3) overbought > 85 | Actual: ${rsi3.toFixed(2)}`, rsi3 > 85 && pnlPct >= SOFT_MIN && holdOk);
+    // RSI extreme overbought: only exit if trend is weakening (price slipping vs EMA) OR big gain
+    check(`RSI(3) overbought > 88 | Actual: ${rsi3.toFixed(2)}`, rsi3 > 88 && pnlPct >= SOFT_MIN && (!trendIntact || pnlPct >= 2.0));
     if (stochRsi) {
-      const stochExitOk = stochRsi.overbought && holdOk && (pnlPct >= 1.5 || (rsi3 > 90 && pnlPct >= SOFT_MIN) || (sr?.nearResistance && pnlPct >= SOFT_MIN));
-      check(`StochRSI overbought > 88 | K=${stochRsi.k.toFixed(1)}${stochRsi.overbought && !stochExitOk ? ` (holding — P&L ${pnlPct.toFixed(2)}% < min or hold ${minsHeld.toFixed(0)}min < ${MIN_HOLD_MINS}min)` : ""}`, stochExitOk);
+      // StochRSI > 88 + trend breaking OR big gain = true exhaustion
+      const stochExhausted = stochRsi.overbought && pnlPct >= SOFT_MIN && (!trendIntact || pnlPct >= 2.0 || (rsi3 > 90 && sr?.nearResistance));
+      check(`StochRSI overbought > 88 | K=${stochRsi.k.toFixed(1)}${stochRsi.overbought && !stochExhausted ? ` (holding — trend intact or P&L ${pnlPct.toFixed(2)}% < target)` : ""}`, stochExhausted);
     }
-    if (bb) check(`BB% > 0.92 (at upper band) | BB%=${bb.pct.toFixed(2)}`, bb.pct > 0.92 && pnlPct >= SOFT_MIN && holdOk);
+    // BB% extreme — price at very top of band AND trend showing signs of reversal
+    if (bb) check(`BB% > 0.92 (extreme upper band) | BB%=${bb.pct.toFixed(2)}`, bb.pct > 0.92 && pnlPct >= SOFT_MIN && (!trendIntact || pnlPct >= 2.0));
     // Snap-back entries start below VWAP deliberately — "trend reversed" doesn't apply.
     // Dynamic TP: exit RSI threshold shifts based on distance to resistance
     if (position.entryType === "snapback") {
@@ -1569,11 +1569,11 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
       if (distToRes !== null && distToRes < 1.5) {
         snapRsiExit = 72; snapLabel = `RSI(3) > 72 — near resistance ($${sr.nearestResistance?.toFixed(2)}, ${distToRes.toFixed(1)}% away)`;
       } else if (distToRes !== null && distToRes > 5) {
-        snapRsiExit = 80; snapLabel = `RSI(3) > 80 — room to run (resistance ${distToRes.toFixed(1)}% away), holding longer`;
+        snapRsiExit = 82; snapLabel = `RSI(3) > 82 — room to run (resistance ${distToRes.toFixed(1)}% away), holding longer`;
       } else {
-        snapRsiExit = 68; snapLabel = `RSI(3) recovered above 68 — snap-back complete`;
+        snapRsiExit = 72; snapLabel = `RSI(3) recovered above 72 — snap-back complete`;
       }
-      check(snapLabel, rsi3 > snapRsiExit && pnlPct >= SOFT_MIN && holdOk);
+      check(snapLabel, rsi3 > snapRsiExit && pnlPct >= SOFT_MIN && !trendIntact);
     } else {
       // Failed bounce — entered expecting snap-back but price kept falling with bearish momentum
       if (pnlPct < -1.5 && macd && !macd.bullish) {
