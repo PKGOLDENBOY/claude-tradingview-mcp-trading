@@ -2567,13 +2567,9 @@ async function run(tvSignal = null, symbol = null) {
     lastSignal: signalLog.filter(s => s.symbol === symbol).slice(-1)[0] || null,
   };
 
-  // Adaptive pause — checked here (after coinSnapshots) so dashboard always shows live data
-  if (adaptive.mode === "paused") {
-    console.log(`   Win rate too low — trading paused to protect capital.`);
-    pushSignal(symbol, "BLOCKED", `Adaptive pause — win rate too low (need ≥25%)`);
-    console.log("═══════════════════════════════════════════════════════════\n");
-    return;
-  }
+  // Adaptive mode adjusts position sizing and RSI thresholds — but never fully pauses.
+  // A full pause causes a deadlock (can't trade → can't improve win rate → stays paused forever).
+  // Capital is protected by stop-loss, ATR trail, daily drawdown limit, and max positions instead.
 
   const currentPortfolio = log.portfolioValue || acct().portfolioValue;
   // Kelly Criterion sizing — optimal fraction based on live win rate + payoff ratio per coin
@@ -3503,8 +3499,8 @@ if (process.argv.includes("--tax-summary")) {
     return {
       portfolioValue, usdtBalance, openPositions,
       regime: regimeMatch?.regime || "RANGING",
-      paused: _tradingPaused || drawdown.paused || adaptiveMode.mode === "paused",
-      pauseReason: adaptiveMode.mode === "paused" ? "Win rate too low — adaptive pause" : drawdown.paused ? "Drawdown limit hit" : _tradingPaused ? "Manually paused" : null,
+      paused: _tradingPaused || drawdown.paused,
+      pauseReason: drawdown.paused ? "Drawdown limit hit" : _tradingPaused ? "Manually paused" : null,
       todayTrades: todayTrades.length,
       todayPnlUSD: totalPnlUSD,
       winRate: winRate ? `${winRate.wins}/${winRate.sample} (${(winRate.winRate * 100).toFixed(0)}%)` : "—",
