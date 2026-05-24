@@ -2585,6 +2585,7 @@ async function run(tvSignal = null, symbol = null) {
   const kellySizePct = kellyPositionPct(log, symbol, CONFIG.maxTradeSizePct || 0.25);
   const sizePct = kellySizePct;
   // Scale down as daily losses accumulate + volatile regime + bear snap-backs
+  const bearSnapBack  = regime.btcTrend === "bear" && rsi3 !== null && rsi3 < 28 && (stochRsi?.oversold === true || macd.bullish === true);
   const regimeScale   = regime.volatility === "high" ? 0.50 : 1.0;
   const drawdownScale = drawdown.drawdownPct > 7 ? 0.30 : drawdown.drawdownPct > 5 ? 0.50 : drawdown.drawdownPct > 3 ? 0.75 : 1.0;
   const bearScale     = bearSnapBack ? 0.40 : 1.0; // bear snap-back = 40% size only
@@ -2898,9 +2899,6 @@ async function run(tvSignal = null, symbol = null) {
     // Bear market block — no new scalp entries when BTC macro trend is bearish.
     // Exception: oversold snap-backs (RSI < 28 + StochRSI oversold OR MACD bullish)
     // These are high-probability rubber-band bounces that work even in downtrends.
-    const bearSnapBack = regime.btcTrend === "bear" &&
-      rsi3 !== null && rsi3 < 28 &&
-      (stochRsi?.oversold === true || macd.bullish === true);
     if (regime.btcTrend === "bear" && !bearSnapBack) {
       console.log(`🚫 BEAR MARKET BLOCK — BTC regime is BEAR. Scalp entries blocked; exits still monitored.`);
       pushSignal(symbol, "BLOCKED", "Bear market — BTC regime is BEAR");
