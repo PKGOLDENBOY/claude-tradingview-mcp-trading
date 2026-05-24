@@ -3063,6 +3063,7 @@ async function run(tvSignal = null, symbol = null) {
       if (hoursSince < 4) {
         console.log(`🛑 STREAK PAUSE — 3 losses in a row. Cooling off for 4 hours (${(4 - hoursSince).toFixed(1)}h remaining).`);
         console.log("═══════════════════════════════════════════════════════════\n");
+        pushSignal(symbol, "BLOCKED", `3-loss streak pause — ${(4 - hoursSince).toFixed(1)}h remaining`);
         return;
       }
     }
@@ -3078,6 +3079,7 @@ async function run(tvSignal = null, symbol = null) {
         if (btcChange <= -3) {
           console.log(`🛑 BTC TREND BLOCK — BTC is down ${btcChange.toFixed(2)}% today. Skipping new long entries to avoid catching falling knives.`);
           console.log("═══════════════════════════════════════════════════════════\n");
+          pushSignal(symbol, "BLOCKED", `BTC down ${btcChange.toFixed(1)}% today — no longs in crash`);
           return;
         }
       }
@@ -3095,6 +3097,7 @@ async function run(tvSignal = null, symbol = null) {
         const failed = momResults.filter(r => !r.pass).map(r => r.label);
         console.log(`\n🚫 MOMENTUM BLOCK — conditions not met:\n   ${failed.join("\n   ")}`);
         console.log("═══════════════════════════════════════════════════════════\n");
+        pushSignal(symbol, "BLOCKED", `Momentum block — ${failed.slice(0, 2).join(", ")}`);
         return;
       }
 
@@ -3238,6 +3241,7 @@ async function run(tvSignal = null, symbol = null) {
     if (obv.bearDivergence) {
       console.log(`🚫 OBV DIVERGENCE BLOCK — price rising but OBV falling. Institutions are selling into this rally.`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", "OBV bear divergence — smart money selling into rally");
       return;
     }
 
@@ -3261,12 +3265,14 @@ async function run(tvSignal = null, symbol = null) {
     if (rulesPass && entryType === "trend-follow" && entryScore < 3 && !vwapBounceMode) {
       console.log(`🚫 ENTRY QUALITY BLOCK — score ${entryScore}/3 needed. Signals: RSI<20, BB%<0.35, StochRSI oversold, vol surge, divergence, liquidity sweep, or negative funding.`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `Entry quality ${entryScore}/3 — need RSI<20, StochRSI oversold, vol surge, or divergence`);
       return;
     }
     // Snapback quality gate — counter-trend entries need confirmation (StochRSI/BB%/divergence)
     if (rulesPass && entryType === "snapback" && entryScore < 2 && !vwapBounceMode) {
       console.log(`🚫 SNAPBACK QUALITY BLOCK — score ${entryScore}/2 needed. Counter-trend needs: StochRSI oversold, BB% near low, RSI<15, divergence, or liquidity sweep.`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `Snapback quality ${entryScore}/2 — need StochRSI oversold, BB% low, or divergence`);
       return;
     }
 
@@ -3274,6 +3280,7 @@ async function run(tvSignal = null, symbol = null) {
     if (rulesPass && stochRsi && stochRsi.k > 75 && !vwapBounceMode) {
       console.log(`🚫 STOCHRSI BLOCK — K=${stochRsi.k.toFixed(1)} already overbought (>75). Wait for pullback before entering.`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `StochRSI overbought K=${stochRsi.k.toFixed(1)} — wait for pullback`);
       return;
     }
 
