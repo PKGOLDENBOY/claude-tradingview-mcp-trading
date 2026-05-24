@@ -3558,6 +3558,65 @@ if (process.argv.includes("--tax-summary")) {
           </div>`;
         }).join("");
 
+    // ── Closest to Entry — score every coin by how close it is to a trade ────
+    const readiness = Object.entries(d.coins || {}).map(([sym, c]) => {
+      const rsi = parseFloat(c.rsi3 || 100);
+      const price = parseFloat(c.price || 0);
+      const vwap = parseFloat(c.vwap || 0);
+      const volPct = parseFloat(c.volPct || 0);
+      const gainer = (d.topGainers || []).find(t => t.symbol === sym);
+      const isMomentum = gainer && gainer.change24h >= 5 && gainer.change24h <= 40;
+
+      let score, type, label, missing;
+      if (isMomentum) {
+        const rsiOk = rsi >= 40 && rsi <= 82;
+        const aboveEma = c.trend15m === "up";
+        const volOk = volPct >= 150;
+        const stochOk = parseFloat(c.stochK || 100) < 90;
+        score = [rsiOk, aboveEma, volOk, stochOk].filter(Boolean).length / 4;
+        type = "momentum";
+        label = `+${gainer.change24h.toFixed(1)}% today`;
+        missing = [!rsiOk && `RSI ${rsi.toFixed(0)}`, !aboveEma && "Below EMA8", !volOk && `Vol ${volPct}%<150%`, !stochOk && "StochRSI>90"].filter(Boolean);
+      } else {
+        const rsiGap = Math.max(0, rsi - 30);
+        const rsiScore = Math.max(0, 1 - rsiGap / 70);
+        const trendOk = c.trend4h === "up";
+        const nearVwap = vwap > 0 && Math.abs((price - vwap) / vwap * 100) < 3;
+        const volOk = c.volAboveAvg;
+        score = rsiScore * 0.6 + (trendOk ? 0.2 : 0) + (nearVwap ? 0.1 : 0) + (volOk ? 0.1 : 0);
+        type = "mean-rev";
+        label = `RSI ${rsi.toFixed(0)}`;
+        missing = [rsiGap > 0 && `RSI ${rsi.toFixed(0)}→<30`, !trendOk && "4H↓", !nearVwap && "Far VWAP", !volOk && "Low vol"].filter(Boolean);
+      }
+      return { sym, coin: sym.replace("USDT",""), score, type, label, missing };
+    }).sort((a, b) => b.score - a.score).slice(0, 5);
+
+    const readinessHTML = readiness.length === 0
+      ? `<div style="padding:24px;text-align:center;color:#4a5272;font-size:13px">Waiting for first scan…</div>`
+      : readiness.map((r, i) => {
+          const pct = Math.round(r.score * 100);
+          const barFill = Math.round(r.score * 16);
+          const barColor = pct >= 75 ? "#00d4a0" : pct >= 50 ? "#ffb800" : "#4a5272";
+          const typeColor = r.type === "momentum" ? "#4f8dff" : "#00d4a0";
+          const missingStr = r.missing.length === 0 ? "✅ All conditions met" : r.missing.slice(0,2).join(" · ");
+          return `<div style="padding:13px 18px;border-bottom:1px solid #1a1f2e">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:7px">
+              <div style="display:flex;align-items:center;gap:10px">
+                <div style="width:28px;height:28px;border-radius:8px;background:${barColor}18;color:${barColor};display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:800">${r.coin.slice(0,3)}</div>
+                <div><div style="font-size:14px;font-weight:700">${r.coin}</div><div style="font-size:11px;color:#4a5272">${r.label}</div></div>
+              </div>
+              <div style="text-align:right">
+                <div style="font-size:16px;font-weight:800;color:${barColor}">${pct}%</div>
+                <div style="font-size:10px;font-weight:600;color:${typeColor};text-transform:uppercase;letter-spacing:.04em">${r.type}</div>
+              </div>
+            </div>
+            <div style="background:#1a1f2e;border-radius:99px;height:5px;overflow:hidden">
+              <div style="width:${pct}%;height:100%;background:${barColor};border-radius:99px;transition:width .3s"></div>
+            </div>
+            <div style="font-size:11px;color:#4a5272;margin-top:6px">${missingStr}</div>
+          </div>`;
+        }).join("");
+
     const coinsArr = Object.entries(d.coins || {});
     const coinsHTML = coinsArr.length === 0
       ? `<div style="padding:24px;text-align:center;color:#4a5272;font-size:14px">Waiting for first scan...</div>`
@@ -3690,6 +3749,7 @@ ${d.pauseReason ? `<div style="margin:10px 16px 0;padding:10px 14px;background:#
 
 <div class="sec"><div class="sec-title">Open Positions</div><div class="card">${posHTML}</div></div>
 <div class="sec"><div class="sec-title">Recent Trades</div><div class="card">${tradesHTML}</div></div>
+<div class="sec"><div class="sec-title">Closest to Entry</div><div class="card">${readinessHTML}</div></div>
 <div class="sec">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
     <div class="sec-title" style="margin-bottom:0">Coins Being Watched</div>
