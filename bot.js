@@ -5489,7 +5489,8 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       const regime = await detectMarketRegime().catch(() => ({ regime: "UNKNOWN" }));
       console.log(`\n🌍 Market regime: ${regime.regime} | BTC trend: ${regime.btcTrend} | Volatility: ${regime.volatility}`);
 
-      await refreshTopMovers();
+      // Fire refreshTopMovers in background — don't block the startup scan on 80-coin backtests
+      refreshTopMovers().then(() => startPriceStream(CONFIG.symbols)).catch(e => console.error("refreshTopMovers failed:", e.message));
       startPriceStream(CONFIG.symbols);
 
       for (const account of ACCOUNTS) {
@@ -5498,8 +5499,8 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         // Reconciliation re-discovers open positions after Railway log wipe
         if (!CONFIG.paperTrading) {
           const startLog = loadLog();
-          await syncPortfolioBalance(startLog);
-          await reconcilePositions(startLog);
+          await syncPortfolioBalance(startLog).catch(e => console.error("syncPortfolioBalance failed:", e.message));
+          await reconcilePositions(startLog).catch(e => console.error("reconcilePositions failed:", e.message));
           saveLog(startLog);
           sendEmail(
             "🤖 Bot Online — Trading Started",
