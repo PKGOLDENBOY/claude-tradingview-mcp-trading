@@ -3492,7 +3492,16 @@ if (process.argv.includes("--tax-summary")) {
       if (usdVal < 0.5) continue;
       portfolioValue += usdVal;
       const pnlPct = pos.entryPrice ? ((price - pos.entryPrice) / pos.entryPrice) * 100 : 0;
-      openPositions.push({ coin: sym.replace("USDT", ""), qty, usdVal, entryPrice: pos.entryPrice, pnlPct });
+      const bt = BACKTEST[sym];
+      const slPct = (pos.bearSnapBack || pos.bearMarket) ? 0.02 : (bt?.stopLoss ?? 0.04);
+      const tpPct = pos.entryType === "momentum" ? 0.10 : (bt?.takeProfit ?? 0.08);
+      const hwm = pos.highWatermark ?? pos.entryPrice;
+      const breakEvenActive = hwm >= pos.entryPrice * 1.02;
+      const trailStop = breakEvenActive
+        ? Math.max(hwm * 0.98, pos.entryPrice)
+        : pos.entryPrice * (1 - slPct);
+      const minsOpen = pos.entryTime ? Math.round((Date.now() - new Date(pos.entryTime).getTime()) / 60000) : null;
+      openPositions.push({ coin: sym.replace("USDT", ""), sym, qty, usdVal, price, entryPrice: pos.entryPrice, pnlPct, slPct, tpPct, trailStop, breakEvenActive, minsOpen, entryType: pos.entryType || "scalp" });
     }
     const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
     const adaptiveMode = getAdaptiveMode(log.trades || []);
@@ -3521,13 +3530,39 @@ if (process.argv.includes("--tax-summary")) {
       ? `<div style="padding:24px;text-align:center;color:#4a5272;font-size:14px">All cash — no open positions</div>`
       : d.openPositions.map(p => {
           const pc = p.pnlPct >= 0 ? "#00d4a0" : "#ff4d6a";
-          return `<div style="padding:14px 18px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1a1f2e">
-            <div style="display:flex;align-items:center;gap:12px">
-              <div style="width:38px;height:38px;border-radius:12px;background:#4f8dff18;color:#4f8dff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800">${p.coin.slice(0,3)}</div>
-              <div><div style="font-size:15px;font-weight:700">${p.coin}</div><div style="font-size:12px;color:#4a5272">${Number(p.qty).toFixed(4)} @ $${Number(p.entryPrice).toFixed(4)}</div></div>
+          const slPct = p.slPct * 100;
+          const tpPct = p.tpPct * 100;
+          const slPrice = (p.entryPrice * (1 - p.slPct)).toFixed(4);
+          const tpPrice = (p.entryPrice * (1 + p.tpPct)).toFixed(4);
+          // Progress bar: 0% = stop loss, 100% = take profit
+          const range = tpPct + slPct;
+          const progress = Math.min(100, Math.max(0, ((p.pnlPct + slPct) / range) * 100));
+          const barColor = p.pnlPct >= 0 ? "#00d4a0" : "#ff4d6a";
+          const timeStr = p.minsOpen != null ? (p.minsOpen >= 60 ? `${Math.floor(p.minsOpen/60)}h ${p.minsOpen%60}m` : `${p.minsOpen}m`) : "—";
+          const typeLabel = p.entryType === "momentum" ? "MOMENTUM" : p.entryType === "snapback" ? "SNAP-BACK" : "SCALP";
+          const stopLabel = p.breakEvenActive ? `Break-even stop $${p.trailStop.toFixed(4)}` : `Stop-loss $${slPrice} (-${slPct.toFixed(0)}%)`;
+          return `<a href="/coin?symbol=${p.sym}&pin=${pin}" style="display:block;padding:16px 18px;border-bottom:1px solid #1a1f2e;text-decoration:none;color:inherit">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+              <div style="display:flex;align-items:center;gap:10px">
+                <div style="width:40px;height:40px;border-radius:12px;background:${pc}18;color:${pc};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800">${p.coin.slice(0,3)}</div>
+                <div>
+                  <div style="font-size:16px;font-weight:700">${p.coin} <span style="font-size:10px;font-weight:600;color:#4f8dff;background:#4f8dff15;padding:2px 6px;border-radius:4px">${typeLabel}</span></div>
+                  <div style="font-size:11px;color:#4a5272;margin-top:2px">In ${timeStr} &middot; $${Number(p.usdVal).toFixed(2)}</div>
+                </div>
+              </div>
+              <div style="text-align:right">
+                <div style="font-size:20px;font-weight:800;color:${pc}">${p.pnlPct >= 0 ? "+" : ""}${Number(p.pnlPct).toFixed(2)}%</div>
+                <div style="font-size:11px;color:#4a5272">$${Number(p.price).toFixed(4)}</div>
+              </div>
             </div>
-            <div style="text-align:right"><div style="font-size:15px;font-weight:700">$${Number(p.usdVal).toFixed(2)}</div><div style="font-size:12px;font-weight:600;color:${pc}">${p.pnlPct >= 0 ? "+" : ""}${Number(p.pnlPct).toFixed(2)}%</div></div>
-          </div>`;
+            <div style="background:#1a1f2e;border-radius:99px;height:6px;overflow:hidden;margin-bottom:8px;position:relative">
+              <div style="position:absolute;left:0;top:0;height:100%;width:${progress}%;background:${barColor};border-radius:99px;transition:width .3s"></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:10px;color:#4a5272">
+              <span style="color:#ff4d6a">▼ ${stopLabel}</span>
+              <span style="color:#00d4a0">▲ Target +${tpPct.toFixed(0)}% ($${tpPrice})</span>
+            </div>
+          </a>`;
         }).join("");
 
     const tradesHTML = d.lastTrades.length === 0
