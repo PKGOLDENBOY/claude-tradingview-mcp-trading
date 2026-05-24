@@ -2996,14 +2996,11 @@ async function run(tvSignal = null, symbol = null) {
     }
     if (bullTrendWeekly !== null) console.log(`  Weekly trend: ${bullTrendWeekly ? "✅ Bull market — normal filters" : weeklyFilterActive ? "⚠️  Weekly bear (BEAR regime) — RSI < 40 required" : "⚠️  Weekly bear — relaxed in RANGING"}`);
 
-    // Upgrade 5: Support proximity — only enter within 3% of a key support level
-    if (sr.nearestSupport && sr.distToSupport !== null && sr.distToSupport > 4) {
-      console.log(`🚫 SUPPORT BLOCK — price is ${sr.distToSupport.toFixed(2)}% above nearest support ($${sr.nearestSupport.toFixed(4)}). Need to be within 4% of support.`);
-      pushSignal(symbol, "BLOCKED", `${sr.distToSupport.toFixed(1)}% above support — need within 4%`);;
-      console.log("═══════════════════════════════════════════════════════════\n");
-      return;
+    // Support proximity — warn but don't hard-block; ATR trail handles downside
+    if (sr.nearestSupport) {
+      if (sr.distToSupport > 8) console.log(`  ⚠️  Far from support — $${sr.nearestSupport.toFixed(4)} (${sr.distToSupport?.toFixed(2)}% below price) — buying into air`);
+      else console.log(`  ✅ Support ok — $${sr.nearestSupport.toFixed(4)} (${sr.distToSupport?.toFixed(2)}% below price, ${sr.supportConf} TF confluences)`);
     }
-    if (sr.nearestSupport) console.log(`  ✅ Near support — $${sr.nearestSupport.toFixed(4)} (${sr.distToSupport?.toFixed(2)}% below price, ${sr.supportConf} TF confluences)`);
 
     // Fix 4: Max 3 concurrent positions
     const openPositions = Object.entries(log.positions || {}).filter(([,p]) => p && p.open);
@@ -3633,7 +3630,14 @@ if (process.argv.includes("--tax-summary")) {
           const barFill = Math.round(r.score * 16);
           const barColor = pct >= 75 ? "#00d4a0" : pct >= 50 ? "#ffb800" : "#4a5272";
           const typeColor = r.type === "momentum" ? "#4f8dff" : "#00d4a0";
-          const missingStr = r.missing.length === 0 ? "✅ All conditions met" : r.missing.slice(0,2).join(" · ");
+          const lastSig = (d.coins[r.sym] || {}).lastSignal;
+          const lastResult = lastSig?.result || null;
+          const lastReason = lastSig?.reason || "";
+          const missingStr = lastResult === "ENTRY" ? "✅ Bought — position open"
+            : lastResult === "BLOCKED" ? `🚫 ${lastReason.slice(0, 60)}`
+            : lastResult === "HOLD" ? `🤖 ${lastReason.slice(0, 60)}`
+            : r.missing.length === 0 ? "⏳ Ready — waiting for next scan"
+            : r.missing.slice(0,2).join(" · ");
           return `<div style="padding:13px 18px;border-bottom:1px solid #1a1f2e">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:7px">
               <div style="display:flex;align-items:center;gap:10px">
