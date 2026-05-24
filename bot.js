@@ -3893,14 +3893,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <!-- ── SCAN PULSE ─────────────────────────────────────────────── -->
 <div style="margin:8px 16px 0;padding:9px 14px;background:#0e1117;border:1px solid #1a1f2e;border-radius:12px;display:flex;justify-content:space-between;align-items:center;gap:8px">
   <div style="font-size:11px;color:#4a5272;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-    <span>Scanned: <span id="last-scan-ago" style="color:#94a3b8">${d.lastScanMs ? "—" : "waiting…"}</span></span>
+    <span>Scanned: <span id="last-scan-ago" style="color:#94a3b8">${d.lastScanMs ? "just now" : "starting up…"}</span></span>
     <span style="color:#252a3a">·</span>
     <span>${d.coinsScanned || 0} coins</span>
     <span style="color:#252a3a">·</span>
     <span style="color:${d.nearEntry > 0 ? "#ffb800" : "#4a5272"};font-weight:${d.nearEntry > 0 ? "700" : "400"}">${d.nearEntry} near entry</span>
   </div>
   <div style="font-size:11px;white-space:nowrap;flex-shrink:0">
-    <span style="color:#4a5272">Next </span><span id="next-scan" style="color:#4f8dff;font-weight:700">—</span>
+    <span style="color:#4a5272">Next </span><span id="next-scan" style="color:#4f8dff;font-weight:700">${d.lastScanMs ? "—" : "~5m"}</span>
   </div>
 </div>
 
@@ -4066,12 +4066,15 @@ function fmtCd(ms){
   return m+':'+String(s).padStart(2,'0');
 }
 function tick(){
+  const el=document.getElementById('last-scan-ago');
+  const ni=document.getElementById('next-scan');
   if(_LS){
-    const el=document.getElementById('last-scan-ago');
     if(el)el.textContent=fmtAgo(_LS);
-    const ni=document.getElementById('next-scan');
     const nms=Math.max(0,_LI-(Date.now()-_LS));
     if(ni)ni.textContent=fmtCd(nms);
+  } else {
+    if(el)el.textContent='starting up…';
+    if(ni)ni.textContent='~5m';
   }
   if(_LT){
     const el=document.getElementById('last-trade-ago');
@@ -5458,6 +5461,8 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         }
       }
       _currentAccount = ACCOUNTS[0];
+      _lastScanTime = Date.now();
+      _lastScanCount = CONFIG.symbols.length;
     })();
   });
 
