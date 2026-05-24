@@ -132,6 +132,11 @@ function pushSignal(symbol, result, reason, indicators = {}) {
 // Dashboard pause flag — toggled via /api/pause and /api/resume
 let _tradingPaused = false;
 
+// Scan tracking — shown on dashboard
+let _lastScanTime = null;   // ms epoch when last full cycle finished
+let _lastScanCount = 0;     // how many coins were in last cycle
+let _lastTradeAt = null;    // ISO timestamp of most recent executed order
+
 // Per-coin latest scan data — shown in dashboard coin detail view
 const coinSnapshots = {};
 
@@ -2562,7 +2567,7 @@ async function run(tvSignal = null, symbol = null) {
     support: sr.nearestSupport?.toFixed(4), distToSupport: sr.distToSupport?.toFixed(2), nearSupport: sr.nearSupport,
     resistance: sr.nearestResistance?.toFixed(4), distToResistance: sr.distToResistance?.toFixed(2),
     patterns: patterns.length ? patterns.join(", ") : null,
-    doubleBottom: doubleBottom?.detected || false,
+    doubleBottom: doubleBottom ? { detected: doubleBottom.detected, strongConfirmation: doubleBottom.strongConfirmation } : null,
     regime: regime?.regime,
     lastSignal: signalLog.filter(s => s.symbol === symbol).slice(-1)[0] || null,
   };
@@ -3498,7 +3503,8 @@ if (process.argv.includes("--tax-summary")) {
         ? Math.max(hwm * 0.98, pos.entryPrice)
         : pos.entryPrice * (1 - slPct);
       const minsOpen = pos.entryTime ? Math.round((Date.now() - new Date(pos.entryTime).getTime()) / 60000) : null;
-      openPositions.push({ coin: sym.replace("USDT", ""), sym, qty, usdVal, price, entryPrice: pos.entryPrice, pnlPct, slPct, tpPct, trailStop, breakEvenActive, minsOpen, entryType: pos.entryType || "scalp" });
+      const pnlUSD = pos.entryPrice ? qty * (price - pos.entryPrice) : 0;
+      openPositions.push({ coin: sym.replace("USDT", ""), sym, qty, usdVal, price, entryPrice: pos.entryPrice, pnlPct, pnlUSD, slPct, tpPct, trailStop, breakEvenActive, minsOpen, entryType: pos.entryType || "scalp" });
     }
     const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
     const adaptiveMode = getAdaptiveMode(log.trades || []);
@@ -3512,6 +3518,16 @@ if (process.argv.includes("--tax-summary")) {
     const expectancy = allExits.length >= 3 ? (wrRate * avgWin + (1 - wrRate) * avgLoss).toFixed(2) : null;
     const btcSnap = coinSnapshots["BTCUSDT"] || null;
     const btcPrice = btcSnap?.price ?? (_topGainers.find(t => t.symbol === "BTCUSDT")?.price ?? null);
+    const nearEntry = Object.values(coinSnapshots).filter(c => {
+      const rsi = parseFloat(c.rsi3 || 50);
+      const volPct = parseFloat(c.volPct || 0);
+      const gainer = (_topGainers || []).find(t => t.symbol === c.symbol);
+      const isMom = gainer && gainer.change24h >= 5;
+      if (isMom) return rsi >= 40 && rsi <= 82 && c.trend15m === "up" && volPct >= 150 && parseFloat(c.stochK || 100) < 90;
+      const rsiGap = Math.max(0, rsi - 30);
+      return (1 - rsiGap / 70) * 0.6 + (c.trend4h === "up" ? 0.2 : 0) + (c.volAboveAvg ? 0.1 : 0) >= 0.75;
+    }).length;
+    const lastTradeAt = (log.trades || []).filter(t => t.orderPlaced && t.timestamp).slice(-1)[0]?.timestamp || null;
     return {
       portfolioValue, usdtBalance, openPositions,
       regime: regimeMatch?.regime || "RANGING",
@@ -3527,6 +3543,11 @@ if (process.argv.includes("--tax-summary")) {
       heatPct: heat.heatPct, isOverheated: heat.isOverheated,
       adaptiveLabel: adaptiveMode.label, adaptiveMode: adaptiveMode.mode,
       btcPrice,
+      lastScanMs: _lastScanTime,
+      scanIntervalMs: 5 * 60 * 1000,
+      coinsScanned: _lastScanCount || Object.keys(coinSnapshots).length,
+      nearEntry,
+      lastTradeAt,
       lastTrades: (log.trades || []).slice(-10).reverse(),
       signals: signalLog.slice(-30).reverse(),
       coins: coinSnapshots,
@@ -3566,6 +3587,7 @@ if (process.argv.includes("--tax-summary")) {
               </div>
               <div style="text-align:right">
                 <div style="font-size:20px;font-weight:800;color:${pc}">${p.pnlPct >= 0 ? "+" : ""}${Number(p.pnlPct).toFixed(2)}%</div>
+                <div style="font-size:13px;font-weight:600;color:${pc}">${p.pnlUSD >= 0 ? "+" : ""}$${Math.abs(Number(p.pnlUSD)).toFixed(2)}</div>
                 <div style="font-size:11px;color:#4a5272">$${Number(p.price).toFixed(4)}</div>
               </div>
             </div>
@@ -3706,7 +3728,7 @@ if (process.argv.includes("--tax-summary")) {
                                          bonus.push(`<span style="background:#4f8dff12;border:1px solid #4f8dff35;border-radius:6px;padding:3px 7px;font-size:10px;color:#4f8dff;font-weight:600">📐 Double Bottom</span>`);
           if (c.obvRising)               bonus.push(`<span style="background:#4f8dff12;border:1px solid #4f8dff35;border-radius:6px;padding:3px 7px;font-size:10px;color:#4f8dff;font-weight:600">📈 OBV Rising</span>`);
           if (c.nearSupport)             bonus.push(`<span style="background:#ffb80012;border:1px solid #ffb80035;border-radius:6px;padding:3px 7px;font-size:10px;color:#ffb800;font-weight:600">🏗️ Near Support</span>`);
-          if (Array.isArray(c.patterns)) c.patterns.slice(0, 3).forEach(p =>
+          if (c.patterns) String(c.patterns).split(", ").slice(0, 3).forEach(p =>
                                          bonus.push(`<span style="background:#a78bfa12;border:1px solid #a78bfa35;border-radius:6px;padding:3px 7px;font-size:10px;color:#a78bfa;font-weight:600">📊 ${p}</span>`));
 
           // Trend matrix
@@ -3743,9 +3765,27 @@ if (process.argv.includes("--tax-summary")) {
               <div style="width:${pct}%;height:100%;background:${barColor};border-radius:99px"></div>
             </div>
             <div style="font-size:11px;color:${statusColor};margin-bottom:9px;line-height:1.4">${statusLine}</div>
-            <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:${bonus.length ? "7px" : "0"}">${condHTML}</div>
+            <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:7px">${condHTML}</div>
             ${bonus.length ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:7px">${bonus.join("")}</div>` : ""}
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:${bonus.length ? "0" : "7px"}">
+            <div style="margin:0 0 7px">
+              <div style="display:flex;justify-content:space-between;font-size:9px;color:#4a5272;margin-bottom:2px">
+                <span>RSI 0 (OS)</span><span style="font-weight:600;color:${rsi < 30 ? "#00d4a0" : rsi > 70 ? "#ff4d6a" : "#94a3b8"}">${rsi.toFixed(0)}</span><span>100 (OB)</span>
+              </div>
+              <div style="position:relative;height:5px;border-radius:3px;overflow:hidden">
+                <div style="position:absolute;inset:0;background:linear-gradient(to right,#00d4a0 0%,#00d4a0 28%,#1c2235 30%,#1c2235 68%,#ff4d6a 70%,#ff4d6a 100%)"></div>
+                <div style="position:absolute;top:0;left:${Math.min(98,Math.max(2,rsi))}%;width:3px;height:100%;background:#fff;opacity:.9;border-radius:2px;transform:translateX(-50%)"></div>
+              </div>
+            </div>
+            ${c.bbPct != null ? `<div style="margin:0 0 7px">
+              <div style="display:flex;justify-content:space-between;font-size:9px;color:#4a5272;margin-bottom:2px">
+                <span>BB low</span><span style="font-weight:600;color:${parseFloat(c.bbPct) > 80 ? "#ff4d6a" : parseFloat(c.bbPct) < 20 ? "#00d4a0" : "#94a3b8"}">BB% ${c.bbPct}%</span><span>BB high</span>
+              </div>
+              <div style="position:relative;height:4px;border-radius:3px;overflow:hidden">
+                <div style="position:absolute;inset:0;background:linear-gradient(to right,#00d4a0 0%,#1c2235 20%,#1c2235 80%,#ff4d6a 100%)"></div>
+                <div style="position:absolute;top:0;left:${Math.min(98,Math.max(2,parseFloat(c.bbPct||50)))}%;width:3px;height:100%;background:#fff;opacity:.9;border-radius:2px;transform:translateX(-50%)"></div>
+              </div>
+            </div>` : ""}
+            <div style="display:flex;justify-content:space-between;align-items:center">
               <div style="display:flex;gap:8px">${trendBar}</div>
               <div style="display:flex;gap:8px">${srParts.join(" ")}</div>
             </div>
@@ -3799,7 +3839,6 @@ if (process.argv.includes("--tax-summary")) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta http-equiv="refresh" content="30; url=/?pin=${pin}">
 <title>AlphaBot</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -3851,15 +3890,30 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   </form>
 </div>
 
+<!-- ── SCAN PULSE ─────────────────────────────────────────────── -->
+<div style="margin:8px 16px 0;padding:9px 14px;background:#0e1117;border:1px solid #1a1f2e;border-radius:12px;display:flex;justify-content:space-between;align-items:center;gap:8px">
+  <div style="font-size:11px;color:#4a5272;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    <span>Scanned: <span id="last-scan-ago" style="color:#94a3b8">${d.lastScanMs ? "—" : "waiting…"}</span></span>
+    <span style="color:#252a3a">·</span>
+    <span>${d.coinsScanned || 0} coins</span>
+    <span style="color:#252a3a">·</span>
+    <span style="color:${d.nearEntry > 0 ? "#ffb800" : "#4a5272"};font-weight:${d.nearEntry > 0 ? "700" : "400"}">${d.nearEntry} near entry</span>
+  </div>
+  <div style="font-size:11px;white-space:nowrap;flex-shrink:0">
+    <span style="color:#4a5272">Next </span><span id="next-scan" style="color:#4f8dff;font-weight:700">—</span>
+  </div>
+</div>
+
 <!-- ── PORTFOLIO HERO ─────────────────────────────────────────── -->
 <div style="margin:14px 16px 0;background:linear-gradient(135deg,#0d1a33,#091020);border:1px solid #1a2a4a;border-radius:22px;padding:22px">
   <div style="font-size:11px;color:#4a5272;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Total Portfolio</div>
   <div style="font-size:44px;font-weight:800;letter-spacing:-2px;line-height:1;margin-bottom:4px">$${Number(pf).toFixed(2)}</div>
   <div style="font-size:13px;font-weight:600;color:${pnlColor};margin-bottom:18px">${d.todayPnlUSD >= 0 ? "+" : ""}$${Math.abs(d.todayPnlUSD).toFixed(2)} today ${d.todayPnlUSD !== 0 ? "(" + (d.todayPnlUSD/pf*100).toFixed(2) + "%)" : ""}</div>
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 20px">
     <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">CASH</div><div style="font-size:14px;font-weight:700">$${Number(d.usdtBalance).toFixed(2)}</div></div>
     <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">POSITIONS</div><div style="font-size:14px;font-weight:700">${d.openPositions.length} / 3</div></div>
     <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">TODAY TRADES</div><div style="font-size:14px;font-weight:700">${d.todayTrades}</div></div>
+    <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">LAST TRADE</div><div style="font-size:14px;font-weight:700" id="last-trade-ago">${d.lastTradeAt ? "—" : "—"}</div></div>
   </div>
 </div>
 
@@ -3985,7 +4039,7 @@ ${d.topGainers && d.topGainers.length > 0 ? `
   </div>
 </div>
 
-<div style="text-align:center;color:#2a2f42;font-size:11px;margin-top:20px">AlphaBot &middot; auto-refreshes every 30s</div>
+<div style="text-align:center;color:#2a2f42;font-size:11px;margin-top:20px">AlphaBot &middot; refreshing in <span id="refresh-in">30s</span></div>
 
 <script>
 function filterCoins(q){
@@ -3994,6 +4048,44 @@ function filterCoins(q){
     el.style.display=(!q||el.dataset.coin.includes(q))?'block':'none';
   });
 }
+// ── Live timers ───────────────────────────────────────────────────
+const _LS=${d.lastScanMs || "null"};
+const _LI=${d.scanIntervalMs};
+const _LT=${d.lastTradeAt ? `"${d.lastTradeAt}"` : "null"};
+const _PL=Date.now();
+function fmtAgo(ms){
+  const s=Math.floor((Date.now()-ms)/1000);
+  if(s<5)return'just now';
+  if(s<60)return s+'s ago';
+  if(s<3600)return Math.floor(s/60)+'m ago';
+  return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m ago';
+}
+function fmtCd(ms){
+  if(ms<=0)return'soon';
+  const m=Math.floor(ms/60000),s=Math.floor((ms%60000)/1000);
+  return m+':'+String(s).padStart(2,'0');
+}
+function tick(){
+  if(_LS){
+    const el=document.getElementById('last-scan-ago');
+    if(el)el.textContent=fmtAgo(_LS);
+    const ni=document.getElementById('next-scan');
+    const nms=Math.max(0,_LI-(Date.now()-_LS));
+    if(ni)ni.textContent=fmtCd(nms);
+  }
+  if(_LT){
+    const el=document.getElementById('last-trade-ago');
+    if(el)el.textContent=fmtAgo(new Date(_LT).getTime());
+  }
+  const ri=document.getElementById('refresh-in');
+  const left=Math.max(0,30000-(Date.now()-_PL));
+  if(ri)ri.textContent=Math.ceil(left/1000)+'s';
+}
+setInterval(tick,1000);tick();
+// Soft reload every 30s — skip if user is typing
+setInterval(function(){
+  if(!document.querySelector('input:focus'))location.reload();
+},30000);
 </script>
 </body>
 </html>`;
@@ -5479,5 +5571,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       }
     }
     _currentAccount = ACCOUNTS[0];
+    _lastScanTime = Date.now();
+    _lastScanCount = CONFIG.symbols.length;
   }, 5 * 60 * 1000);
 }
