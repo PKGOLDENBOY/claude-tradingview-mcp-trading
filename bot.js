@@ -863,7 +863,7 @@ async function fetchCandles(symbol, interval, limit = 100) {
   const granularity = intervalMap[interval] || "1h";
 
   const url = `https://api.bitget.com/api/v2/spot/market/candles?symbol=${symbol}&granularity=${granularity}&limit=${Math.min(limit, 1000)}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
   if (!res.ok) throw new Error(`BitGet market data error: ${res.status}`);
   const json = await res.json();
   if (json.code !== "00000") throw new Error(`BitGet API error: ${json.msg}`);
@@ -5511,9 +5511,12 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
              <p><b>Mode:</b> LIVE TRADING</p>`
           );
         }
-        console.log(`\n👛 Account ${account.id} — initial scan`);
-        for (const sym of CONFIG.symbols) {
-          await run(null, sym).catch((err) => { console.error(`Startup ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); });
+        console.log(`\n👛 Account ${account.id} — initial scan (3 coins at a time)`);
+        const startSyms = [...CONFIG.symbols];
+        for (let i = 0; i < startSyms.length; i += 3) {
+          await Promise.all(startSyms.slice(i, i + 3).map(sym =>
+            run(null, sym).catch((err) => { console.error(`Startup ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); })
+          ));
         }
         if (SWING_ENABLED) {
           for (const sym of CONFIG.symbols) {
@@ -5631,12 +5634,15 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     _currentAccount = ACCOUNTS[0];
   }, 60 * 60 * 1000);
 
-  // Check all symbols every 5 minutes (scalp entry scan + exit check)
+  // Check all symbols every 5 minutes (scalp entry scan + exit check) — 3 coins at a time
   setInterval(async () => {
     for (const account of ACCOUNTS) {
       _currentAccount = account;
-      for (const sym of CONFIG.symbols) {
-        await run(null, sym).catch((err) => { console.error(`Poll ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); });
+      const pollSyms = [...CONFIG.symbols];
+      for (let i = 0; i < pollSyms.length; i += 3) {
+        await Promise.all(pollSyms.slice(i, i + 3).map(sym =>
+          run(null, sym).catch((err) => { console.error(`Poll ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); })
+        ));
       }
     }
     _currentAccount = ACCOUNTS[0];
