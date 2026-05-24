@@ -1460,13 +1460,13 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
       distFromVWAP < 1.5,
     );
   } else {
-    // Neutral bias — allow entry if oversold (RSI < 25)
-    if (rsi3 !== null && rsi3 < 25) {
-      console.log(`  Bias: NEUTRAL but RSI(3)=${rsi3.toFixed(1)} oversold — snap-back entry\n`);
-      check("RSI(3) oversold (< 25) in neutral market", "< 25", rsi3.toFixed(2), true);
+    // Neutral bias — allow entry if RSI is oversold (uses same threshold as bullish path)
+    if (rsi3 !== null && rsi3 < rsiThreshold) {
+      console.log(`  Bias: NEUTRAL but RSI(3)=${rsi3.toFixed(1)} oversold (< ${rsiThreshold}) — snap-back entry\n`);
+      check(`RSI(3) oversold (< ${rsiThreshold}) in neutral market`, `< ${rsiThreshold}`, rsi3.toFixed(2), true);
     } else {
-      console.log("  Bias: NEUTRAL — no clear direction, RSI not oversold enough. No trade.\n");
-      results.push({ label: "Market bias", required: "Bullish/bearish or RSI < 15", actual: "Neutral", pass: false });
+      console.log(`  Bias: NEUTRAL — RSI(3)=${rsi3?.toFixed(1)} not low enough (need < ${rsiThreshold}). No trade.\n`);
+      results.push({ label: "Market bias", required: `RSI < ${rsiThreshold}`, actual: rsi3?.toFixed(1) ?? "N/A", pass: false });
     }
   }
 
@@ -1985,8 +1985,17 @@ function floorToDecimals(value, decimals) {
   return Math.floor(value * factor) / factor;
 }
 
+async function getBitGetServerTime() {
+  try {
+    const res = await fetch("https://api.bitget.com/api/v2/public/time", { signal: AbortSignal.timeout(5000) });
+    const data = await res.json();
+    if (data.data?.serverTime) return data.data.serverTime.toString();
+  } catch {}
+  return Date.now().toString();
+}
+
 async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride = null) {
-  const timestamp = Date.now().toString();
+  const timestamp = await getBitGetServerTime();
   const path =
     CONFIG.tradeMode === "spot"
       ? "/api/v2/spot/trade/place-order"
@@ -2013,7 +2022,6 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
     symbol,
     side,
     orderType: "market",
-    force: "gtc",
     size: orderSize,
     ...(CONFIG.tradeMode === "futures" && {
       productType: "USDT-FUTURES",
