@@ -1065,7 +1065,7 @@ function calcStochRSI(closes) {
   const minR = Math.min(...window), maxR = Math.max(...window);
   const range = maxR - minR;
   const k = range === 0 ? 50 : ((window[window.length - 1] - minR) / range) * 100;
-  return { k, oversold: k < 20, overbought: k > 80 };
+  return { k, oversold: k < 20, overbought: k > 88 };
 }
 
 // ATR(14) — average true range
@@ -1385,7 +1385,7 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
 
     // 9. StochRSI — v2 confirmation signal
     if (stochRsi !== null) {
-      console.log(`  ℹ️  StochRSI K=${stochRsi.k.toFixed(1)}: ${stochRsi.oversold ? "✅ oversold (<20)" : stochRsi.overbought ? "⚠️ overbought (>80)" : "neutral"}`);
+      console.log(`  ℹ️  StochRSI K=${stochRsi.k.toFixed(1)}: ${stochRsi.oversold ? "✅ oversold (<20)" : stochRsi.overbought ? "⚠️ overbought (>88)" : "neutral"}`);
     }
 
     // 10. Bullish divergence
@@ -1544,15 +1544,23 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
       check(`Bear snap-back TP hit — $${snapTpPrice.toFixed(4)} (+3%)`, price >= snapTpPrice && pnlPct >= 3);
     }
 
-    // Soft exits — only fire once gain is meaningful. Prevents fee-losing exits.
-    // SOFT_MIN = 0.75%: hold through weak overbought signals, extract more from winners.
+    // Soft exits — only fire once gain is meaningful AND min hold time has passed.
+    // MIN_HOLD: 20 min — prevents fee-eating exits on scalps that haven't moved yet.
+    // SOFT_MIN: 0.75% — won't exit an overbought signal unless gain covers fees.
     const SOFT_MIN = 0.75;
-    check(`RSI(3) overbought > 85 | Actual: ${rsi3.toFixed(2)}`, rsi3 > 85 && pnlPct >= SOFT_MIN);
+    const minsHeld = position.entryTime
+      ? (Date.now() - new Date(position.entryTime).getTime()) / (1000 * 60)
+      : 999;
+    const MIN_HOLD_MINS = 20;
+    const holdOk = minsHeld >= MIN_HOLD_MINS;
+    if (!holdOk) console.log(`  ⏳ Min hold not met — ${minsHeld.toFixed(0)}/${MIN_HOLD_MINS} min. Soft exits suppressed.`);
+
+    check(`RSI(3) overbought > 85 | Actual: ${rsi3.toFixed(2)}`, rsi3 > 85 && pnlPct >= SOFT_MIN && holdOk);
     if (stochRsi) {
-      const stochExitOk = stochRsi.overbought && (pnlPct >= 1.5 || (rsi3 > 90 && pnlPct >= SOFT_MIN) || (sr?.nearResistance && pnlPct >= SOFT_MIN));
-      check(`StochRSI overbought > 80 | K=${stochRsi.k.toFixed(1)}${stochRsi.overbought && !stochExitOk ? ` (holding — P&L ${pnlPct.toFixed(2)}% < min)` : ""}`, stochExitOk);
+      const stochExitOk = stochRsi.overbought && holdOk && (pnlPct >= 1.5 || (rsi3 > 90 && pnlPct >= SOFT_MIN) || (sr?.nearResistance && pnlPct >= SOFT_MIN));
+      check(`StochRSI overbought > 88 | K=${stochRsi.k.toFixed(1)}${stochRsi.overbought && !stochExitOk ? ` (holding — P&L ${pnlPct.toFixed(2)}% < min or hold ${minsHeld.toFixed(0)}min < ${MIN_HOLD_MINS}min)` : ""}`, stochExitOk);
     }
-    if (bb) check(`BB% > 0.92 (at upper band) | BB%=${bb.pct.toFixed(2)}`, bb.pct > 0.92 && pnlPct >= SOFT_MIN);
+    if (bb) check(`BB% > 0.92 (at upper band) | BB%=${bb.pct.toFixed(2)}`, bb.pct > 0.92 && pnlPct >= SOFT_MIN && holdOk);
     // Snap-back entries start below VWAP deliberately — "trend reversed" doesn't apply.
     // Dynamic TP: exit RSI threshold shifts based on distance to resistance
     if (position.entryType === "snapback") {
@@ -1565,7 +1573,7 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
       } else {
         snapRsiExit = 68; snapLabel = `RSI(3) recovered above 68 — snap-back complete`;
       }
-      check(snapLabel, rsi3 > snapRsiExit && pnlPct >= SOFT_MIN);
+      check(snapLabel, rsi3 > snapRsiExit && pnlPct >= SOFT_MIN && holdOk);
     } else {
       // Failed bounce — entered expecting snap-back but price kept falling with bearish momentum
       if (pnlPct < -1.5 && macd && !macd.bullish) {
