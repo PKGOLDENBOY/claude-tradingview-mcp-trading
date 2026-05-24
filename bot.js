@@ -2792,14 +2792,7 @@ async function run(tvSignal = null, symbol = null) {
   } else {
     // ── ENTRY FLOW ──────────────────────────────────────────────────────────
 
-    // Time-of-day filter — only trade EU + US sessions (08:00–20:00 UTC)
-    // Data: 9-12 UTC 8/8 wins, 16 UTC 6/6 wins, 19 UTC 8/8 wins. 20-08 UTC: 0/8 wins avg -1.9%
-    const utcHour = new Date().getUTCHours();
-    if (utcHour >= 20 || utcHour < 8) {
-      console.log(`🚫 OFF-HOURS BLOCK — ${utcHour}:00 UTC is outside 08:00–20:00 UTC trading window (EU + US sessions only).`);
-      console.log("═══════════════════════════════════════════════════════════\n");
-      return;
-    }
+    // Trading 24/7 — no time block
 
     // Per-coin cooldown — skip re-entry for 2h after a loss on this coin
     const cooldown = (log.coinCooldowns || {})[symbol];
