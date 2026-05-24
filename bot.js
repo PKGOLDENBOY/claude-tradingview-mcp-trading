@@ -2427,6 +2427,7 @@ async function run(tvSignal = null, symbol = null) {
   const withinLimits = checkTradeLimits(log);
   if (!withinLimits) {
     console.log("\nBot stopping — trade limits reached for today.");
+    pushSignal(symbol, "BLOCKED", "Daily trade limit reached");
     return;
   }
 
@@ -2436,12 +2437,14 @@ async function run(tvSignal = null, symbol = null) {
   if (dailyProfit.targetHit) {
     console.log(`\n🏆 DAILY TARGET HIT — up ${dailyProfit.gainPct.toFixed(2)}% today! Protecting profits, done for the day.`);
     console.log("═══════════════════════════════════════════════════════════\n");
+    pushSignal(symbol, "BLOCKED", `Daily target hit (+${dailyProfit.gainPct.toFixed(1)}%) — done for today`);
     return;
   }
 
   // Manual pause via dashboard
   if (_tradingPaused && tvSignal !== "SELL") {
     console.log("\n⏸ Trading paused via dashboard — skipping entry");
+    pushSignal(symbol, "BLOCKED", "Trading paused via dashboard");
     return;
   }
 
@@ -2451,6 +2454,7 @@ async function run(tvSignal = null, symbol = null) {
     console.log(`\n🛑 DRAWDOWN STOP — down ${drawdown.drawdownPct.toFixed(2)}% today ($${Math.abs(drawdown.totalLoss).toFixed(4)} lost)`);
     console.log(`   Limit: ${drawdown.limit}% per day. Bot paused until tomorrow.`);
     console.log("═══════════════════════════════════════════════════════════\n");
+    pushSignal(symbol, "BLOCKED", `Drawdown stop — down ${drawdown.drawdownPct.toFixed(1)}% today`);
     return;
   }
   if (drawdown.drawdownPct > 0) {
@@ -2813,6 +2817,7 @@ async function run(tvSignal = null, symbol = null) {
       const minsLeft = Math.ceil((cooldown.until - Date.now()) / 60000);
       console.log(`⏳ COOLDOWN — ${symbol} blocked for ${minsLeft} more min (last loss: ${cooldown.pnlPct}%)`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `Coin cooldown — ${minsLeft}min left after loss`);
       return;
     }
 
@@ -2915,6 +2920,7 @@ async function run(tvSignal = null, symbol = null) {
         if (ethHourChange <= -3) {
           console.log(`🚫 ETH CORRELATION BLOCK — ETH dropped ${ethHourChange.toFixed(2)}% in the last hour. Altcoins will follow.`);
           console.log("═══════════════════════════════════════════════════════════\n");
+          pushSignal(symbol, "BLOCKED", `ETH dropped ${ethHourChange.toFixed(1)}% last hour — altcoins will follow`);
           return;
         }
       }
@@ -2942,6 +2948,7 @@ async function run(tvSignal = null, symbol = null) {
         if (fundingRate > 0.0005) {
           console.log(`🚫 FUNDING RATE BLOCK — +${frPct}% means longs are crowded. Price is likely to fall to liquidate them.`);
           console.log("═══════════════════════════════════════════════════════════\n");
+          pushSignal(symbol, "BLOCKED", `Funding rate +${frPct}% — longs overcrowded`);
           return;
         }
       }
@@ -2968,6 +2975,7 @@ async function run(tvSignal = null, symbol = null) {
     if (recentLossesOnCoin >= 3 && recentWrOnCoin < 0.40) {
       console.log(`🚫 AUTO-BLACKLIST — ${symbol}: ${recentLossesOnCoin} losses in 7 days with ${(recentWrOnCoin*100).toFixed(0)}% win rate. Genuinely bad edge — skipping.`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `Auto-blacklist — ${recentLossesOnCoin} losses in 7 days, ${(recentWrOnCoin*100).toFixed(0)}% WR`);
       return;
     }
 
@@ -2978,6 +2986,7 @@ async function run(tvSignal = null, symbol = null) {
       if (minsSinceLast < 15) {
         console.log(`🚫 ENTRY COOLDOWN — last entry was ${minsSinceLast.toFixed(0)}min ago. Waiting 15min between entries.`);
         console.log("═══════════════════════════════════════════════════════════\n");
+        pushSignal(symbol, "BLOCKED", `Entry cooldown — ${minsSinceLast.toFixed(0)}min since last trade (need 15min)`);
         return;
       }
     }
@@ -2997,6 +3006,7 @@ async function run(tvSignal = null, symbol = null) {
     if (weeklyFilterActive && !bearSnapBack && bullTrendWeekly === false && !weeklyBearRsiOk) {
       console.log(`🚫 WEEKLY BEAR FILTER — weekly trend is bearish and RSI(3)=${rsi3.toFixed(1)} is not low enough (need < 40 with StochRSI/MACD/VWAP confirmation).`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `Weekly bear + RSI ${rsi3.toFixed(1)} not low enough — need <40 with confirmation`);
       return;
     }
     if (bullTrendWeekly !== null) console.log(`  Weekly trend: ${bullTrendWeekly ? "✅ Bull market — normal filters" : weeklyFilterActive ? "⚠️  Weekly bear (BEAR regime) — RSI < 40 required" : "⚠️  Weekly bear — relaxed in RANGING"}`);
@@ -3020,6 +3030,7 @@ async function run(tvSignal = null, symbol = null) {
     if (openCount > 0 && openPositions.some(([s]) => s === symbol)) {
       console.log(`🚫 ALREADY HOLDING — already have an open position in ${symbol}.`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", "Already holding this coin");
       return;
     }
 
@@ -3027,11 +3038,13 @@ async function run(tvSignal = null, symbol = null) {
     if ((log.swingPositions || {})[symbol]?.open) {
       console.log(`🚫 CROSS-STRATEGY BLOCK — swing position open on ${symbol}. No simultaneous scalp.`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", "Swing position already open — no simultaneous scalp");
       return;
     }
     if ((log.breakoutPositions || {})[symbol]?.open) {
       console.log(`🚫 CROSS-STRATEGY BLOCK — breakout position open on ${symbol}. No simultaneous scalp.`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", "Breakout position already open — no simultaneous scalp");
       return;
     }
 
@@ -3051,6 +3064,7 @@ async function run(tvSignal = null, symbol = null) {
       if (correlatedHeld.length > 0) {
         console.log(`🚫 CORRELATION BLOCK — already holding ${correlatedHeld.join(", ")} (same group as ${symbol}). They move together — max 1 per group.`);
         console.log("═══════════════════════════════════════════════════════════\n");
+        pushSignal(symbol, "BLOCKED", `Correlation block — already holding ${correlatedHeld[0]} (same group)`);
         return;
       }
     }
@@ -3154,6 +3168,7 @@ async function run(tvSignal = null, symbol = null) {
     if (todayLossesOnSymbol >= 2) {
       console.log(`🚫 COOLDOWN — ${symbol} has ${todayLossesOnSymbol} stop-outs today. Skipping until tomorrow.`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `${todayLossesOnSymbol} stop-outs today — skipping until tomorrow`);
       return;
     }
 
@@ -3162,6 +3177,7 @@ async function run(tvSignal = null, symbol = null) {
     if (rsi15m !== null && rsi15m > rsi15mLimit) {
       console.log(`🚫 15MIN RSI BLOCK — RSI(15m)=${rsi15m.toFixed(1)} is not low enough (need < ${rsi15mLimit}${vwapBounceMode ? " — VWAP bounce mode" : ". 1H oversold but 15min recovering"}).`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `15min RSI ${rsi15m.toFixed(1)} not low enough — need <${rsi15mLimit}`);
       return;
     }
     if (rsi15m !== null) console.log(`  ✅ 15min RSI ${rsi15m.toFixed(1)} confirmed (< ${rsi15mLimit})`);
@@ -3179,6 +3195,7 @@ async function run(tvSignal = null, symbol = null) {
     if (!priceBouncing && !isClosingUp && !isHigherHigh && !isHigherLow && !hasLongWick) {
       console.log(`🚫 REVERSAL BLOCK — price still falling (live:${formingCandle?.close.toFixed(4)} vs last close:${lastClosedCandle?.close.toFixed(4)})`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `Price still falling — no reversal signal yet`);
       return;
     }
     const reason = priceBouncing ? `live price bouncing ($${formingCandle?.close.toFixed(4)} > $${lastClosedCandle?.close.toFixed(4)})` : isClosingUp ? "closing above prev close" : isHigherHigh ? "higher high" : isHigherLow ? "higher low" : "long lower wick";
@@ -3191,6 +3208,7 @@ async function run(tvSignal = null, symbol = null) {
     if (!vwapBounceMode && volAccel < 0.8) {
       console.log(`🚫 VOLUME BLOCK — volume fading (${volAccel.toFixed(2)}× prev candle). No buying pressure yet.`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `Volume fading ${volAccel.toFixed(2)}× — no buying pressure`);
       return;
     }
     console.log(`  ${volAccel >= 0.8 ? "✅" : "⚠️ "} Volume ${volAccel >= 1.2 ? "surging" : volAccel >= 0.8 ? "holding" : "light"} (${volAccel.toFixed(2)}× prev candle)${vwapBounceMode && volAccel < 0.8 ? " — bypassed (VWAP bounce)" : ""}`);
@@ -3213,6 +3231,7 @@ async function run(tvSignal = null, symbol = null) {
     if (btResult && btResult.recommendation === "SKIP" && !vwapBounceMode) {
       console.log(`🚫 BACKTEST BLOCK — ${symbol} has ${btResult.winRate}% win rate over ${btResult.trades} trades (need 65%+). Skipping.`);
       console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `Backtest WR ${btResult.winRate}% across ${btResult.trades} trades — need 65%+`);
       return;
     }
     if (btResult && btResult.recommendation === "SKIP" && vwapBounceMode) {
@@ -3227,6 +3246,7 @@ async function run(tvSignal = null, symbol = null) {
       if (rr < 1.5) {
         console.log(`🚫 R:R BLOCK — R:R ${rr.toFixed(2)} < 1.5 minimum. Resistance $${sr.nearestResistance.toFixed(2)} too close relative to ${slPct.toFixed(0)}% stop.`);
         console.log("═══════════════════════════════════════════════════════════\n");
+        pushSignal(symbol, "BLOCKED", `R:R ${rr.toFixed(2)} too low — resistance too close (need 1.5×)`);
         return;
       }
     }
