@@ -3502,6 +3502,16 @@ if (process.argv.includes("--tax-summary")) {
     }
     const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
     const adaptiveMode = getAdaptiveMode(log.trades || []);
+    const heat = calcPortfolioHeat(log);
+    const allExits = (log.trades || []).filter(t => t.type === "exit" && t.pnlPct !== undefined && t.orderPlaced);
+    const allWins = allExits.filter(t => t.pnlPct > 0);
+    const allLosses = allExits.filter(t => t.pnlPct <= 0);
+    const avgWin = allWins.length ? allWins.reduce((s,t) => s + t.pnlPct, 0) / allWins.length : 0;
+    const avgLoss = allLosses.length ? allLosses.reduce((s,t) => s + t.pnlPct, 0) / allLosses.length : 0;
+    const wrRate = allExits.length ? allWins.length / allExits.length : 0;
+    const expectancy = allExits.length >= 3 ? (wrRate * avgWin + (1 - wrRate) * avgLoss).toFixed(2) : null;
+    const btcSnap = coinSnapshots["BTCUSDT"] || null;
+    const btcPrice = btcSnap?.price ?? (_topGainers.find(t => t.symbol === "BTCUSDT")?.price ?? null);
     return {
       portfolioValue, usdtBalance, openPositions,
       regime: regimeMatch?.regime || "RANGING",
@@ -3510,8 +3520,15 @@ if (process.argv.includes("--tax-summary")) {
       todayTrades: todayTrades.length,
       todayPnlUSD: totalPnlUSD,
       winRate: winRate ? `${winRate.wins}/${winRate.sample} (${(winRate.winRate * 100).toFixed(0)}%)` : "—",
-      lastTrades: (log.trades || []).slice(-5).reverse(),
-      signals: signalLog.slice(-20).reverse(),
+      winRatePct: winRate ? winRate.winRate * 100 : null,
+      avgWin: avgWin.toFixed(2), avgLoss: avgLoss.toFixed(2),
+      expectancy, totalTrades: allExits.length, totalWins: allWins.length,
+      drawdownPct: drawdown.drawdownPct, drawdownLimit: drawdown.limit,
+      heatPct: heat.heatPct, isOverheated: heat.isOverheated,
+      adaptiveLabel: adaptiveMode.label, adaptiveMode: adaptiveMode.mode,
+      btcPrice,
+      lastTrades: (log.trades || []).slice(-10).reverse(),
+      signals: signalLog.slice(-30).reverse(),
       coins: coinSnapshots,
       topGainers: _topGainers,
       updatedAt: new Date().toLocaleTimeString(),
@@ -3690,6 +3707,14 @@ if (process.argv.includes("--tax-summary")) {
           </a>`;
         }).join("");
 
+    const ddUsed = Math.min(100, (d.drawdownPct / d.drawdownLimit) * 100);
+    const ddColor = ddUsed > 70 ? "#ff4d6a" : ddUsed > 40 ? "#ffb800" : "#00d4a0";
+    const heatColor = d.heatPct > 6 ? "#ff4d6a" : d.heatPct > 3 ? "#ffb800" : "#00d4a0";
+    const modeColor = d.adaptiveMode === "normal" ? "#00d4a0" : d.adaptiveMode === "cautious" ? "#ffb800" : d.adaptiveMode === "defensive" ? "#ff8c42" : "#ff4d6a";
+    const modeIcon  = d.adaptiveMode === "normal" ? "✅" : d.adaptiveMode === "cautious" ? "⚠️" : d.adaptiveMode === "defensive" ? "🔴" : "🛑";
+    const wrNum = d.winRatePct;
+    const wrColor = wrNum === null ? "#4a5272" : wrNum >= 60 ? "#00d4a0" : wrNum >= 40 ? "#ffb800" : "#ff4d6a";
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3699,69 +3724,148 @@ if (process.argv.includes("--tax-summary")) {
 <title>AlphaBot</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#07090f;color:#f0f2f7;max-width:430px;margin:0 auto;padding-bottom:40px}
-.hdr{padding:18px 20px 0;display:flex;align-items:center;justify-content:space-between}
-.hdr-left{display:flex;align-items:center;gap:10px}
-.hdr-logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#4f8dff,#00d4a0);display:flex;align-items:center;justify-content:center;font-size:18px}
-.hdr-title{font-size:17px;font-weight:700}
-.live{display:flex;align-items:center;gap:6px;background:#00d4a015;border:1px solid #00d4a030;border-radius:99px;padding:5px 12px;font-size:12px;font-weight:600;color:#00d4a0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#07090f;color:#f0f2f7;max-width:430px;margin:0 auto;padding-bottom:48px}
+.sec{margin:14px 16px 0}
+.sec-title{font-size:11px;font-weight:700;color:#4a5272;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;padding:0 2px}
+.card{background:#0e1117;border:1px solid #1a1f2e;border-radius:18px;overflow:hidden}
+.card>*:last-child{border-bottom:none!important}
+.row{padding:13px 18px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1a1f2e}
+.lbl{font-size:12px;color:#4a5272}
+.val{font-size:13px;font-weight:700}
+.btn{display:block;width:100%;padding:15px;border-radius:14px;border:none;font-size:15px;font-weight:700;cursor:pointer;text-align:center;font-family:inherit}
+.btn-blue{background:linear-gradient(135deg,#4f8dff,#2563eb);color:#fff}
+.btn-red{background:linear-gradient(135deg,#ff4d6a,#dc2626);color:#fff}
+.btn-grey{background:#0e1117;color:#94a3b8;border:1px solid #1a1f2e}
+.chip{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600}
 .dot{width:6px;height:6px;border-radius:50%;background:#00d4a0;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-.hero{margin:20px 16px 0;background:linear-gradient(135deg,#0e1a35,#0a1628);border:1px solid #1a2a4a;border-radius:22px;padding:24px}
-.hero-label{font-size:11px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
-.hero-value{font-size:42px;font-weight:800;letter-spacing:-2px;line-height:1;margin-bottom:14px}
-.hero-row{display:flex;gap:20px}
-.hs-label{font-size:11px;color:#4a5272}
-.hs-value{font-size:14px;font-weight:600;margin-top:2px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 16px 0}
-.card-sm{background:#0e1117;border:1px solid #1a1f2e;border-radius:16px;padding:14px}
-.card-sm-label{font-size:10px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
-.card-sm-val{font-size:20px;font-weight:700}
-.card-sm-sub{font-size:11px;color:#4a5272;margin-top:2px}
-.sec{margin:14px 16px 0}
-.sec-title{font-size:12px;font-weight:600;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;padding:0 2px}
-.card{background:#0e1117;border:1px solid #1a1f2e;border-radius:18px;overflow:hidden}
-.card>div:last-child{border-bottom:none!important}
-.upd{text-align:center;color:#4a5272;font-size:11px;margin-top:16px}
-.btn-row{margin:10px 16px 0;display:flex;flex-direction:column;gap:8px}
-.btn{display:block;width:100%;padding:16px;border-radius:14px;border:none;font-size:15px;font-weight:700;cursor:pointer;text-align:center;text-decoration:none;font-family:inherit}
-.btn-blue{background:linear-gradient(135deg,#4f8dff,#3a6fd4);color:#fff}
-.btn-red{background:linear-gradient(135deg,#ff4d6a,#d43a52);color:#fff}
-.btn-grey{background:#0e1117;color:#4a5272;border:1px solid #1a1f2e}
+.bar-track{background:#1a1f2e;border-radius:99px;height:5px;overflow:hidden;margin-top:5px}
+.bar-fill{height:100%;border-radius:99px}
 </style>
 </head>
 <body>
-<div class="hdr">
-  <div class="hdr-left"><div class="hdr-logo">📈</div><div class="hdr-title">AlphaBot</div></div>
-  <div class="live"><span class="dot"></span>LIVE</div>
+
+<!-- ── HEADER ─────────────────────────────────────────────────── -->
+<div style="padding:18px 18px 0;display:flex;align-items:center;justify-content:space-between">
+  <div style="display:flex;align-items:center;gap:10px">
+    <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#4f8dff,#00d4a0);display:flex;align-items:center;justify-content:center;font-size:18px">📈</div>
+    <div>
+      <div style="font-size:17px;font-weight:800;letter-spacing:-.3px">AlphaBot</div>
+      <div style="font-size:11px;color:#4a5272">Updated ${d.updatedAt}</div>
+    </div>
+  </div>
+  <div style="text-align:right">
+    <div style="display:flex;align-items:center;gap:6px;background:#00d4a015;border:1px solid #00d4a030;border-radius:99px;padding:5px 10px;font-size:11px;font-weight:600;color:#00d4a0"><span class="dot"></span>LIVE</div>
+    ${d.btcPrice ? `<div style="font-size:11px;color:#4a5272;margin-top:4px;text-align:right">BTC $${Number(d.btcPrice).toLocaleString()}</div>` : ""}
+  </div>
 </div>
 
-<div style="margin:14px 16px 0">
+<!-- ── SEARCH ─────────────────────────────────────────────────── -->
+<div style="margin:12px 16px 0">
   <form method="GET" action="/coin" onsubmit="var v=this.symbol.value.trim().toUpperCase();if(!v)return false;if(!v.endsWith('USDT'))this.symbol.value=v+'USDT';">
     <input type="hidden" name="pin" value="${pin}">
     <div style="display:flex;gap:8px">
       <input type="text" name="symbol" placeholder="Search any coin — BTC, PEPE, DOGE..." autocomplete="off" autocapitalize="characters" spellcheck="false"
-        style="flex:1;background:#0e1117;border:1px solid #1a1f2e;border-radius:12px;padding:13px 16px;color:#f0f2f7;font-size:15px;outline:none;font-family:inherit">
-      <button type="submit" style="background:linear-gradient(135deg,#4f8dff,#3a6fd4);color:#fff;border:none;border-radius:12px;padding:13px 20px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit">Go</button>
+        style="flex:1;background:#0e1117;border:1px solid #1a1f2e;border-radius:12px;padding:12px 16px;color:#f0f2f7;font-size:15px;outline:none;font-family:inherit">
+      <button type="submit" style="background:linear-gradient(135deg,#4f8dff,#2563eb);color:#fff;border:none;border-radius:12px;padding:12px 18px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit">Go</button>
     </div>
   </form>
 </div>
 
+<!-- ── PORTFOLIO HERO ─────────────────────────────────────────── -->
+<div style="margin:14px 16px 0;background:linear-gradient(135deg,#0d1a33,#091020);border:1px solid #1a2a4a;border-radius:22px;padding:22px">
+  <div style="font-size:11px;color:#4a5272;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Total Portfolio</div>
+  <div style="font-size:44px;font-weight:800;letter-spacing:-2px;line-height:1;margin-bottom:4px">$${Number(pf).toFixed(2)}</div>
+  <div style="font-size:13px;font-weight:600;color:${pnlColor};margin-bottom:18px">${d.todayPnlUSD >= 0 ? "+" : ""}$${Math.abs(d.todayPnlUSD).toFixed(2)} today ${d.todayPnlUSD !== 0 ? "(" + (d.todayPnlUSD/pf*100).toFixed(2) + "%)" : ""}</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+    <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">CASH</div><div style="font-size:14px;font-weight:700">$${Number(d.usdtBalance).toFixed(2)}</div></div>
+    <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">POSITIONS</div><div style="font-size:14px;font-weight:700">${d.openPositions.length} / 3</div></div>
+    <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">TODAY TRADES</div><div style="font-size:14px;font-weight:700">${d.todayTrades}</div></div>
+  </div>
+</div>
+
+<!-- ── PERFORMANCE STATS ──────────────────────────────────────── -->
+<div style="margin:10px 16px 0;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+  <div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:13px">
+    <div style="font-size:10px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Win Rate (last 10)</div>
+    <div style="font-size:22px;font-weight:800;color:${wrColor}">${wrNum !== null ? wrNum.toFixed(0) + "%" : "—"}</div>
+    <div style="font-size:11px;color:#4a5272;margin-top:2px">${d.winRate}</div>
+    ${wrNum !== null ? `<div class="bar-track" style="margin-top:8px"><div class="bar-fill" style="width:${wrNum}%;background:${wrColor}"></div></div>` : ""}
+  </div>
+  <div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:13px">
+    <div style="font-size:10px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Expectancy / Trade</div>
+    <div style="font-size:22px;font-weight:800;color:${d.expectancy !== null ? parseFloat(d.expectancy) >= 0 ? "#00d4a0" : "#ff4d6a" : "#4a5272"}">${d.expectancy !== null ? (parseFloat(d.expectancy) >= 0 ? "+" : "") + d.expectancy + "%" : "—"}</div>
+    <div style="font-size:11px;color:#4a5272;margin-top:2px">${d.totalTrades} total trades</div>
+  </div>
+</div>
+<div style="margin:8px 16px 0;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+  <div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:13px">
+    <div style="font-size:10px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Avg Win</div>
+    <div style="font-size:22px;font-weight:800;color:#00d4a0">+${d.avgWin}%</div>
+    <div style="font-size:11px;color:#4a5272;margin-top:2px">${d.totalWins} wins</div>
+  </div>
+  <div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:13px">
+    <div style="font-size:10px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Avg Loss</div>
+    <div style="font-size:22px;font-weight:800;color:#ff4d6a">${d.avgLoss}%</div>
+    <div style="font-size:11px;color:#4a5272;margin-top:2px">${d.totalTrades - d.totalWins} losses</div>
+  </div>
+</div>
+
+<!-- ── ACCOUNT HEALTH ─────────────────────────────────────────── -->
+<div class="sec">
+  <div class="sec-title">Account Health</div>
+  <div class="card">
+    <div class="row">
+      <div>
+        <div class="lbl">Daily Drawdown</div>
+        <div class="bar-track" style="width:140px;margin-top:5px"><div class="bar-fill" style="width:${ddUsed.toFixed(0)}%;background:${ddColor}"></div></div>
+      </div>
+      <div style="text-align:right">
+        <div class="val" style="color:${ddColor}">-${(d.drawdownPct||0).toFixed(2)}%</div>
+        <div class="lbl">limit ${d.drawdownLimit}%</div>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <div class="lbl">Portfolio Heat (risk exposure)</div>
+        <div class="bar-track" style="width:140px;margin-top:5px"><div class="bar-fill" style="width:${Math.min(100,(d.heatPct/8)*100).toFixed(0)}%;background:${heatColor}"></div></div>
+      </div>
+      <div style="text-align:right">
+        <div class="val" style="color:${heatColor}">${d.heatPct}%</div>
+        <div class="lbl">max 8%</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="lbl">Strategy Mode</div>
+      <div style="font-size:12px;font-weight:700;color:${modeColor}">${modeIcon} ${d.adaptiveMode?.toUpperCase()}</div>
+    </div>
+    <div class="row">
+      <div class="lbl">Market Regime</div>
+      <div style="font-size:12px;font-weight:700;color:${regColor}">${d.regime}</div>
+    </div>
+    <div class="row">
+      <div class="lbl">Bot Status</div>
+      <div style="font-size:12px;font-weight:700;color:${d.paused ? "#ffb800" : "#00d4a0"}">${d.paused ? "⚠️ " + (d.pauseReason || "Paused") : "✅ Active — scanning"}</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── TOP MOVERS ─────────────────────────────────────────────── -->
 ${d.topGainers && d.topGainers.length > 0 ? `
 <div class="sec">
-  <div class="sec-title">Top 10 Movers Today</div>
+  <div class="sec-title">🚀 Top Movers Today</div>
   <div class="card">
-    ${d.topGainers.map((t, i) => {
+    ${d.topGainers.slice(0,10).map((t, i) => {
       const coin = t.symbol.replace("USDT","");
       const vol = t.vol >= 1e9 ? (t.vol/1e9).toFixed(1)+"B" : t.vol >= 1e6 ? (t.vol/1e6).toFixed(0)+"M" : (t.vol/1e3).toFixed(0)+"K";
-      return `<a href="/coin?symbol=${t.symbol}&pin=${pin}" style="display:flex;align-items:center;justify-content:space-between;padding:12px 18px;border-bottom:1px solid #1a1f2e;text-decoration:none;color:inherit">
+      return `<a href="/coin?symbol=${t.symbol}&pin=${pin}" style="display:flex;align-items:center;justify-content:space-between;padding:11px 16px;border-bottom:1px solid #1a1f2e;text-decoration:none;color:inherit">
         <div style="display:flex;align-items:center;gap:10px">
-          <div style="width:26px;color:#4a5272;font-size:12px;font-weight:700">${i+1}</div>
-          <div style="width:36px;height:36px;border-radius:10px;background:#00d4a018;color:#00d4a0;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800">${coin.slice(0,4)}</div>
-          <div><div style="font-size:15px;font-weight:700;color:#f0f2f7">${coin}</div><div style="font-size:11px;color:#4a5272">Vol $${vol}</div></div>
+          <div style="width:22px;font-size:11px;color:#4a5272;font-weight:700">${i+1}</div>
+          <div style="width:34px;height:34px;border-radius:9px;background:#00d4a018;color:#00d4a0;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800">${coin.slice(0,4)}</div>
+          <div><div style="font-size:14px;font-weight:700">${coin}</div><div style="font-size:11px;color:#4a5272">Vol $${vol}</div></div>
         </div>
         <div style="text-align:right">
-          <div style="font-size:16px;font-weight:800;color:#00d4a0">+${t.change24h.toFixed(1)}%</div>
+          <div style="font-size:15px;font-weight:800;color:#00d4a0">+${t.change24h.toFixed(1)}%</div>
           <div style="font-size:11px;color:#4a5272">$${t.price < 0.01 ? t.price.toFixed(6) : t.price < 1 ? t.price.toFixed(4) : t.price.toFixed(2)}</div>
         </div>
       </a>`;
@@ -3769,36 +3873,41 @@ ${d.topGainers && d.topGainers.length > 0 ? `
   </div>
 </div>` : ""}
 
-<div class="hero">
-  <div class="hero-label">Total Portfolio</div>
-  <div class="hero-value">$${Number(pf).toFixed(2)}</div>
-  <div class="hero-row">
-    <div><div class="hs-label">Cash (USDT)</div><div class="hs-value">$${Number(d.usdtBalance).toFixed(2)}</div></div>
-    <div><div class="hs-label">Today's P&amp;L</div><div class="hs-value" style="color:${pnlColor}">${d.todayPnlUSD >= 0 ? "+" : ""}$${Math.abs(d.todayPnlUSD).toFixed(2)}</div></div>
-    <div><div class="hs-label">Win Rate</div><div class="hs-value">${d.winRate}</div></div>
-  </div>
-</div>
-
-<div class="grid">
-  <div class="card-sm"><div class="card-sm-label">Trades Today</div><div class="card-sm-val">${d.todayTrades}</div><div class="card-sm-sub">of 20 max</div></div>
-  <div class="card-sm"><div class="card-sm-label">Market</div><div class="card-sm-val" style="color:${regColor};font-size:15px">${d.regime}</div><div class="card-sm-sub" style="color:${d.paused ? "#ffb800" : "#00d4a0"}" title="${d.pauseReason || ""}">${d.paused ? "⚠️ Paused" : "Active"}</div></div>
-</div>
-
-${d.pauseReason ? `<div style="margin:10px 16px 0;padding:10px 14px;background:#ffb80015;border:1px solid #ffb80040;border-radius:12px;font-size:12px;color:#ffb800;text-align:center">⚠️ ${d.pauseReason}</div>` : ""}
-
+<!-- ── OPEN POSITIONS ─────────────────────────────────────────── -->
 <div class="sec"><div class="sec-title">Open Positions</div><div class="card">${posHTML}</div></div>
+
+<!-- ── CLOSEST TO ENTRY ───────────────────────────────────────── -->
+<div class="sec"><div class="sec-title">🎯 Closest to Entry</div><div class="card">${readinessHTML}</div></div>
+
+<!-- ── RECENT TRADES ─────────────────────────────────────────── -->
 <div class="sec"><div class="sec-title">Recent Trades</div><div class="card">${tradesHTML}</div></div>
-<div class="sec"><div class="sec-title">Closest to Entry</div><div class="card">${readinessHTML}</div></div>
+
+<!-- ── SIGNAL LOG ─────────────────────────────────────────────── -->
+<div class="sec"><div class="sec-title">Signal Log</div><div class="card">${sigHTML}</div></div>
+
+<!-- ── ALL COINS WATCHED ──────────────────────────────────────── -->
 <div class="sec">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-    <div class="sec-title" style="margin-bottom:0">Coins Being Watched</div>
+    <div class="sec-title" style="margin-bottom:0">Coins Being Watched (${coinsArr.length})</div>
     <input id="coin-filter" type="text" placeholder="Filter..." autocomplete="off"
-      style="background:#0e1117;border:1px solid #1a1f2e;border-radius:8px;padding:5px 10px;color:#f0f2f7;font-size:12px;outline:none;width:100px;font-family:inherit"
+      style="background:#0e1117;border:1px solid #1a1f2e;border-radius:8px;padding:5px 10px;color:#f0f2f7;font-size:12px;outline:none;width:90px;font-family:inherit"
       oninput="filterCoins(this.value)">
   </div>
   <div class="card" id="coins-list">${coinsHTML}</div>
 </div>
-<div class="sec"><div class="sec-title">Signal Log</div><div class="card">${sigHTML}</div></div>
+
+<!-- ── CONTROLS ───────────────────────────────────────────────── -->
+<div class="sec"><div class="sec-title">Controls</div></div>
+<div style="margin:0 16px;display:flex;flex-direction:column;gap:8px">
+  <form method="POST" action="/action?pin=${pin}&action=scan" style="display:contents"><button class="btn btn-blue" type="submit">⚡ Scan All Coins Now</button></form>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+    <form method="POST" action="/action?pin=${pin}&action=${d.paused ? "resume" : "pause"}" style="display:contents"><button class="btn btn-grey" type="submit">${d.paused ? "▶ Resume" : "⏸ Pause"}</button></form>
+    <form method="POST" action="/action?pin=${pin}&action=sell-all" style="display:contents" onsubmit="return confirm('Sell ALL open positions now?')"><button class="btn btn-red" type="submit">🚨 Sell All</button></form>
+  </div>
+</div>
+
+<div style="text-align:center;color:#2a2f42;font-size:11px;margin-top:20px">AlphaBot &middot; auto-refreshes every 30s</div>
+
 <script>
 function filterCoins(q){
   q=q.trim().toLowerCase();
@@ -3807,15 +3916,6 @@ function filterCoins(q){
   });
 }
 </script>
-
-<div class="sec"><div class="sec-title">Controls</div></div>
-<div class="btn-row">
-  <form method="POST" action="/action?pin=${pin}&action=scan" style="display:contents"><button class="btn btn-blue" type="submit">Scan All Coins Now</button></form>
-  <form method="POST" action="/action?pin=${pin}&action=sell-all" style="display:contents" onsubmit="return confirm('Sell ALL open positions?')"><button class="btn btn-red" type="submit">Sell All Positions</button></form>
-  <form method="POST" action="/action?pin=${pin}&action=${d.paused ? "resume" : "pause"}" style="display:contents"><button class="btn btn-grey" type="submit">${d.paused ? "Resume Trading" : "Pause Trading"}</button></form>
-</div>
-
-<div class="upd">Updated ${d.updatedAt} &middot; auto-refreshes every 30s</div>
 </body>
 </html>`;
   }
