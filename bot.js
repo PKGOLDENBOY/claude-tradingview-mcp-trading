@@ -4855,7 +4855,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       else if (action === "resume") { _tradingPaused = false; console.log("▶ Dashboard: trading resumed"); redirect(); }
       else if (action === "scan") {
         redirect();
-        (async () => { for (const sym of CONFIG.symbols) await run(null, sym).catch(() => {}); })();
+        (async () => { for (const sym of CONFIG.symbols) await run(null, sym).catch((err) => { console.error(`Webhook scan ${sym}:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); }); })();
       } else if (action === "sell-all") {
         redirect();
         (async () => {
@@ -4982,7 +4982,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       res.end(JSON.stringify({ message: "Scan triggered" }));
       (async () => {
         for (const sym of CONFIG.symbols) {
-          await run(null, sym).catch(() => {});
+          await run(null, sym).catch((err) => { console.error(`Action scan ${sym}:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); });
         }
       })();
       return;
@@ -5512,7 +5512,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         }
         console.log(`\n👛 Account ${account.id} — initial scan`);
         for (const sym of CONFIG.symbols) {
-          await run(null, sym).catch((err) => console.error(`Startup ${sym} [acct${account.id}] error:`, err));
+          await run(null, sym).catch((err) => { console.error(`Startup ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); });
         }
         if (SWING_ENABLED) {
           for (const sym of CONFIG.symbols) {
@@ -5562,7 +5562,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         .filter(([, p]) => p && p.open)
         .map(([sym]) => sym);
       for (const sym of openSymbols) {
-        await run(null, sym).catch((err) => console.error(`Exit monitor ${sym} [acct${account.id}] error:`, err));
+        await run(null, sym).catch((err) => { console.error(`Exit monitor ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); });
       }
     }
     _currentAccount = ACCOUNTS[0];
@@ -5635,7 +5635,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     for (const account of ACCOUNTS) {
       _currentAccount = account;
       for (const sym of CONFIG.symbols) {
-        await run(null, sym).catch((err) => console.error(`Poll ${sym} [acct${account.id}] error:`, err));
+        await run(null, sym).catch((err) => { console.error(`Poll ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); });
       }
     }
     _currentAccount = ACCOUNTS[0];
