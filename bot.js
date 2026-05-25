@@ -143,6 +143,9 @@ const coinSnapshots = {};
 // Top 10 gainers cached from last refreshTopMovers() call
 let _topGainers = [];
 
+// Live portfolio value (USDT + open coin positions) — updated by buildStatusData on every dashboard poll
+let _livePortfolioValue = null;
+
 // ─── Onboarding ───────────────────────────────────────────────────────────────
 
 function checkOnboarding() {
@@ -2562,7 +2565,7 @@ async function run(tvSignal = null, symbol = null) {
 
   // Market regime + portfolio heat — logged once per scan cycle
   const regime = await detectMarketRegime().catch(() => ({ regime: "UNKNOWN", btcTrend: "neutral", volatility: "normal" }));
-  const heat = calcPortfolioHeat(log);
+  const heat = calcPortfolioHeat(log, _livePortfolioValue);
   console.log(`🌍 Regime: ${regime.regime} (BTC:${regime.btcTrend} Vol:${regime.volatility}) | Portfolio heat: ${heat.heatPct}%/${heat.isOverheated ? "🔴 OVERHEATED" : "8% max"}`);
 
   // Block new entries when portfolio is overheated — skip candle fetch entirely to save API calls
@@ -3679,6 +3682,7 @@ if (process.argv.includes("--tax-summary")) {
       openPositions.push({ coin: asset.coin, sym, qty, usdVal, price, entryPrice: null, pnlPct: null, pnlUSD: null, entryType: "untracked" });
     }
     const portfolioValue = usdtBalance + openPositionValue;
+    _livePortfolioValue = portfolioValue; // keep heat gate in sync with dashboard
     const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
     const adaptiveMode = getAdaptiveMode(log.trades || []);
     const heat = calcPortfolioHeat(log, portfolioValue);
@@ -5516,7 +5520,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     const bkPos = (log.breakoutPositions || {})[symbol] || null;
 
     // Portfolio heat — never open new trade when total risk > 8% of portfolio
-    const heat = calcPortfolioHeat(log);
+    const heat = calcPortfolioHeat(log, _livePortfolioValue);
     if (heat.isOverheated && !bkPos?.open) return;
 
     let candles;
