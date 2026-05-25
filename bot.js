@@ -337,6 +337,32 @@ function calcWinRate(trades, n = 10) {
   return { winRate: wins / recent.length, sample: recent.length, wins };
 }
 
+// Read historical P&L stats from trades.csv — used as fallback when log lacks enough closed trades
+function loadCsvStats() {
+  try {
+    if (!existsSync(CSV_FILE)) return null;
+    const pnls = readFileSync(CSV_FILE, "utf8").split("\n")
+      .filter(l => l.includes(",SELL,") && l.includes(",LIVE,") && l.includes("P&L:"))
+      .map(l => { const m = l.match(/P&L: ([+-]?\d+\.?\d+)%/); return m ? parseFloat(m[1]) : null; })
+      .filter(v => v !== null);
+    if (pnls.length < 2) return null;
+    const wins = pnls.filter(p => p > 0.25);
+    const losses = pnls.filter(p => p <= 0.25);
+    const wr = wins.length / pnls.length;
+    const aw = wins.length ? wins.reduce((s, p) => s + p, 0) / wins.length : null;
+    const al = losses.length ? losses.reduce((s, p) => s + p, 0) / losses.length : null;
+    return {
+      winRatePct: wr * 100,
+      winRateStr: `${wins.length}/${pnls.length} (${(wr * 100).toFixed(0)}%)`,
+      avgWin: aw != null ? aw.toFixed(2) : null,
+      avgLoss: al != null ? al.toFixed(2) : null,
+      expectancy: pnls.length >= 2 ? (wr * (aw ?? 0) + (1 - wr) * (al ?? 0)).toFixed(2) : null,
+      totalTrades: pnls.length,
+      totalWins: wins.length,
+    };
+  } catch { return null; }
+}
+
 // Daily drawdown — sum of realised losses today vs portfolio value
 function checkDailyDrawdown(log) {
   const today = new Date().toISOString().slice(0, 10);
@@ -2439,16 +2465,6 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
-  // Daily profit target — lock in gains, stop trading for the day once hit
-  const dailyProfit = checkDailyProfitTarget(log);
-  console.log(`\n🎯 Daily goal: $${dailyProfit.startValue.toFixed(2)} → $${(dailyProfit.startValue * 1.3).toFixed(2)} (+30%) | Current: $${dailyProfit.currentValue.toFixed(2)} (${dailyProfit.gainPct >= 0 ? "+" : ""}${dailyProfit.gainPct.toFixed(2)}%)`);
-  if (dailyProfit.targetHit) {
-    console.log(`\n🏆 DAILY TARGET HIT — up ${dailyProfit.gainPct.toFixed(2)}% today! Protecting profits, done for the day.`);
-    console.log("═══════════════════════════════════════════════════════════\n");
-    pushSignal(symbol, "BLOCKED", `Daily target hit (+${dailyProfit.gainPct.toFixed(1)}%) — done for today`);
-    return;
-  }
-
   // Manual pause via dashboard
   if (_tradingPaused && tvSignal !== "SELL") {
     console.log("\n⏸ Trading paused via dashboard — skipping entry");
@@ -3587,6 +3603,8 @@ if (process.argv.includes("--tax-summary")) {
     const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
     const adaptiveMode = getAdaptiveMode(log.trades || []);
     const heat = calcPortfolioHeat(log);
+    const unrealizedPnlUSD = openPositions.reduce((s, p) => s + (p.pnlUSD ?? 0), 0);
+    const todayGainUSD = totalPnlUSD + unrealizedPnlUSD;
     const allExits = (log.trades || []).filter(t => t.type === "exit" && t.pnlPct !== undefined && t.orderPlaced);
     const allWins = allExits.filter(t => t.pnlPct > 0);
     const allLosses = allExits.filter(t => t.pnlPct <= 0);
@@ -3594,6 +3612,8 @@ if (process.argv.includes("--tax-summary")) {
     const avgLoss = allLosses.length ? allLosses.reduce((s,t) => s + t.pnlPct, 0) / allLosses.length : null;
     const wrRate = allExits.length ? allWins.length / allExits.length : 0;
     const expectancy = allExits.length >= 2 ? (wrRate * (avgWin ?? 0) + (1 - wrRate) * (avgLoss ?? 0)).toFixed(2) : null;
+    // Fall back to CSV history when the in-memory log lacks enough closed trades
+    const csvStats = allExits.length < 3 ? loadCsvStats() : null;
     const btcSnap = coinSnapshots["BTCUSDT"] || null;
     const btcPrice = btcSnap?.price ?? (_topGainers.find(t => t.symbol === "BTCUSDT")?.price ?? null);
     const nearEntry = Object.values(coinSnapshots).filter(c => {
@@ -3613,10 +3633,15 @@ if (process.argv.includes("--tax-summary")) {
       pauseReason: drawdown.paused ? "Drawdown limit hit" : _tradingPaused ? "Manually paused" : null,
       todayTrades: todayTrades.length,
       todayPnlUSD: totalPnlUSD,
-      winRate: winRate ? `${winRate.wins}/${winRate.sample} (${(winRate.winRate * 100).toFixed(0)}%)` : "—",
-      winRatePct: winRate ? winRate.winRate * 100 : null,
-      avgWin: avgWin != null ? avgWin.toFixed(2) : null, avgLoss: avgLoss != null ? avgLoss.toFixed(2) : null,
-      expectancy, totalTrades: allExits.length, totalWins: allWins.length,
+      todayGainUSD,
+      unrealizedPnlUSD,
+      winRate: csvStats ? csvStats.winRateStr : (winRate ? `${winRate.wins}/${winRate.sample} (${(winRate.winRate * 100).toFixed(0)}%)` : "—"),
+      winRatePct: csvStats ? csvStats.winRatePct : (winRate ? winRate.winRate * 100 : null),
+      avgWin: csvStats ? csvStats.avgWin : (avgWin != null ? avgWin.toFixed(2) : null),
+      avgLoss: csvStats ? csvStats.avgLoss : (avgLoss != null ? avgLoss.toFixed(2) : null),
+      expectancy: csvStats ? csvStats.expectancy : expectancy,
+      totalTrades: csvStats ? csvStats.totalTrades : allExits.length,
+      totalWins: csvStats ? csvStats.totalWins : allWins.length,
       drawdownPct: drawdown.drawdownPct, drawdownLimit: drawdown.limit,
       heatPct: heat.heatPct, isOverheated: heat.isOverheated,
       adaptiveLabel: adaptiveMode.label, adaptiveMode: adaptiveMode.mode,
@@ -3986,7 +4011,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div style="margin:14px 16px 0;background:linear-gradient(135deg,#0d1a33,#091020);border:1px solid #1a2a4a;border-radius:22px;padding:22px">
   <div style="font-size:11px;color:#4a5272;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Total Portfolio</div>
   <div style="font-size:44px;font-weight:800;letter-spacing:-2px;line-height:1;margin-bottom:4px">$${Number(pf).toFixed(2)}</div>
-  <div style="font-size:13px;font-weight:600;color:${pnlColor};margin-bottom:18px">${d.todayPnlUSD >= 0 ? "+" : ""}$${Math.abs(d.todayPnlUSD).toFixed(2)} today ${d.todayPnlUSD !== 0 ? "(" + (d.todayPnlUSD/pf*100).toFixed(2) + "%)" : ""}</div>
+  <div style="font-size:13px;font-weight:600;color:${(d.todayGainUSD??0) >= 0 ? "#00d4a0" : "#ff4d6a"};margin-bottom:18px">${(d.todayGainUSD??0) >= 0 ? "+" : ""}$${Math.abs(d.todayGainUSD??0).toFixed(2)} today <span style="font-size:11px;opacity:.7">(open ${(d.unrealizedPnlUSD??0)>=0?"+":""}$${(d.unrealizedPnlUSD??0).toFixed(2)} · closed ${(d.todayPnlUSD??0)>=0?"+":""}$${(d.todayPnlUSD??0).toFixed(2)})</span></div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 20px">
     <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">CASH</div><div style="font-size:14px;font-weight:700">$${Number(d.usdtBalance).toFixed(2)}</div></div>
     <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">POSITIONS</div><div style="font-size:14px;font-weight:700">${d.openPositions.length} / 5</div></div>
@@ -3997,22 +4022,24 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 
 <!-- ── DAILY GOAL ──────────────────────────────────────────────── -->
 ${(() => {
-  const goalPct = 50;
+  const goalPct = 3;
   const goalUSD = pf * goalPct / 100;
-  const earnedUSD = Math.max(0, d.todayPnlUSD || 0);
+  const earnedUSD = Math.max(0, d.todayGainUSD || 0);
   const progress = Math.min(100, Math.max(0, (earnedUSD / goalUSD) * 100));
   const remaining = Math.max(0, goalUSD - earnedUSD);
   const goalColor = progress >= 100 ? "#00d4a0" : progress >= 50 ? "#ffb800" : "#4f8dff";
   const goalIcon = progress >= 100 ? "🏆" : progress >= 75 ? "🔥" : progress >= 50 ? "⚡" : "🎯";
-  const tradesNeeded = d.totalTrades > 0 && d.avgWin > 0
-    ? Math.ceil(remaining / (pf * parseFloat(d.avgWin) / 100 * 0.25))
-    : null;
+  const openGain = d.unrealizedPnlUSD ?? 0;
+  const realizedGain = d.todayPnlUSD ?? 0;
+  const subLabel = progress >= 100
+    ? "Goal hit — bot keeps trading"
+    : `+$${earnedUSD.toFixed(2)} of $+${goalUSD.toFixed(2)} (${openGain >= 0 ? "+" : ""}$${openGain.toFixed(2)} open, ${realizedGain >= 0 ? "+" : ""}$${realizedGain.toFixed(2)} closed)`;
   return `<div style="margin:10px 16px 0;background:linear-gradient(135deg,#0d1f0d,#091209);border:1px solid #1a3a1a;border-radius:18px;padding:18px">
   <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
     <div>
-      <div style="font-size:10px;color:#4a7a4a;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Daily Goal ${goalIcon}</div>
+      <div style="font-size:10px;color:#4a7a4a;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Daily Progress ${goalIcon}</div>
       <div style="font-size:28px;font-weight:800;letter-spacing:-1px;color:${goalColor}">${progress.toFixed(0)}%</div>
-      <div style="font-size:11px;color:#4a7a4a;margin-top:2px">${progress >= 100 ? "Goal smashed! 🏆" : `$${earnedUSD >= 0 ? "+" : ""}${earnedUSD.toFixed(2)} of $+${goalUSD.toFixed(2)} target`}</div>
+      <div style="font-size:11px;color:#4a7a4a;margin-top:2px;line-height:1.4">${subLabel}</div>
     </div>
     <div style="text-align:right">
       <div style="font-size:11px;color:#4a7a4a;margin-bottom:4px">Target +${goalPct}%/day</div>
@@ -4025,8 +4052,7 @@ ${(() => {
   </div>
   <div style="display:flex;justify-content:space-between;font-size:10px;color:#4a7a4a">
     <span>$0</span>
-    ${tradesNeeded ? `<span>~${tradesNeeded} more trade${tradesNeeded !== 1 ? "s" : ""} needed</span>` : ""}
-    <span>$+${goalUSD.toFixed(2)}</span>
+    <span>+$${goalUSD.toFixed(2)}</span>
   </div>
 </div>`;
 })()}
