@@ -5745,8 +5745,8 @@ async function checkNewListings() {
     if (now >= t && now - t < 10 * 60 * 1000) {
       console.log(`\n⏰ SCHEDULED SNIPE FIRING — ${symbol}`);
       delete _scheduledSnipes[symbol];
-      const log = loadLog();
-      sniperBuy(symbol, log).catch(e => console.log(`⚠️  Scheduled snipe ${symbol} failed: ${e.message}`));
+      _sniperKnownSymbols?.add(symbol); // prevent re-detection on next poll
+      await sniperBuy(symbol).catch(e => console.log(`⚠️  Scheduled snipe ${symbol} failed: ${e.message}`));
     } else if (now - t > 10 * 60 * 1000) {
       delete _scheduledSnipes[symbol];
     }
@@ -5777,11 +5777,10 @@ async function checkNewListings() {
 
     if (newListings.length > 0) {
       console.log(`\n🆕 ${newListings.length} NEW LISTING(S) DETECTED: ${newListings.map(s => s.symbol).join(", ")}`);
-      // Fire all new listings in parallel — every millisecond counts
-      const log = loadLog();
+      // Each sniperBuy loads its own fresh log — safe to run in parallel
       await Promise.all(newListings.map(listing => {
         pushSignal(listing.symbol, "BLOCKED", `🆕 New listing — sniper firing`);
-        return sniperBuy(listing.symbol, log).catch(e => console.log(`⚠️  Sniper ${listing.symbol}: ${e.message}`));
+        return sniperBuy(listing.symbol).catch(e => console.log(`⚠️  Sniper ${listing.symbol}: ${e.message}`));
       }));
     }
   } catch { /* non-critical */ }
@@ -5848,18 +5847,25 @@ async function checkUpcomingListings() {
     if (now >= t && now - t < 10 * 60 * 1000) {
       console.log(`\n⏰ SCHEDULED SNIPE FIRING — ${symbol}`);
       delete _scheduledSnipes[symbol];
-      const log = loadLog();
-      await sniperBuy(symbol, log).catch(e => console.log(`⚠️  Scheduled snipe ${symbol} failed: ${e.message}`));
+      _sniperKnownSymbols?.add(symbol);
+      await sniperBuy(symbol).catch(e => console.log(`⚠️  Scheduled snipe ${symbol} failed: ${e.message}`));
     } else if (now - t > 10 * 60 * 1000) {
       delete _scheduledSnipes[symbol]; // expired
     }
   }
 }
 
-async function sniperBuy(symbol, log) {
+async function sniperBuy(symbol) {
+  // Load a fresh log at the start — don't accept a shared one (race condition if
+  // multiple snipers fire in parallel; each must own its read-modify-write cycle)
+  const log = loadLog();
   const openSnipers = Object.entries(log.sniperPositions || {}).filter(([, p]) => p?.open).length;
   if (openSnipers >= SNIPER.maxPositions) {
     console.log(`🚫 Sniper full (${openSnipers}/${SNIPER.maxPositions}). Skipping ${symbol}.`);
+    return;
+  }
+  if ((log.sniperPositions || {})[symbol]?.open) {
+    console.log(`🚫 Sniper already open for ${symbol}. Skipping.`);
     return;
   }
 
@@ -5921,11 +5927,14 @@ async function sniperBuy(symbol, log) {
     return;
   }
 
-  if (!log.sniperPositions) log.sniperPositions = {};
-  log.sniperPositions[symbol] = {
+  // Reload log immediately before writing — API calls above took 1-3 seconds,
+  // so another interval may have modified the log while we were waiting.
+  const freshLog = loadLog();
+  if (!freshLog.sniperPositions) freshLog.sniperPositions = {};
+  freshLog.sniperPositions[symbol] = {
     open: true,
     entryPrice: price,
-    quantity: String(qty),
+    quantity: qty,           // number, not string — consistent with all other positions
     entryTime: new Date().toISOString(),
     orderId,
     takeProfitPrice: price * (1 + SNIPER.takeProfitPct),
@@ -5939,8 +5948,8 @@ async function sniperBuy(symbol, log) {
     indicators: { pumpedPct: parseFloat((pumpedPct * 100).toFixed(1)) },
     orderPlaced: true, orderId, paperTrading: false, tradeType: "sniper",
   };
-  log.trades.push(entryLog);
-  saveLog(log);
+  freshLog.trades.push(entryLog);
+  saveLog(freshLog);
   writeTradeCsv(entryLog);
   pushSignal(symbol, "ENTRY", `🎯 Sniper @ $${price.toFixed(8)} | TP +${(SNIPER.takeProfitPct * 100).toFixed(0)}% | SL -${(SNIPER.stopLossPct * 100).toFixed(0)}% | ${SNIPER.maxHoldMin}min timeout`);
 
@@ -5993,14 +6002,18 @@ async function monitorSniperPositions() {
     console.log(`\n${hitTP ? "💰" : "🔴"} SNIPER EXIT — ${symbol} | ${reason}`);
 
     try {
-      await placeBitGetOrder(symbol, "sell", null, price, pos.quantity);
+      await placeBitGetOrder(symbol, "sell", null, price, String(pos.quantity));
     } catch (err) {
       console.log(`❌ Sniper sell failed: ${err.message} — will retry next cycle`);
       continue;
     }
 
-    const pnlUSD = (price - pos.entryPrice) * parseFloat(pos.quantity);
-    log.sniperPositions[symbol] = { ...pos, open: false };
+    const qty = Number(pos.quantity);
+    const pnlUSD = (price - pos.entryPrice) * qty;
+    // Reload before write — sell order above took ~1s; other intervals may have changed the log
+    const freshLog = loadLog();
+    if (!freshLog.sniperPositions) freshLog.sniperPositions = {};
+    freshLog.sniperPositions[symbol] = { ...pos, open: false };
 
     const exitLog = {
       timestamp: new Date().toISOString(), type: "exit", symbol,
@@ -6008,8 +6021,8 @@ async function monitorSniperPositions() {
       pnlPct: parseFloat(pnlPct.toFixed(3)), pnlUSD,
       exitReasons: [reason], orderPlaced: true, tradeType: "sniper", paperTrading: false,
     };
-    log.trades.push(exitLog);
-    saveLog(log);
+    freshLog.trades.push(exitLog);
+    saveLog(freshLog);
     writeTradeCsv(exitLog);
     pushSignal(symbol, pnlUSD >= 0 ? "EXIT_WIN" : "EXIT_LOSS", `🎯 Sniper exit: ${reason}`);
 
