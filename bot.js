@@ -1983,6 +1983,83 @@ async function reconcilePositions(log) {
   }
 }
 
+async function sweepDust(log) {
+  if (CONFIG.paperTrading || acct().exchange !== "bitget") return;
+  try {
+    const ts = Date.now().toString();
+    const path = "/api/v2/spot/account/assets";
+    const sign = signBitGet(ts, "GET", path);
+    const res = await fetch(`${acct().baseUrl}${path}`, {
+      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" }
+    });
+    const data = await res.json();
+    if (!data.data) return;
+
+    const priceRes = await fetch("https://api.bitget.com/api/v2/spot/market/tickers");
+    const priceData = await priceRes.json();
+    const prices = Object.fromEntries((priceData.data || []).map(t => [t.symbol, parseFloat(t.lastPr)]));
+
+    const trackedCoins = new Set(
+      Object.entries(log.positions || {})
+        .filter(([, p]) => p && p.open)
+        .map(([sym]) => sym.replace("USDT", ""))
+    );
+
+    let swept = 0;
+    for (const asset of data.data) {
+      const coin = asset.coin;
+      if (coin === "USDT" || coin === "BGB") continue;
+      if (trackedCoins.has(coin)) continue;
+
+      const qty = parseFloat(asset.available);
+      if (qty <= 0) continue;
+      const symbol = coin + "USDT";
+      const price = prices[symbol];
+      if (!price) continue;
+      const usdValue = qty * price;
+      if (usdValue < 0.50 || usdValue >= 10) continue; // only sweep $0.50–$10 dust
+
+      try {
+        const precision = await getQuantityPrecision(symbol);
+        const floored = floorToDecimals(qty, precision);
+        if (floored <= 0) continue;
+        const orderSize = floored.toFixed(precision);
+
+        const serverTs = await getBitGetServerTime();
+        const orderPath = "/api/v2/spot/trade/place-order";
+        const body = JSON.stringify({ symbol, side: "sell", orderType: "market", size: orderSize });
+        const sig = signBitGet(serverTs, "POST", orderPath, body);
+
+        const orderRes = await fetch(`${acct().baseUrl}${orderPath}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "ACCESS-KEY": acct().apiKey,
+            "ACCESS-SIGN": sig,
+            "ACCESS-TIMESTAMP": serverTs,
+            "ACCESS-PASSPHRASE": acct().passphrase,
+            "locale": "en-US",
+          },
+          body,
+        });
+        const orderData = await orderRes.json();
+        if (orderData.code === "00000") {
+          console.log(`🧹 Swept dust: sold ${orderSize} ${coin} (~$${usdValue.toFixed(2)})`);
+          swept++;
+        } else {
+          console.log(`⚠️  Dust sweep ${coin} failed: ${orderData.msg}`);
+        }
+      } catch (err) {
+        console.log(`⚠️  Dust sweep ${coin} error: ${err.message}`);
+      }
+    }
+    if (swept === 0) console.log("🧹 Dust sweep: nothing to sweep");
+    else console.log(`🧹 Dust sweep complete: ${swept} coin(s) sold → USDT freed`);
+  } catch (err) {
+    console.log(`⚠️  Dust sweep failed: ${err.message}`);
+  }
+}
+
 const _symbolPrecisionCache = {};
 async function getQuantityPrecision(symbol) {
   if (acct().exchange === "bitmart") return 6; // BitMart: default precision
@@ -5629,6 +5706,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           const startLog = loadLog();
           await syncPortfolioBalance(startLog).catch(e => console.error("syncPortfolioBalance failed:", e.message));
           await reconcilePositions(startLog).catch(e => console.error("reconcilePositions failed:", e.message));
+          await sweepDust(startLog).catch(e => console.error("sweepDust failed:", e.message));
           saveLog(startLog);
           sendEmail(
             "🤖 Bot Online — Trading Started",
