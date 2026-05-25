@@ -5711,12 +5711,25 @@ async function initSniperSymbols() {
   try {
     const res = await fetch("https://api.bitget.com/api/v2/spot/public/symbols");
     const data = await res.json();
+    const now = Date.now();
     _sniperKnownSymbols = new Set(
       (data.data || [])
         .filter(s => s.symbol.endsWith("USDT") && s.status === "online")
         .map(s => s.symbol)
     );
-    console.log(`🎯 Listing sniper ready — watching ${_sniperKnownSymbols.size} existing symbols`);
+    // Pre-load any coins that have a future openTime — arm the sniper immediately
+    const upcoming = (data.data || []).filter(s =>
+      s.symbol.endsWith("USDT") &&
+      !/UP|DOWN|BEAR|BULL|USDC|TUSD|BUSD|DAI/.test(s.symbol) &&
+      parseInt(s.openTime || 0) > now
+    );
+    for (const s of upcoming) {
+      const t = new Date(parseInt(s.openTime));
+      _scheduledSnipes[s.symbol] = t.toISOString();
+      const mins = Math.round((t - now) / 60000);
+      console.log(`📅 Pre-armed: ${s.symbol} lists in ${mins}min at ${t.toUTCString()}`);
+    }
+    console.log(`🎯 Listing sniper ready — watching ${_sniperKnownSymbols.size} symbols${upcoming.length ? `, ${upcoming.length} pre-armed` : ""}`);
   } catch (e) {
     console.log(`⚠️  Sniper init failed: ${e.message}`);
   }
@@ -5742,11 +5755,23 @@ async function checkNewListings() {
   try {
     const res = await fetch("https://api.bitget.com/api/v2/spot/public/symbols", { signal: AbortSignal.timeout(6000) });
     const data = await res.json();
-    const current = (data.data || []).filter(s =>
+    const allSymbols = (data.data || []).filter(s =>
       s.symbol.endsWith("USDT") &&
-      s.status === "online" &&
       !/UP|DOWN|BEAR|BULL|USDC|TUSD|BUSD|DAI|USD1|FDUSD|RLUSD|PAXG|XAUT/.test(s.symbol)
     );
+    // Detect coins with future openTime — pre-arm before they go live
+    const nowMs = Date.now();
+    for (const s of allSymbols) {
+      const openMs = parseInt(s.openTime || 0);
+      if (openMs > nowMs && !_sniperKnownSymbols.has(s.symbol) && !_scheduledSnipes[s.symbol]) {
+        const t = new Date(openMs);
+        _scheduledSnipes[s.symbol] = t.toISOString();
+        const mins = Math.round((openMs - nowMs) / 60000);
+        console.log(`📅 NEW PRE-LISTING: ${s.symbol} — opens in ${mins}min at ${t.toUTCString()}`);
+        pushSignal(s.symbol, "BLOCKED", `📅 Pre-listed — sniper fires in ${mins}min`);
+      }
+    }
+    const current = allSymbols.filter(s => s.status === "online");
     const newListings = current.filter(s => !_sniperKnownSymbols.has(s.symbol));
     current.forEach(s => _sniperKnownSymbols.add(s.symbol));
 
