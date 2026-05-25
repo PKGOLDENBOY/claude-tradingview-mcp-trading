@@ -4262,7 +4262,7 @@ ${d.topGainers && d.topGainers.length > 0 ? `
   </div>
 </div>
 
-<div style="text-align:center;color:#2a2f42;font-size:11px;margin-top:20px">AlphaBot &middot; refreshing in <span id="refresh-in">30s</span></div>
+<div style="text-align:center;color:#2a2f42;font-size:11px;margin-top:20px">AlphaBot &middot; refreshing in <span id="refresh-in">15s</span></div>
 
 <script>
 function filterCoins(q){
@@ -4304,14 +4304,14 @@ function tick(){
     if(el)el.textContent=fmtAgo(new Date(_LT).getTime());
   }
   const ri=document.getElementById('refresh-in');
-  const left=Math.max(0,30000-(Date.now()-_PL));
+  const left=Math.max(0,15000-(Date.now()-_PL));
   if(ri)ri.textContent=Math.ceil(left/1000)+'s';
 }
 setInterval(tick,1000);tick();
-// Soft reload every 30s — skip if user is typing
+// Soft reload every 15s — skip if user is typing
 setInterval(function(){
   if(!document.querySelector('input:focus'))location.reload();
-},30000);
+},15000);
 </script>
 </body>
 </html>`;
@@ -4628,7 +4628,7 @@ body{font-family:'Inter',system-ui,sans-serif;color:var(--text);padding:0;max-wi
 // PIN is already verified server-side — just read it from URL for API calls
 const PIN = new URLSearchParams(location.search).get('pin') || '';
 load();
-setInterval(load, 30000);
+setInterval(load, 15000);
 
 async function apiFetch(path,method='GET'){
   const sep=path.includes('?')?'&':'?';
