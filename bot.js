@@ -2250,7 +2250,7 @@ function writeTradeCsv(logEntry) {
       netAmount = (logEntry.tradeSize - logEntry.tradeSize * getFeePct()).toFixed(2);
       orderId = logEntry.orderId || "";
       mode = "LIVE";
-      notes = `[SNIPER] Entry: TP +${(SNIPER.takeProfitPct * 100).toFixed(0)}% | SL -${(SNIPER.stopLossPct * 100).toFixed(0)}% | ${SNIPER.maxHoldMin}min`;
+      notes = `[SNIPER] Entry: Trail +${(SNIPER.trailActivatePct * 100).toFixed(0)}%/${(SNIPER.trailPct * 100).toFixed(0)}% | SL -${(SNIPER.stopLossPct * 100).toFixed(0)}% | ${SNIPER.maxHoldMin}min`;
     }
   } else if (logEntry.type === "exit") {
     const pnlStr = logEntry.pnlPct !== undefined
@@ -3724,7 +3724,10 @@ if (process.argv.includes("--tax-summary")) {
       const pnlUSD = pos.entryPrice ? qty * (snapPrice - pos.entryPrice) : null;
       const minsOpen = pos.entryTime ? Math.round((Date.now() - new Date(pos.entryTime).getTime()) / 60000) : null;
       const minsLeft = pos.maxHoldUntil ? Math.max(0, Math.round((new Date(pos.maxHoldUntil).getTime() - Date.now()) / 60000)) : null;
-      openPositions.push({ coin: baseCoin, sym, qty, usdVal, price: snapPrice, entryPrice: pos.entryPrice, pnlPct, pnlUSD, minsOpen, entryType: "sniper", minsLeft, tpPct: SNIPER.takeProfitPct, slPct: SNIPER.stopLossPct });
+      const hwm = pos.highWatermark ?? pos.entryPrice;
+      const trailActive = hwm >= pos.entryPrice * (1 + SNIPER.trailActivatePct);
+      const trailStop = trailActive ? hwm * (1 - SNIPER.trailPct) : null;
+      openPositions.push({ coin: baseCoin, sym, qty, usdVal, price: snapPrice, entryPrice: pos.entryPrice, pnlPct, pnlUSD, minsOpen, entryType: "sniper", minsLeft, trailActive, trailStop, slPct: SNIPER.stopLossPct });
     }
     const portfolioValue = usdtBalance + openPositionValue;
     _livePortfolioValue = portfolioValue; // keep heat gate in sync with dashboard
@@ -3807,7 +3810,7 @@ if (process.argv.includes("--tax-summary")) {
           const timeStr = p.minsOpen != null ? (p.minsOpen >= 60 ? `${Math.floor(p.minsOpen/60)}h ${p.minsOpen%60}m` : `${p.minsOpen}m`) : "—";
           const typeLabel = p.entryType === "sniper" ? "🎯 SNIPER" : p.entryType === "momentum" ? "MOMENTUM" : p.entryType === "snapback" ? "SNAP-BACK" : p.entryType === "untracked" ? "LIVE" : "SCALP";
           const stopLabel = p.entryType === "sniper"
-            ? `TP +${((p.tpPct||0.25)*100).toFixed(0)}% | SL -${((p.slPct||0.08)*100).toFixed(0)}% | ${p.minsLeft != null ? p.minsLeft + "min left" : "—"}`
+            ? (p.trailActive ? `Trail stop $${p.trailStop?.toFixed(6) ?? "—"} | SL -${((p.slPct||0.08)*100).toFixed(0)}% | ${p.minsLeft != null ? p.minsLeft + "min left" : "—"}` : `Trail activates at +${(SNIPER.trailActivatePct*100).toFixed(0)}% | SL -${((p.slPct||0.08)*100).toFixed(0)}% | ${p.minsLeft != null ? p.minsLeft + "min left" : "—"}`)
             : p.breakEvenActive ? `Break-even stop $${p.trailStop?.toFixed(4) ?? "—"}` : hasEntry ? `Stop-loss $${slPrice} (-${slPct.toFixed(0)}%)` : "Entry untracked";
           return `<a href="/coin?symbol=${p.sym}&pin=${pin}" style="display:block;padding:16px 18px;border-bottom:1px solid #1a1f2e;text-decoration:none;color:inherit">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
@@ -5721,21 +5724,23 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
   }
 
 // ─── New Listing Sniper ──────────────────────────────────────────────────────
-// Polls BitGet every 90s for newly listed USDT pairs. Buys immediately,
-// exits at +25% TP, -8% SL, or 25-minute hard timeout.
+// Polls BitGet every 10s for newly listed USDT pairs. Buys immediately,
+// uses a trailing stop to capture moonshots: -8% hard SL from entry, then
+// once up 20%+ activates a 15%-below-peak trailing stop. 25min hard timeout.
 
 let _sniperKnownSymbols = null;
 const _scheduledSnipes = {}; // symbol → ISO listing time from announcements
 
 const SNIPER = {
-  portfolioPct:  0.10,  // 10% of portfolio per snipe
-  maxSizeUSD:    30,    // hard cap $30 per trade
-  takeProfitPct: 0.25,  // +25% target
-  stopLossPct:   0.08,  // -8% stop
-  maxHoldMin:    25,    // kill after 25 min
-  maxPositions:  2,     // max 2 sniper positions concurrently
-  maxPumpPct:    0.80,  // skip if already pumped 80%+
-  minUsdtNeeded: 15,    // need at least $15 USDT free
+  portfolioPct:      0.10,  // 10% of portfolio per snipe
+  maxSizeUSD:        30,    // hard cap $30 per trade
+  stopLossPct:       0.08,  // -8% hard stop from entry
+  trailActivatePct:  0.20,  // start trailing once up 20%
+  trailPct:          0.15,  // trail 15% below the peak price
+  maxHoldMin:        25,    // kill after 25 min regardless
+  maxPositions:      2,     // max 2 sniper positions concurrently
+  maxPumpPct:        0.80,  // skip if already pumped 80%+
+  minUsdtNeeded:     15,    // need at least $15 USDT free
 };
 
 async function initSniperSymbols() {
@@ -5926,7 +5931,7 @@ async function sniperBuy(symbol) {
 
   console.log(`\n🎯 SNIPER BUY — ${symbol} @ $${price.toFixed(8)}`);
   console.log(`   Size: $${sizeUSD.toFixed(2)} | Pump so far: +${(pumpedPct * 100).toFixed(1)}%`);
-  console.log(`   TP: $${(price * (1 + SNIPER.takeProfitPct)).toFixed(8)} (+${(SNIPER.takeProfitPct * 100).toFixed(0)}%)`);
+  console.log(`   Trail: activates at +${(SNIPER.trailActivatePct * 100).toFixed(0)}%, then ${(SNIPER.trailPct * 100).toFixed(0)}% below peak`);
   console.log(`   SL: $${(price * (1 - SNIPER.stopLossPct)).toFixed(8)} (-${(SNIPER.stopLossPct * 100).toFixed(0)}%)`);
   console.log(`   Timeout: ${SNIPER.maxHoldMin} minutes`);
 
@@ -5968,7 +5973,7 @@ async function sniperBuy(symbol) {
     quantity: qty,           // number, not string — consistent with all other positions
     entryTime: new Date().toISOString(),
     orderId,
-    takeProfitPrice: price * (1 + SNIPER.takeProfitPct),
+    highWatermark:   price,  // updated each monitor cycle; trail activates once up 20%
     stopLossPrice:   price * (1 - SNIPER.stopLossPct),
     maxHoldUntil:    new Date(Date.now() + SNIPER.maxHoldMin * 60 * 1000).toISOString(),
   };
@@ -5982,7 +5987,7 @@ async function sniperBuy(symbol) {
   freshLog.trades.push(entryLog);
   saveLog(freshLog);
   writeTradeCsv(entryLog);
-  pushSignal(symbol, "ENTRY", `🎯 Sniper @ $${price.toFixed(8)} | TP +${(SNIPER.takeProfitPct * 100).toFixed(0)}% | SL -${(SNIPER.stopLossPct * 100).toFixed(0)}% | ${SNIPER.maxHoldMin}min timeout`);
+  pushSignal(symbol, "ENTRY", `🎯 Sniper @ $${price.toFixed(8)} | Trail: +${(SNIPER.trailActivatePct * 100).toFixed(0)}% activate, ${(SNIPER.trailPct * 100).toFixed(0)}% below peak | SL -${(SNIPER.stopLossPct * 100).toFixed(0)}% | ${SNIPER.maxHoldMin}min timeout`);
 
   sendEmail(
     `🎯 SNIPER — ${symbol.replace("USDT", "")} new listing @ $${price.toFixed(8)}`,
@@ -5992,7 +5997,7 @@ async function sniperBuy(symbol) {
        <tr><td><b>Entry</b></td><td>$${price.toFixed(8)}</td></tr>
        <tr><td><b>Size</b></td><td>$${sizeUSD.toFixed(2)}</td></tr>
        <tr><td><b>Already pumped</b></td><td>+${(pumpedPct * 100).toFixed(1)}%</td></tr>
-       <tr><td><b>Take profit</b></td><td>$${(price * (1 + SNIPER.takeProfitPct)).toFixed(8)} (+${(SNIPER.takeProfitPct * 100).toFixed(0)}%)</td></tr>
+       <tr><td><b>Trailing stop</b></td><td>Activates at +${(SNIPER.trailActivatePct * 100).toFixed(0)}%, then ${(SNIPER.trailPct * 100).toFixed(0)}% below peak</td></tr>
        <tr><td><b>Stop loss</b></td><td>$${(price * (1 - SNIPER.stopLossPct)).toFixed(8)} (-${(SNIPER.stopLossPct * 100).toFixed(0)}%)</td></tr>
        <tr><td><b>Timeout</b></td><td>${SNIPER.maxHoldMin} minutes</td></tr>
      </table>`
@@ -6027,19 +6032,38 @@ async function monitorSniperPositions() {
 
     const pnlPct  = (price - pos.entryPrice) / pos.entryPrice * 100;
     const ageMin  = (Date.now() - new Date(pos.entryTime).getTime()) / 60000;
-    const hitTP   = price >= pos.takeProfitPrice;
-    const hitSL   = price <= pos.stopLossPrice;
-    const timedOut = Date.now() >= new Date(pos.maxHoldUntil).getTime();
 
-    if (!hitTP && !hitSL && !timedOut) {
-      console.log(`🎯 Sniper ${symbol.replace("USDT", "")} — $${price.toFixed(8)} | P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% | ${ageMin.toFixed(1)}min`);
-      continue;
+    // Update high watermark
+    const hwm = Math.max(pos.highWatermark ?? pos.entryPrice, price);
+    const hwmUpdated = hwm > (pos.highWatermark ?? pos.entryPrice);
+
+    // Trailing stop — activates once up trailActivatePct, then trails trailPct below peak
+    const trailActive = hwm >= pos.entryPrice * (1 + SNIPER.trailActivatePct);
+    const trailStop   = trailActive ? hwm * (1 - SNIPER.trailPct) : null;
+    const hitTrail    = trailActive && price <= trailStop;
+    const hitSL       = price <= pos.stopLossPrice;
+    const timedOut    = Date.now() >= new Date(pos.maxHoldUntil).getTime();
+
+    // Save updated high watermark even when not exiting
+    if (hwmUpdated || (!hitTrail && !hitSL && !timedOut)) {
+      if (hwmUpdated) {
+        const freshLog = loadLog();
+        if (freshLog.sniperPositions?.[symbol]?.open) {
+          freshLog.sniperPositions[symbol].highWatermark = hwm;
+          saveLog(freshLog);
+        }
+      }
+      const trailInfo = trailActive
+        ? ` | Trail stop: $${trailStop.toFixed(8)} (peak $${hwm.toFixed(8)})`
+        : ` | Trail activates at $${(pos.entryPrice * (1 + SNIPER.trailActivatePct)).toFixed(8)}`;
+      console.log(`🎯 Sniper ${symbol.replace("USDT", "")} — $${price.toFixed(8)} | P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% | ${ageMin.toFixed(1)}min${trailInfo}`);
+      if (!hitTrail && !hitSL && !timedOut) continue;
     }
 
-    const reason = hitTP    ? `TP +${pnlPct.toFixed(2)}% — target hit`
-                 : hitSL    ? `SL ${pnlPct.toFixed(2)}% — stopped out`
-                 :            `Timeout ${ageMin.toFixed(1)}min (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)`;
-    console.log(`\n${hitTP ? "💰" : "🔴"} SNIPER EXIT — ${symbol} | ${reason}`);
+    const reason = hitTrail  ? `Trail stop +${pnlPct.toFixed(2)}% (peak +${((hwm - pos.entryPrice) / pos.entryPrice * 100).toFixed(2)}%)`
+                 : hitSL     ? `SL ${pnlPct.toFixed(2)}% — stopped out`
+                 :             `Timeout ${ageMin.toFixed(1)}min (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)`;
+    console.log(`\n${pnlPct >= 0 ? "💰" : "🔴"} SNIPER EXIT — ${symbol} | ${reason}`);
 
     try {
       await placeBitGetOrder(symbol, "sell", null, price, String(pos.quantity));
