@@ -256,7 +256,7 @@ const ACCOUNTS = [
     portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD_2 || process.env.PORTFOLIO_VALUE_USD || "1000"),
     logFile:    "safety-check-log-2.json",
   }] : []),
-  ...(process.env.BITMART_API_KEY ? [{
+  ...(process.env.BITMART_API_KEY && process.env.BITMART_SECRET_KEY && process.env.BITMART_MEMO ? [{
     id: "BM", exchange: "bitmart",
     apiKey:     process.env.BITMART_API_KEY,
     secretKey:  process.env.BITMART_SECRET_KEY,
@@ -373,15 +373,6 @@ function checkDailyDrawdown(log) {
   const drawdownPct = Math.abs(totalLoss) / (log.portfolioValue || acct().portfolioValue) * 100;
   const limit = 10; // 10% max daily loss
   return { drawdownPct, totalLoss, paused: drawdownPct >= limit, limit };
-}
-
-// Daily profit target — stop trading once we've hit the goal for the day
-function checkDailyProfitTarget(log) {
-  const startValue = log.dayStartValue || acct().portfolioValue;
-  const currentValue = log.portfolioValue || acct().portfolioValue;
-  const gainPct = ((currentValue - startValue) / startValue) * 100;
-  const target = 30; // 30% daily target — stop and protect gains
-  return { gainPct, startValue, currentValue, targetHit: gainPct >= target, target };
 }
 
 // Adaptive mode — automatically tightens strategy when losing
@@ -1095,8 +1086,8 @@ function calcStochRSI(closes) {
   const window = rsiSeries.slice(-3);
   const minR = Math.min(...window), maxR = Math.max(...window);
   const range = maxR - minR;
-  const k = range === 0 ? 50 : ((window[window.length - 1] - minR) / range) * 100;
-  return { k, oversold: k < 20, overbought: k > 88 };
+  const k = range === 0 ? (window[window.length - 1] >= 70 ? 100 : 0) : ((window[window.length - 1] - minR) / range) * 100;
+  return { k, oversold: k < 20, overbought: k > 92 };
 }
 
 // ATR(14) — average true range
@@ -1586,9 +1577,9 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     // RSI extreme overbought: only exit if trend is weakening (price slipping vs EMA) OR big gain
     check(`RSI(3) overbought > 88 | Actual: ${rsi3.toFixed(2)}`, rsi3 > 88 && pnlPct >= SOFT_MIN && (!trendIntact || pnlPct >= 2.0));
     if (stochRsi) {
-      // StochRSI > 88 + trend breaking OR big gain = true exhaustion
+      // StochRSI > 92 + trend breaking OR big gain = true exhaustion
       const stochExhausted = stochRsi.overbought && pnlPct >= SOFT_MIN && (!trendIntact || pnlPct >= 2.0 || (rsi3 > 90 && sr?.nearResistance));
-      check(`StochRSI overbought > 88 | K=${stochRsi.k.toFixed(1)}${stochRsi.overbought && !stochExhausted ? ` (holding — trend intact or P&L ${pnlPct.toFixed(2)}% < target)` : ""}`, stochExhausted);
+      check(`StochRSI overbought > 92 | K=${stochRsi.k.toFixed(1)}${stochRsi.overbought && !stochExhausted ? ` (holding — trend intact or P&L ${pnlPct.toFixed(2)}% < target)` : ""}`, stochExhausted);
     }
     // BB% extreme — price at very top of band AND trend showing signs of reversal
     if (bb) check(`BB% > 0.92 (extreme upper band) | BB%=${bb.pct.toFixed(2)}`, bb.pct > 0.92 && pnlPct >= SOFT_MIN && (!trendIntact || pnlPct >= 2.0));
@@ -2494,6 +2485,15 @@ async function run(tvSignal = null, symbol = null) {
   const regime = await detectMarketRegime().catch(() => ({ regime: "UNKNOWN", btcTrend: "neutral", volatility: "normal" }));
   const heat = calcPortfolioHeat(log);
   console.log(`🌍 Regime: ${regime.regime} (BTC:${regime.btcTrend} Vol:${regime.volatility}) | Portfolio heat: ${heat.heatPct}%/${heat.isOverheated ? "🔴 OVERHEATED" : "8% max"}`);
+
+  // Block new entries when portfolio is overheated — skip candle fetch entirely to save API calls
+  // Existing open positions for this symbol are still allowed through for exit management
+  const earlyPosition = (log.positions || {})[symbol] || null;
+  if (!earlyPosition?.open && heat.isOverheated) {
+    console.log(`\n🚫 No new entries — portfolio heat ${heat.heatPct}% exceeds 8% max`);
+    pushSignal(symbol, "BLOCKED", `Portfolio heat ${heat.heatPct.toFixed(0)}% > 8% max — waiting for positions to close`);
+    return;
+  }
 
   // In BEAR regime: only manage exits on existing positions, skip all new scalp entries
   // In VOLATILE regime: reduce scalp size by 50% (applied in tradeSize calc below)
