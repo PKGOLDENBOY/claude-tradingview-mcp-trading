@@ -3111,19 +3111,19 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
 
-    // Auto-blacklist — only skip a coin if it has BOTH 3+ losses in 7 days AND
-    // a win rate below 40% on recent trades. Two losses from normal variance is not enough.
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    // Auto-blacklist — skip a coin if it has 3+ real losses AND <40% WR in the past 2 days.
+    // Resets automatically after 2 days so coins get a fresh chance.
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
     const recentTradesOnCoin = log.trades.filter(t =>
-      t.type === "exit" && t.symbol === symbol && t.orderPlaced && t.pnlPct !== undefined && t.timestamp > sevenDaysAgo
+      t.type === "exit" && t.symbol === symbol && t.orderPlaced && t.pnlPct !== undefined && t.timestamp > twoDaysAgo
     );
     const recentLossesOnCoin = recentTradesOnCoin.filter(t => t.pnlPct < -0.5).length;
     const recentWinsOnCoin   = recentTradesOnCoin.filter(t => t.pnlPct > 0).length;
     const recentWrOnCoin     = recentTradesOnCoin.length > 0 ? recentWinsOnCoin / recentTradesOnCoin.length : 1;
     if (recentLossesOnCoin >= 3 && recentWrOnCoin < 0.40) {
-      console.log(`🚫 AUTO-BLACKLIST — ${symbol}: ${recentLossesOnCoin} losses in 7 days with ${(recentWrOnCoin*100).toFixed(0)}% win rate. Genuinely bad edge — skipping.`);
+      console.log(`🚫 AUTO-BLACKLIST — ${symbol}: ${recentLossesOnCoin} losses in 2 days with ${(recentWrOnCoin*100).toFixed(0)}% win rate. Cooling off — resets in 2 days.`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Auto-blacklist — ${recentLossesOnCoin} losses in 7 days, ${(recentWrOnCoin*100).toFixed(0)}% WR`);
+      pushSignal(symbol, "BLOCKED", `Auto-blacklist — ${recentLossesOnCoin} losses in 2 days, ${(recentWrOnCoin*100).toFixed(0)}% WR (resets in 2d)`);
       return;
     }
 
@@ -3770,6 +3770,26 @@ if (process.argv.includes("--tax-summary")) {
     const expectancy = allExits.length >= 2 ? (wrRate * (avgWin ?? 0) + (1 - wrRate) * (avgLoss ?? 0)).toFixed(2) : null;
     // Fall back to CSV history when the in-memory log lacks enough closed trades
     const csvStats = allExits.length < 3 ? loadCsvStats() : null;
+
+    // Per-strategy stats — classify each closed trade by how it was entered
+    function stratStats(exits) {
+      if (!exits.length) return null;
+      const w = exits.filter(t => t.pnlPct > 0.25).length;
+      const l = exits.length - w;
+      const wr = w / exits.length;
+      const avgW = w ? exits.filter(t => t.pnlPct > 0.25).reduce((s,t) => s + t.pnlPct, 0) / w : null;
+      const avgL = l ? exits.filter(t => t.pnlPct <= 0.25).reduce((s,t) => s + t.pnlPct, 0) / l : null;
+      const exp = exits.length >= 2 ? (wr*(avgW??0) + (1-wr)*(avgL??0)) : null;
+      return { wins: w, losses: l, total: exits.length, wrPct: +(wr*100).toFixed(0),
+               avgWin: avgW!=null?+avgW.toFixed(2):null, avgLoss: avgL!=null?+avgL.toFixed(2):null,
+               expectancy: exp!=null?+exp.toFixed(2):null };
+    }
+    const strats = {
+      scalp:    stratStats(allExits.filter(t => !t.tradeType && (t.entryType==="snapback"||t.entryType==="trend-follow"||!t.entryType))),
+      momentum: stratStats(allExits.filter(t => !t.tradeType && t.entryType==="momentum")),
+      sniper:   stratStats(allExits.filter(t => t.tradeType==="sniper" || t.entryType==="sniper")),
+      swing:    stratStats(allExits.filter(t => t.tradeType==="swing")),
+    };
     const btcSnap = coinSnapshots["BTCUSDT"] || null;
     const btcPrice = btcSnap?.price ?? (_topGainers.find(t => t.symbol === "BTCUSDT")?.price ?? null);
     const nearEntry = Object.values(coinSnapshots).filter(c => {
@@ -3807,7 +3827,8 @@ if (process.argv.includes("--tax-summary")) {
       coinsScanned: _lastScanCount || Object.keys(coinSnapshots).length,
       nearEntry,
       lastTradeAt,
-      lastTrades: (log.trades || []).slice(-10).reverse(),
+      lastTrades: (log.trades || []).slice(-20).reverse(),
+      strats,
       signals: signalLog.slice(-30).reverse(),
       coins: coinSnapshots,
       topGainers: _topGainers,
