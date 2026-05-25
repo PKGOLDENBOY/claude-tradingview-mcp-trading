@@ -801,19 +801,23 @@ async function refreshTopMovers() {
       .sort((a, b) => b.change24h - a.change24h)
       .slice(0, 20);
 
-    // Score: weighted mix of volume rank + absolute 24h move (big moves = opportunity)
+    // Score: volume rank + 24h move magnitude + sweet-spot bonus for 2–10% movers
     const totalVol = allCoins.reduce((s, t) => s + parseFloat(t.usdtVolume), 0);
     const scored = allCoins.map(t => {
       const vol = parseFloat(t.usdtVolume);
-      const chg = Math.abs(parseFloat(t.change24h)); // big moves (up OR down) = interesting
+      const chg = parseFloat(t.change24h) * 100; // in percent
+      const absChg = Math.abs(chg);
       const volScore = vol / totalVol * 100;
-      const chgScore = Math.min(chg * 100, 30); // cap at 30 so mega-pumps don't dominate
-      return { symbol: t.symbol, score: volScore * 0.4 + chgScore * 0.6, vol, chg: parseFloat(t.change24h) };
+      const baseChgScore = Math.min(absChg, 30); // cap at 30 so mega-pumps don't dominate
+      // Sweet-spot bonus: coins up 2–12% are ideal — enough momentum, not extended yet
+      const sweetSpot = absChg >= 2 && absChg <= 12 && chg > 0;
+      const chgScore = sweetSpot ? baseChgScore * 1.4 : baseChgScore;
+      return { symbol: t.symbol, score: volScore * 0.35 + chgScore * 0.65, vol, chg };
     }).sort((a, b) => b.score - a.score);
 
-    // Take top 80 by score — broad market coverage: high-volume stalwarts + big movers
-    const candidates = scored.slice(0, 80).map(t => t.symbol);
-    console.log(`\n🌐 Full market scan — ${allCoins.length} liquid coins → top ${candidates.length} candidates`);
+    // Top 60 candidates — tighter focus than 80; quality over breadth
+    const candidates = scored.slice(0, 60).map(t => t.symbol);
+    console.log(`\n🌐 Full market scan — ${allCoins.length} liquid coins → top ${candidates.length} candidates (sweet-spot scoring)`);
 
     // Backtest all candidates — 20H cache means most results are instant
     console.log(`📈 Backtesting candidates (cached results reused)...`);
@@ -1516,11 +1520,13 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
   const baseTrailPct = atr
     ? Math.min(Math.max(1.5 * atr / newHigh, 0.015), 0.035)
     : 0.025;
-  // Stepped profit lock — tighten trail progressively as gains grow
+  // Stepped profit lock — wide trail so winners can run to 50%+, tighten only near the top
   const trailPct =
-    pnlPct >= 4.0 ? Math.min(baseTrailPct, 0.005) :  // +4%: lock to 0.5% trail
-    pnlPct >= 2.5 ? Math.min(baseTrailPct, 0.01)  :  // +2.5%: lock to 1% trail
-    pnlPct >= 1.5 ? Math.min(baseTrailPct, 0.02)  :  // +1.5%: lock to 2% trail
+    pnlPct >= 20 ? Math.min(baseTrailPct, 0.06) :  // +20%+: 6% trail — protect monster gains
+    pnlPct >= 10 ? Math.min(baseTrailPct, 0.08) :  // +10%:  8% trail — big swing breathing room
+    pnlPct >= 5  ? Math.min(baseTrailPct, 0.10) :  // +5%:   10% trail — give the move room
+    pnlPct >= 2.5? Math.min(baseTrailPct, 0.015):  // +2.5%: 1.5% — near break-even
+    pnlPct >= 1.5? Math.min(baseTrailPct, 0.025):  // +1.5%: 2.5% trail
     baseTrailPct;
   const trailingStop = newHigh * (1 - trailPct);
 
@@ -1543,8 +1549,8 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     const slPrice = position.entryPrice * 0.97;
     check(`Momentum stop-loss — $${slPrice.toFixed(4)} (-3%)`, price <= slPrice);
 
-    // 10% take profit — capture the pump
-    check(`Momentum TP hit — +10%`, pnlPct >= 10);
+    // 25% take profit — let momentum coins run; ATR trail and RSI/volume exits handle early reversals
+    check(`Momentum TP hit — +25%`, pnlPct >= 25);
 
     // RSI dropped below 50 — momentum has faded, exit
     check(`RSI(3) below 50 — momentum faded`, rsi3 < 50);
@@ -1616,12 +1622,14 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     // Max hold time — exit stale trades and recycle capital
     if (position.entryTime) {
       const hoursOpen = (Date.now() - new Date(position.entryTime).getTime()) / (1000 * 60 * 60);
-      if (hoursOpen > 5) {
-        check(`Max hold exceeded — open ${hoursOpen.toFixed(1)}h (limit 5h)`, true);
-      } else if (hoursOpen > 2 && pnlPct < -0.5) {
-        check(`Stale loser — open ${hoursOpen.toFixed(1)}h with P&L ${pnlPct.toFixed(2)}% (cutting loss)`, true);
-      } else if (hoursOpen > 3 && pnlPct < 0.3) {
-        check(`Capital stuck — open ${hoursOpen.toFixed(1)}h with only ${pnlPct.toFixed(2)}% gain (recycling)`, true);
+      if (hoursOpen > 3.5) {
+        check(`Max hold exceeded — open ${hoursOpen.toFixed(1)}h (limit 3.5h)`, true);
+      } else if (hoursOpen > 0.75 && pnlPct < -1.5) {
+        check(`Stale trade — ${(hoursOpen * 60).toFixed(0)}min, down ${pnlPct.toFixed(2)}% (cut early)`, true);
+      } else if (hoursOpen > 1.5 && pnlPct < -0.3) {
+        check(`Stale trade — ${hoursOpen.toFixed(1)}h, P&L ${pnlPct.toFixed(2)}% (cutting loss)`, true);
+      } else if (hoursOpen > 2.5 && pnlPct < 0.5) {
+        check(`Capital stuck — ${hoursOpen.toFixed(1)}h at only ${pnlPct.toFixed(2)}% (recycling)`, true);
       }
     }
   }
@@ -1631,7 +1639,7 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
   // Hard stops (stop-loss, ATR trail, max hold) always fire regardless
   const FEE_MIN_PCT = parseFloat((getFeePct() * 2 * 100 + 0.10).toFixed(2));
   if (pnlPct > 0 && pnlPct < FEE_MIN_PCT) {
-    const HARD_STOPS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Failed bounce", "Momentum stop"];
+    const HARD_STOPS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Capital stuck", "Failed bounce", "Momentum stop"];
     const hardOnly = reasons.filter(r => HARD_STOPS.some(kw => r.startsWith(kw)));
     if (hardOnly.length < reasons.length) {
       console.log(`  ℹ️  Fee gate — holding at +${pnlPct.toFixed(2)}% (need +${FEE_MIN_PCT}% to cover fees)`);
@@ -2724,7 +2732,11 @@ async function run(tvSignal = null, symbol = null) {
   const regimeScale   = regime.volatility === "high" ? 0.50 : 1.0;
   const drawdownScale = drawdown.drawdownPct > 7 ? 0.30 : drawdown.drawdownPct > 5 ? 0.50 : drawdown.drawdownPct > 3 ? 0.75 : 1.0;
   const bearScale     = bearSnapBack ? 0.40 : 1.0; // bear snap-back = 40% size only
-  const rawSize = currentPortfolio * sizePct * adaptive.sizeMultiplier * drawdownScale * regimeScale * bearScale;
+  // Profit-lock scale — protect daily gains by reducing new bets as the day goes well
+  const todayPnlPct = log.dayStartValue > 0 ? (currentPortfolio - log.dayStartValue) / log.dayStartValue * 100 : 0;
+  const profitLockScale = todayPnlPct > 5 ? 0.40 : todayPnlPct > 3 ? 0.60 : todayPnlPct > 1.5 ? 0.80 : 1.0;
+  if (profitLockScale < 1.0) console.log(`🔒 Profit lock: ${(profitLockScale*100).toFixed(0)}% position size (up ${todayPnlPct.toFixed(1)}% today — protecting gains)`);
+  const rawSize = currentPortfolio * sizePct * adaptive.sizeMultiplier * drawdownScale * regimeScale * bearScale * profitLockScale;
   const tradeSize = CONFIG.maxTradeSizeUSD ? Math.min(rawSize, CONFIG.maxTradeSizeUSD) : rawSize;
   if (drawdownScale < 1.0) console.log(`\n⚠️  Drawdown scaling: ${(drawdownScale * 100).toFixed(0)}% position size (down ${drawdown.drawdownPct.toFixed(1)}% today)`);
   if (regimeScale < 1.0)   console.log(`⚠️  Volatile regime: 50% position size`);
@@ -2810,7 +2822,7 @@ async function run(tvSignal = null, symbol = null) {
     let claudeAnalysis = null;
 
     // Hard stops are non-negotiable — Claude cannot override these
-    const HARD_EXIT_KEYWORDS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Failed bounce", "Momentum stop", "Trend reversed"];
+    const HARD_EXIT_KEYWORDS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Capital stuck", "Failed bounce", "Momentum stop", "Trend reversed"];
     const hasHardExit = reasons.some(r => HARD_EXIT_KEYWORDS.some(kw => r.startsWith(kw)));
 
     // Pre-compute for gate checks
@@ -3291,11 +3303,11 @@ async function run(tvSignal = null, symbol = null) {
     }
 
     // Same-day loss cooldown — block re-entry after 2+ stop-outs on the same coin today
-    const today = new Date().toISOString().slice(0, 10);
+    const todayDate = new Date().toISOString().slice(0, 10);
     const todayLossesOnSymbol = log.trades.filter(t =>
       t.type === "exit" && t.symbol === symbol && t.orderPlaced === true &&
       t.pnlPct !== undefined && t.pnlPct < -1 &&
-      t.timestamp?.startsWith(today)
+      t.timestamp?.startsWith(todayDate)
     ).length;
     if (todayLossesOnSymbol >= 2) {
       console.log(`🚫 COOLDOWN — ${symbol} has ${todayLossesOnSymbol} stop-outs today. Skipping until tomorrow.`);
