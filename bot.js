@@ -1609,13 +1609,15 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     }
     check(`ATR stop hit — $${effectiveStop.toFixed(2)} (${breakEvenActive ? "break-even floor" : `${(trailPct*100).toFixed(1)}% trail`})`, price < effectiveStop);
 
-    // Max hold time — exit stale trades before they turn into big losses
+    // Max hold time — exit stale trades and recycle capital
     if (position.entryTime) {
       const hoursOpen = (Date.now() - new Date(position.entryTime).getTime()) / (1000 * 60 * 60);
-      if (hoursOpen > 10) {
-        check(`Max hold exceeded — open ${hoursOpen.toFixed(1)}h (limit 10h)`, true);
-      } else if (hoursOpen > 4 && pnlPct < 0) {
-        check(`Stale trade — open ${hoursOpen.toFixed(1)}h with P&L ${pnlPct.toFixed(2)}%`, true);
+      if (hoursOpen > 5) {
+        check(`Max hold exceeded — open ${hoursOpen.toFixed(1)}h (limit 5h)`, true);
+      } else if (hoursOpen > 2 && pnlPct < -0.5) {
+        check(`Stale loser — open ${hoursOpen.toFixed(1)}h with P&L ${pnlPct.toFixed(2)}% (cutting loss)`, true);
+      } else if (hoursOpen > 3 && pnlPct < 0.3) {
+        check(`Capital stuck — open ${hoursOpen.toFixed(1)}h with only ${pnlPct.toFixed(2)}% gain (recycling)`, true);
       }
     }
   }
@@ -3039,13 +3041,13 @@ async function run(tvSignal = null, symbol = null) {
       else console.log(`  ✅ Support ok — $${sr.nearestSupport.toFixed(4)} (${sr.distToSupport?.toFixed(2)}% below price, ${sr.supportConf} TF confluences)`);
     }
 
-    // Max 3 concurrent scalp positions — keeps capital diversified and avoids going all-in
+    // Max 4 concurrent scalp positions — 4×20% = 80% deployed, 20% buffer for new opportunities
     const openPositions = Object.entries(log.positions || {}).filter(([,p]) => p && p.open);
     const openCount = openPositions.length;
-    if (openCount >= 3) {
+    if (openCount >= 4) {
       const held = openPositions.map(([s]) => s).join(", ");
-      console.log(`🚫 MAX POSITIONS — already holding ${held}. Max 3 positions at a time.`);
-      pushSignal(symbol, "BLOCKED", `Max positions (3/3) reached`);
+      console.log(`🚫 MAX POSITIONS — already holding ${held}. Max 4 positions at a time.`);
+      pushSignal(symbol, "BLOCKED", `Max positions (4/4) reached`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
@@ -4014,7 +4016,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   <div style="font-size:13px;font-weight:600;color:${(d.todayGainUSD??0) >= 0 ? "#00d4a0" : "#ff4d6a"};margin-bottom:18px">${(d.todayGainUSD??0) >= 0 ? "+" : ""}$${Math.abs(d.todayGainUSD??0).toFixed(2)} today <span style="font-size:11px;opacity:.7">(open ${(d.unrealizedPnlUSD??0)>=0?"+":""}$${(d.unrealizedPnlUSD??0).toFixed(2)} · closed ${(d.todayPnlUSD??0)>=0?"+":""}$${(d.todayPnlUSD??0).toFixed(2)})</span></div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 20px">
     <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">CASH</div><div style="font-size:14px;font-weight:700">$${Number(d.usdtBalance).toFixed(2)}</div></div>
-    <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">POSITIONS</div><div style="font-size:14px;font-weight:700">${d.openPositions.length} / 3</div></div>
+    <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">POSITIONS</div><div style="font-size:14px;font-weight:700">${d.openPositions.length} / 4</div></div>
     <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">TODAY TRADES</div><div style="font-size:14px;font-weight:700">${d.todayTrades}</div></div>
     <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">LAST TRADE</div><div style="font-size:14px;font-weight:700" id="last-trade-ago">${d.lastTradeAt ? "—" : "—"}</div></div>
   </div>
