@@ -5694,16 +5694,17 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 // exits at +25% TP, -8% SL, or 25-minute hard timeout.
 
 let _sniperKnownSymbols = null;
+const _scheduledSnipes = {}; // symbol → ISO listing time from announcements
 
 const SNIPER = {
-  portfolioPct: 0.10,  // 10% of portfolio per snipe
-  maxSizeUSD:   30,    // hard cap $30 per trade
-  takeProfitPct: 0.25, // +25% target
-  stopLossPct:   0.08, // -8% stop
-  maxHoldMin:    25,   // kill after 25 min
-  maxPositions:  2,    // max 2 sniper positions concurrently
-  maxPumpPct:    0.80, // skip if already pumped 80%+
-  minUsdtNeeded: 15,   // need at least $15 USDT free
+  portfolioPct:  0.10,  // 10% of portfolio per snipe
+  maxSizeUSD:    30,    // hard cap $30 per trade
+  takeProfitPct: 0.25,  // +25% target
+  stopLossPct:   0.08,  // -8% stop
+  maxHoldMin:    25,    // kill after 25 min
+  maxPositions:  2,     // max 2 sniper positions concurrently
+  maxPumpPct:    0.80,  // skip if already pumped 80%+
+  minUsdtNeeded: 15,    // need at least $15 USDT free
 };
 
 async function initSniperSymbols() {
@@ -5723,8 +5724,23 @@ async function initSniperSymbols() {
 
 async function checkNewListings() {
   if (CONFIG.paperTrading || !_sniperKnownSymbols || acct().exchange !== "bitget") return;
+
+  // Fire any pre-announced snipes whose time has arrived
+  const now = Date.now();
+  for (const [symbol, timeStr] of Object.entries(_scheduledSnipes)) {
+    const t = new Date(timeStr).getTime();
+    if (now >= t && now - t < 10 * 60 * 1000) {
+      console.log(`\n⏰ SCHEDULED SNIPE FIRING — ${symbol}`);
+      delete _scheduledSnipes[symbol];
+      const log = loadLog();
+      sniperBuy(symbol, log).catch(e => console.log(`⚠️  Scheduled snipe ${symbol} failed: ${e.message}`));
+    } else if (now - t > 10 * 60 * 1000) {
+      delete _scheduledSnipes[symbol];
+    }
+  }
+
   try {
-    const res = await fetch("https://api.bitget.com/api/v2/spot/public/symbols", { signal: AbortSignal.timeout(8000) });
+    const res = await fetch("https://api.bitget.com/api/v2/spot/public/symbols", { signal: AbortSignal.timeout(6000) });
     const data = await res.json();
     const current = (data.data || []).filter(s =>
       s.symbol.endsWith("USDT") &&
@@ -5733,13 +5749,86 @@ async function checkNewListings() {
     );
     const newListings = current.filter(s => !_sniperKnownSymbols.has(s.symbol));
     current.forEach(s => _sniperKnownSymbols.add(s.symbol));
-    for (const listing of newListings) {
-      console.log(`\n🆕 NEW LISTING DETECTED: ${listing.symbol}`);
-      pushSignal(listing.symbol, "BLOCKED", `🆕 New listing detected — attempting sniper buy`);
+
+    if (newListings.length > 0) {
+      console.log(`\n🆕 ${newListings.length} NEW LISTING(S) DETECTED: ${newListings.map(s => s.symbol).join(", ")}`);
+      // Fire all new listings in parallel — every millisecond counts
       const log = loadLog();
-      await sniperBuy(listing.symbol, log).catch(e => console.log(`⚠️  Sniper buy ${listing.symbol} failed: ${e.message}`));
+      await Promise.all(newListings.map(listing => {
+        pushSignal(listing.symbol, "BLOCKED", `🆕 New listing — sniper firing`);
+        return sniperBuy(listing.symbol, log).catch(e => console.log(`⚠️  Sniper ${listing.symbol}: ${e.message}`));
+      }));
     }
   } catch { /* non-critical */ }
+}
+
+// Check BitGet announcement API for upcoming listings — runs every 5 minutes.
+// When an upcoming listing is found, stores it with its listing time so the
+// sniper can fire at T=0 without waiting for the next 10-second symbols poll.
+async function checkUpcomingListings() {
+  if (CONFIG.paperTrading || acct().exchange !== "bitget") return;
+  const ANNOUNCEMENT_URLS = [
+    "https://api.bitget.com/api/v2/common/announcement?type=new_listing&language=en_US&pageSize=20",
+    "https://api.bitget.com/api/v2/spot/market/symbol-info",
+  ];
+  for (const url of ANNOUNCEMENT_URLS) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      const data = await res.json();
+      const items = data.data?.list || data.data || [];
+      if (!Array.isArray(items) || items.length === 0) continue;
+
+      for (const item of items) {
+        // Parse announcement text for coin name + listing time
+        const text = ((item.title || "") + " " + (item.content || "") + " " + (item.annTitle || "")).toUpperCase();
+        const coinMatch = text.match(/\b([A-Z]{2,10})\b.*?(?:WILL BE LISTED|SPOT LISTING|NEW LISTING)/);
+        const timeMatch = text.match(/(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2})/);
+
+        if (coinMatch && timeMatch) {
+          const symbol = coinMatch[1] + "USDT";
+          if (_sniperKnownSymbols?.has(symbol)) continue; // already live
+          const listingTime = new Date(`${timeMatch[1]}T${timeMatch[2]}:00Z`);
+          if (listingTime <= new Date()) continue; // already passed
+
+          if (!_scheduledSnipes[symbol]) {
+            _scheduledSnipes[symbol] = listingTime.toISOString();
+            const minsUntil = Math.round((listingTime - Date.now()) / 60000);
+            console.log(`\n📅 UPCOMING LISTING: ${symbol} in ${minsUntil}min at ${listingTime.toUTCString()}`);
+            pushSignal(symbol, "BLOCKED", `📅 Sniper armed — listing in ${minsUntil}min`);
+            sendEmail(`📅 Upcoming listing: ${symbol.replace("USDT","")}`,
+              `<h2>📅 Sniper armed</h2><p><b>${symbol}</b> lists in <b>${minsUntil} minutes</b><br>Scheduled for ${listingTime.toUTCString()}<br>Bot will buy the moment trading opens.</p>`);
+          }
+        }
+
+        // Also track pre-market symbols from the symbol-info endpoint
+        if (item.symbol?.endsWith("USDT") && item.status === "pre_market" && item.onboardDate) {
+          const symbol = item.symbol;
+          if (_sniperKnownSymbols?.has(symbol)) continue;
+          const listingTime = new Date(parseInt(item.onboardDate));
+          if (listingTime <= new Date() || _scheduledSnipes[symbol]) continue;
+          _scheduledSnipes[symbol] = listingTime.toISOString();
+          const minsUntil = Math.round((listingTime - Date.now()) / 60000);
+          console.log(`\n📅 PRE-MARKET: ${symbol} — trading opens in ${minsUntil}min`);
+          pushSignal(symbol, "BLOCKED", `📅 Pre-market — sniper fires in ${minsUntil}min`);
+        }
+      }
+      break; // worked, don't try next URL
+    } catch { continue; }
+  }
+
+  // Fire any scheduled snipes whose time has arrived
+  const now = Date.now();
+  for (const [symbol, timeStr] of Object.entries(_scheduledSnipes)) {
+    const t = new Date(timeStr).getTime();
+    if (now >= t && now - t < 10 * 60 * 1000) {
+      console.log(`\n⏰ SCHEDULED SNIPE FIRING — ${symbol}`);
+      delete _scheduledSnipes[symbol];
+      const log = loadLog();
+      await sniperBuy(symbol, log).catch(e => console.log(`⚠️  Scheduled snipe ${symbol} failed: ${e.message}`));
+    } else if (now - t > 10 * 60 * 1000) {
+      delete _scheduledSnipes[symbol]; // expired
+    }
+  }
 }
 
 async function sniperBuy(symbol, log) {
@@ -5767,15 +5856,10 @@ async function sniperBuy(symbol, log) {
     return;
   }
 
-  // Need enough free USDT
-  const usdtBal = await getBalance("USDT").catch(() => 0);
-  if (usdtBal < SNIPER.minUsdtNeeded) {
-    console.log(`🚫 Sniper skip — only $${usdtBal.toFixed(2)} USDT free (need $${SNIPER.minUsdtNeeded})`);
-    return;
-  }
-
+  // Use cached USDT balance — skip live getBalance() to save ~1 second
+  const estimatedUsdt = _livePortfolioValue ? _livePortfolioValue * 0.10 : 20;
   const portfolio = _livePortfolioValue || log.portfolioValue || acct().portfolioValue;
-  const sizeUSD = Math.min(portfolio * SNIPER.portfolioPct, SNIPER.maxSizeUSD, usdtBal * 0.90);
+  const sizeUSD = Math.min(portfolio * SNIPER.portfolioPct, SNIPER.maxSizeUSD);
   if (sizeUSD < 5) { console.log(`⚠️  Sniper size too small ($${sizeUSD.toFixed(2)}). Skipping.`); return; }
 
   console.log(`\n🎯 SNIPER BUY — ${symbol} @ $${price.toFixed(8)}`);
@@ -5787,10 +5871,26 @@ async function sniperBuy(symbol, log) {
   let qty = sizeUSD / price;
   let orderId = null;
   try {
-    const order = await placeBitGetOrder(symbol, "buy", sizeUSD, price);
-    qty = order.confirmedQty ?? qty;
-    orderId = order.orderId;
-    console.log(`✅ SNIPER ORDER PLACED — ${orderId} | qty: ${qty.toFixed(8)}`);
+    // Fast-path: direct market buy without the 12-second balance confirmation wait.
+    // placeBitGetOrder waits 3+4+5s to verify coins landed — sniper can't afford that.
+    const ts = await getBitGetServerTime();
+    const path = "/api/v2/spot/trade/place-order";
+    const body = JSON.stringify({ symbol, side: "buy", orderType: "market", size: sizeUSD.toFixed(2) });
+    const sig = signBitGet(ts, "POST", path, body);
+    const res = await fetch(`${acct().baseUrl}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sig,
+        "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US",
+      },
+      body,
+    });
+    const data = await res.json();
+    if (data.code !== "00000") throw new Error(data.msg);
+    orderId = data.data?.orderId;
+    qty = sizeUSD / price; // estimate — no wait for settlement
+    console.log(`✅ SNIPER ORDER PLACED — ${orderId} | est qty: ${qty.toFixed(8)}`);
   } catch (err) {
     console.log(`❌ SNIPER ORDER FAILED — ${err.message}`);
     return;
@@ -6074,17 +6174,23 @@ async function monitorSniperPositions() {
     _currentAccount = ACCOUNTS[0];
   }, 60 * 60 * 1000);
 
-  // New listing sniper — poll for new USDT symbols every 90 seconds
+  // New listing sniper — poll every 10 seconds for instant detection
   setInterval(async () => {
     _currentAccount = ACCOUNTS[0];
     await checkNewListings().catch(e => console.error("checkNewListings failed:", e.message));
-  }, 90 * 1000);
+  }, 10 * 1000);
 
-  // Sniper exit monitor — check TP/SL/timeout every 30 seconds
+  // Pre-announcement monitor — check BitGet announcement API every 5 minutes to get ahead of listings
+  setInterval(async () => {
+    _currentAccount = ACCOUNTS[0];
+    await checkUpcomingListings().catch(e => console.error("checkUpcomingListings failed:", e.message));
+  }, 5 * 60 * 1000);
+
+  // Sniper exit monitor — check TP/SL/timeout every 15 seconds
   setInterval(async () => {
     _currentAccount = ACCOUNTS[0];
     await monitorSniperPositions().catch(e => console.error("monitorSniperPositions failed:", e.message));
-  }, 30 * 1000);
+  }, 15 * 1000);
 
   // Check all symbols every 5 minutes (scalp entry scan + exit check) — 3 coins at a time
   setInterval(async () => {
