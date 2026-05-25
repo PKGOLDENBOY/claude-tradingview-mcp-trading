@@ -1304,7 +1304,7 @@ function calcPortfolioHeat(log, livePortfolioValue = null) {
   addPos(log.positions,         0.025, "scalp");    // ~2.5% scalp stop
   addPos(log.swingPositions,    SWING.stopLoss, "swing");
   addPos(log.breakoutPositions, 0.03,  "breakout"); // 3% breakout stop
-  addPos(log.sniperPositions,   SNIPER.stopLossPct, "sniper");
+  addPos(log.sniperPositions,   0.08, "sniper"); // SNIPER.stopLossPct — constant can't cross block scope
   const heatPct = portfolio > 0 ? (totalRisk / portfolio) * 100 : 0;
   return { heatPct: +heatPct.toFixed(2), totalRisk, positions, isOverheated: heatPct > 8 };
 }
