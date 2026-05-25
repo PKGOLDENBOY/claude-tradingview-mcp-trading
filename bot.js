@@ -340,14 +340,17 @@ function calcWinRate(trades, n = 10) {
   return { winRate: wins / recent.length, sample: recent.length, wins };
 }
 
-// Read historical P&L stats from trades.csv — used as fallback when log lacks enough closed trades
+// Read historical P&L stats from trades.csv — last 20 closed trades only.
+// All-time stats unfairly penalise the current strategy for exits made under old code.
 function loadCsvStats() {
   try {
     if (!existsSync(CSV_FILE)) return null;
-    const pnls = readFileSync(CSV_FILE, "utf8").split("\n")
+    const allPnls = readFileSync(CSV_FILE, "utf8").split("\n")
       .filter(l => l.includes(",SELL,") && l.includes(",LIVE,") && l.includes("P&L:") && !l.includes("[SNIPER]"))
       .map(l => { const m = l.match(/P&L: ([+-]?\d+\.?\d+)%/); return m ? parseFloat(m[1]) : null; })
       .filter(v => v !== null);
+    // Use only the most recent 20 trades — reflects current strategy quality
+    const pnls = allPnls.slice(-20);
     if (pnls.length < 2) return null;
     const wins = pnls.filter(p => p > 0.25);
     const losses = pnls.filter(p => p <= 0.25);
@@ -356,11 +359,11 @@ function loadCsvStats() {
     const al = losses.length ? losses.reduce((s, p) => s + p, 0) / losses.length : null;
     return {
       winRatePct: wr * 100,
-      winRateStr: `${wins.length}/${pnls.length} (${(wr * 100).toFixed(0)}%)`,
+      winRateStr: `${wins.length}/${pnls.length} (${(wr * 100).toFixed(0)}%) last 20`,
       avgWin: aw != null ? aw.toFixed(2) : null,
       avgLoss: al != null ? al.toFixed(2) : null,
       expectancy: pnls.length >= 2 ? (wr * (aw ?? 0) + (1 - wr) * (al ?? 0)).toFixed(2) : null,
-      totalTrades: pnls.length,
+      totalTrades: allPnls.length,
       totalWins: wins.length,
     };
   } catch { return null; }
@@ -3651,7 +3654,17 @@ if (process.argv.includes("--tax-summary")) {
     const todayExits = (log.trades || []).filter(t => t.type === "exit" && t.timestamp?.startsWith(today) && t.pnlUSD !== undefined);
     const todayTrades = (log.trades || []).filter(t => t.timestamp?.startsWith(today) && t.orderPlaced);
     const totalPnlUSD = todayExits.reduce((s, t) => s + (t.pnlUSD || 0), 0);
-    const winRate = calcWinRate(log.trades || [], 10);
+    const winRate = calcWinRate(log.trades || [], 10); // used for adaptive mode decisions
+    // Display win rate: last 20 trades within the past 7 days — reflects current strategy, not old code
+    const cutoff7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const recent7d = (log.trades || []).filter(t =>
+      t.type === "exit" && t.pnlPct !== undefined && t.orderPlaced === true &&
+      (t.timestamp || "") >= cutoff7d
+    ).slice(-20);
+    const displayWinRate = recent7d.length >= 2 ? (() => {
+      const w = recent7d.filter(t => t.pnlPct > 0.25).length;
+      return { wins: w, sample: recent7d.length, winRate: w / recent7d.length };
+    })() : winRate;
     const drawdown = checkDailyDrawdown(log);
     let usdtBalance = log.portfolioValue || 0;
     let liveAssets = [];
@@ -3778,8 +3791,8 @@ if (process.argv.includes("--tax-summary")) {
       todayPnlUSD: totalPnlUSD,
       todayGainUSD,
       unrealizedPnlUSD,
-      winRate: csvStats ? csvStats.winRateStr : (winRate ? `${winRate.wins}/${winRate.sample} (${(winRate.winRate * 100).toFixed(0)}%)` : "—"),
-      winRatePct: csvStats ? csvStats.winRatePct : (winRate ? winRate.winRate * 100 : null),
+      winRate: csvStats ? csvStats.winRateStr : (displayWinRate ? `${displayWinRate.wins}/${displayWinRate.sample} (${(displayWinRate.winRate * 100).toFixed(0)}%) 7d` : "—"),
+      winRatePct: csvStats ? csvStats.winRatePct : (displayWinRate ? displayWinRate.winRate * 100 : null),
       avgWin: csvStats ? csvStats.avgWin : (avgWin != null ? avgWin.toFixed(2) : null),
       avgLoss: csvStats ? csvStats.avgLoss : (avgLoss != null ? avgLoss.toFixed(2) : null),
       expectancy: csvStats ? csvStats.expectancy : expectancy,
