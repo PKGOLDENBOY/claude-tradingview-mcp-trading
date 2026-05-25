@@ -345,7 +345,7 @@ function loadCsvStats() {
   try {
     if (!existsSync(CSV_FILE)) return null;
     const pnls = readFileSync(CSV_FILE, "utf8").split("\n")
-      .filter(l => l.includes(",SELL,") && l.includes(",LIVE,") && l.includes("P&L:"))
+      .filter(l => l.includes(",SELL,") && l.includes(",LIVE,") && l.includes("P&L:") && !l.includes("[SNIPER]"))
       .map(l => { const m = l.match(/P&L: ([+-]?\d+\.?\d+)%/); return m ? parseFloat(m[1]) : null; })
       .filter(v => v !== null);
     if (pnls.length < 2) return null;
@@ -1304,6 +1304,7 @@ function calcPortfolioHeat(log, livePortfolioValue = null) {
   addPos(log.positions,         0.025, "scalp");    // ~2.5% scalp stop
   addPos(log.swingPositions,    SWING.stopLoss, "swing");
   addPos(log.breakoutPositions, 0.03,  "breakout"); // 3% breakout stop
+  addPos(log.sniperPositions,   SNIPER.stopLossPct, "sniper");
   const heatPct = portfolio > 0 ? (totalRisk / portfolio) * 100 : 0;
   return { heatPct: +heatPct.toFixed(2), totalRisk, positions, isOverheated: heatPct > 8 };
 }
@@ -1975,6 +1976,7 @@ async function reconcilePositions(log) {
           quantity: qty.toFixed(6),
           orderId: "reconciled",
           entryType: "reconciled",
+          slPct: 0.04, tpPct: 0.08,
         };
         found++;
       }
@@ -2002,11 +2004,14 @@ async function sweepDust(log) {
     const priceData = await priceRes.json();
     const prices = Object.fromEntries((priceData.data || []).map(t => [t.symbol, parseFloat(t.lastPr)]));
 
-    const trackedCoins = new Set(
-      Object.entries(log.positions || {})
+    const trackedCoins = new Set([
+      ...Object.entries(log.positions || {})
         .filter(([, p]) => p && p.open)
-        .map(([sym]) => sym.replace("USDT", ""))
-    );
+        .map(([sym]) => sym.replace("USDT", "")),
+      ...Object.entries(log.sniperPositions || {})
+        .filter(([, p]) => p && p.open)
+        .map(([sym]) => sym.replace("USDT", "")),
+    ]);
 
     let swept = 0;
     for (const asset of data.data) {
@@ -2020,7 +2025,7 @@ async function sweepDust(log) {
       const price = prices[symbol];
       if (!price) continue;
       const usdValue = qty * price;
-      if (usdValue < 0.50 || usdValue >= 10) continue; // only sweep $0.50–$10 dust
+      if (usdValue < 1.00 || usdValue >= 10) continue; // only sweep $1–$10 dust (BitGet min order ~$1)
 
       try {
         const precision = await getQuantityPrecision(symbol);
@@ -2223,7 +2228,31 @@ function writeTradeCsv(logEntry) {
     ? `Claude ${logEntry.claudeAnalysis.action} ${logEntry.claudeAnalysis.confidence}%: ${logEntry.claudeAnalysis.reasoning}`
     : null;
 
-  if (logEntry.type === "exit") {
+  if (logEntry.tradeType === "sniper") {
+    const pnlStr = logEntry.pnlPct !== undefined
+      ? ` P&L: ${logEntry.pnlPct >= 0 ? "+" : ""}${logEntry.pnlPct.toFixed(2)}%`
+      : "";
+    if (logEntry.type === "exit") {
+      const val = (parseFloat(logEntry.quantity || 0) * logEntry.price);
+      side = "SELL";
+      quantity = logEntry.quantity != null ? String(logEntry.quantity) : "";
+      totalUSD = val > 0 ? val.toFixed(2) : "";
+      fee = val > 0 ? (val * getFeePct()).toFixed(4) : "";
+      netAmount = val > 0 ? (val - val * getFeePct()).toFixed(2) : "";
+      orderId = logEntry.orderId || "";
+      mode = "LIVE";
+      notes = `[SNIPER] Exit: ${logEntry.exitReasons?.join("; ")}${pnlStr}`;
+    } else {
+      side = "BUY";
+      quantity = (logEntry.tradeSize / logEntry.price).toFixed(6);
+      totalUSD = logEntry.tradeSize.toFixed(2);
+      fee = (logEntry.tradeSize * getFeePct()).toFixed(4);
+      netAmount = (logEntry.tradeSize - logEntry.tradeSize * getFeePct()).toFixed(2);
+      orderId = logEntry.orderId || "";
+      mode = "LIVE";
+      notes = `[SNIPER] Entry: TP +${(SNIPER.takeProfitPct * 100).toFixed(0)}% | SL -${(SNIPER.stopLossPct * 100).toFixed(0)}% | ${SNIPER.maxHoldMin}min`;
+    }
+  } else if (logEntry.type === "exit") {
     const pnlStr = logEntry.pnlPct !== undefined
       ? ` P&L: ${logEntry.pnlPct >= 0 ? "+" : ""}${logEntry.pnlPct.toFixed(2)}%`
       : "";
@@ -2242,7 +2271,7 @@ function writeTradeCsv(logEntry) {
       mode = logEntry.paperTrading ? "PAPER" : "LIVE";
       notes = claudeTag ?? `Exit: ${logEntry.exitReasons?.join("; ")}${pnlStr}`;
     }
-  } else if (!logEntry.allPass) {
+  } else if (!logEntry.allPass && Array.isArray(logEntry.conditions)) {
     const failed = logEntry.conditions
       .filter((c) => !c.pass)
       .map((c) => c.label)
@@ -3684,6 +3713,8 @@ if (process.argv.includes("--tax-summary")) {
     // Add open sniper positions
     for (const [sym, pos] of Object.entries(log.sniperPositions || {})) {
       if (!pos?.open) continue;
+      if (seenSyms.has(sym)) continue;
+      seenSyms.add(sym);
       const baseCoin = sym.replace("USDT", "");
       const snapPrice = coinSnapshots[sym]?.price ?? 0;
       const qty = parseFloat(pos.quantity || 0);
@@ -5982,7 +6013,16 @@ async function monitorSniperPositions() {
   } catch { return; }
 
   for (const [symbol, pos] of open) {
-    const price = prices[symbol];
+    let price = prices[symbol];
+    if (!price) {
+      // Brand-new listings may not appear in the bulk ticker yet — try individual endpoint
+      try {
+        const r = await fetch(`https://api.bitget.com/api/v2/spot/market/tickers?symbol=${symbol}`, { signal: AbortSignal.timeout(3000) });
+        const d = await r.json();
+        const t = (d.data || [])[0];
+        if (t) price = parseFloat(t.lastPr);
+      } catch {}
+    }
     if (!price) continue;
 
     const pnlPct  = (price - pos.entryPrice) / pos.entryPrice * 100;
@@ -6018,7 +6058,7 @@ async function monitorSniperPositions() {
     const exitLog = {
       timestamp: new Date().toISOString(), type: "exit", symbol,
       timeframe: "SNIPER", price, entryPrice: pos.entryPrice,
-      pnlPct: parseFloat(pnlPct.toFixed(3)), pnlUSD,
+      quantity: qty, pnlPct: parseFloat(pnlPct.toFixed(3)), pnlUSD,
       exitReasons: [reason], orderPlaced: true, tradeType: "sniper", paperTrading: false,
     };
     freshLog.trades.push(exitLog);
