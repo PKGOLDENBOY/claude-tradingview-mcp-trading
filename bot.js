@@ -3681,6 +3681,20 @@ if (process.argv.includes("--tax-summary")) {
       openPositionValue += usdVal;
       openPositions.push({ coin: asset.coin, sym, qty, usdVal, price, entryPrice: null, pnlPct: null, pnlUSD: null, entryType: "untracked" });
     }
+    // Add open sniper positions
+    for (const [sym, pos] of Object.entries(log.sniperPositions || {})) {
+      if (!pos?.open) continue;
+      const baseCoin = sym.replace("USDT", "");
+      const snapPrice = coinSnapshots[sym]?.price ?? 0;
+      const qty = parseFloat(pos.quantity || 0);
+      if (qty < 0.000001 || snapPrice < 0.000001) continue;
+      const usdVal = qty * snapPrice;
+      const pnlPct = pos.entryPrice ? ((snapPrice - pos.entryPrice) / pos.entryPrice) * 100 : null;
+      const pnlUSD = pos.entryPrice ? qty * (snapPrice - pos.entryPrice) : null;
+      const minsOpen = pos.entryTime ? Math.round((Date.now() - new Date(pos.entryTime).getTime()) / 60000) : null;
+      const minsLeft = pos.maxHoldUntil ? Math.max(0, Math.round((new Date(pos.maxHoldUntil).getTime() - Date.now()) / 60000)) : null;
+      openPositions.push({ coin: baseCoin, sym, qty, usdVal, price: snapPrice, entryPrice: pos.entryPrice, pnlPct, pnlUSD, minsOpen, entryType: "sniper", minsLeft, tpPct: SNIPER.takeProfitPct, slPct: SNIPER.stopLossPct });
+    }
     const portfolioValue = usdtBalance + openPositionValue;
     _livePortfolioValue = portfolioValue; // keep heat gate in sync with dashboard
     const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
@@ -3760,8 +3774,10 @@ if (process.argv.includes("--tax-summary")) {
           const progress = hasEntry && p.pnlPct != null ? Math.min(100, Math.max(0, ((p.pnlPct + slPct) / range) * 100)) : 50;
           const barColor = p.pnlPct != null ? (p.pnlPct >= 0 ? "#00d4a0" : "#ff4d6a") : "#4f8dff";
           const timeStr = p.minsOpen != null ? (p.minsOpen >= 60 ? `${Math.floor(p.minsOpen/60)}h ${p.minsOpen%60}m` : `${p.minsOpen}m`) : "—";
-          const typeLabel = p.entryType === "momentum" ? "MOMENTUM" : p.entryType === "snapback" ? "SNAP-BACK" : p.entryType === "untracked" ? "LIVE" : "SCALP";
-          const stopLabel = p.breakEvenActive ? `Break-even stop $${p.trailStop?.toFixed(4) ?? "—"}` : hasEntry ? `Stop-loss $${slPrice} (-${slPct.toFixed(0)}%)` : "Entry untracked";
+          const typeLabel = p.entryType === "sniper" ? "🎯 SNIPER" : p.entryType === "momentum" ? "MOMENTUM" : p.entryType === "snapback" ? "SNAP-BACK" : p.entryType === "untracked" ? "LIVE" : "SCALP";
+          const stopLabel = p.entryType === "sniper"
+            ? `TP +${((p.tpPct||0.25)*100).toFixed(0)}% | SL -${((p.slPct||0.08)*100).toFixed(0)}% | ${p.minsLeft != null ? p.minsLeft + "min left" : "—"}`
+            : p.breakEvenActive ? `Break-even stop $${p.trailStop?.toFixed(4) ?? "—"}` : hasEntry ? `Stop-loss $${slPrice} (-${slPct.toFixed(0)}%)` : "Entry untracked";
           return `<a href="/coin?symbol=${p.sym}&pin=${pin}" style="display:block;padding:16px 18px;border-bottom:1px solid #1a1f2e;text-decoration:none;color:inherit">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
               <div style="display:flex;align-items:center;gap:10px">
@@ -5673,6 +5689,219 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     writeTradeCsv(entryLog);
   }
 
+// ─── New Listing Sniper ──────────────────────────────────────────────────────
+// Polls BitGet every 90s for newly listed USDT pairs. Buys immediately,
+// exits at +25% TP, -8% SL, or 25-minute hard timeout.
+
+let _sniperKnownSymbols = null;
+
+const SNIPER = {
+  portfolioPct: 0.10,  // 10% of portfolio per snipe
+  maxSizeUSD:   30,    // hard cap $30 per trade
+  takeProfitPct: 0.25, // +25% target
+  stopLossPct:   0.08, // -8% stop
+  maxHoldMin:    25,   // kill after 25 min
+  maxPositions:  2,    // max 2 sniper positions concurrently
+  maxPumpPct:    0.80, // skip if already pumped 80%+
+  minUsdtNeeded: 15,   // need at least $15 USDT free
+};
+
+async function initSniperSymbols() {
+  try {
+    const res = await fetch("https://api.bitget.com/api/v2/spot/public/symbols");
+    const data = await res.json();
+    _sniperKnownSymbols = new Set(
+      (data.data || [])
+        .filter(s => s.symbol.endsWith("USDT") && s.status === "online")
+        .map(s => s.symbol)
+    );
+    console.log(`🎯 Listing sniper ready — watching ${_sniperKnownSymbols.size} existing symbols`);
+  } catch (e) {
+    console.log(`⚠️  Sniper init failed: ${e.message}`);
+  }
+}
+
+async function checkNewListings() {
+  if (CONFIG.paperTrading || !_sniperKnownSymbols || acct().exchange !== "bitget") return;
+  try {
+    const res = await fetch("https://api.bitget.com/api/v2/spot/public/symbols", { signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    const current = (data.data || []).filter(s =>
+      s.symbol.endsWith("USDT") &&
+      s.status === "online" &&
+      !/UP|DOWN|BEAR|BULL|USDC|TUSD|BUSD|DAI|USD1|FDUSD|RLUSD|PAXG|XAUT/.test(s.symbol)
+    );
+    const newListings = current.filter(s => !_sniperKnownSymbols.has(s.symbol));
+    current.forEach(s => _sniperKnownSymbols.add(s.symbol));
+    for (const listing of newListings) {
+      console.log(`\n🆕 NEW LISTING DETECTED: ${listing.symbol}`);
+      pushSignal(listing.symbol, "BLOCKED", `🆕 New listing detected — attempting sniper buy`);
+      const log = loadLog();
+      await sniperBuy(listing.symbol, log).catch(e => console.log(`⚠️  Sniper buy ${listing.symbol} failed: ${e.message}`));
+    }
+  } catch { /* non-critical */ }
+}
+
+async function sniperBuy(symbol, log) {
+  const openSnipers = Object.entries(log.sniperPositions || {}).filter(([, p]) => p?.open).length;
+  if (openSnipers >= SNIPER.maxPositions) {
+    console.log(`🚫 Sniper full (${openSnipers}/${SNIPER.maxPositions}). Skipping ${symbol}.`);
+    return;
+  }
+
+  // Get live price
+  const tickRes = await fetch(`https://api.bitget.com/api/v2/spot/market/tickers?symbol=${symbol}`, { signal: AbortSignal.timeout(5000) });
+  const tickData = await tickRes.json();
+  const ticker = (tickData.data || [])[0];
+  if (!ticker) { console.log(`⚠️  No ticker for ${symbol}`); return; }
+
+  const price = parseFloat(ticker.lastPr);
+  const openPrice = parseFloat(ticker.open24h || ticker.openUtc0 || price);
+  if (!price || price <= 0) { console.log(`⚠️  Invalid price for ${symbol}`); return; }
+
+  // Skip if already a massive pump — we'd be exit liquidity
+  const pumpedPct = openPrice > 0 ? (price - openPrice) / openPrice : 0;
+  if (pumpedPct > SNIPER.maxPumpPct) {
+    console.log(`🚫 Sniper skip — ${symbol} already pumped ${(pumpedPct * 100).toFixed(0)}% (limit: ${(SNIPER.maxPumpPct * 100).toFixed(0)}%)`);
+    pushSignal(symbol, "BLOCKED", `New listing but already +${(pumpedPct * 100).toFixed(0)}% — exit liquidity risk`);
+    return;
+  }
+
+  // Need enough free USDT
+  const usdtBal = await getBalance("USDT").catch(() => 0);
+  if (usdtBal < SNIPER.minUsdtNeeded) {
+    console.log(`🚫 Sniper skip — only $${usdtBal.toFixed(2)} USDT free (need $${SNIPER.minUsdtNeeded})`);
+    return;
+  }
+
+  const portfolio = _livePortfolioValue || log.portfolioValue || acct().portfolioValue;
+  const sizeUSD = Math.min(portfolio * SNIPER.portfolioPct, SNIPER.maxSizeUSD, usdtBal * 0.90);
+  if (sizeUSD < 5) { console.log(`⚠️  Sniper size too small ($${sizeUSD.toFixed(2)}). Skipping.`); return; }
+
+  console.log(`\n🎯 SNIPER BUY — ${symbol} @ $${price.toFixed(8)}`);
+  console.log(`   Size: $${sizeUSD.toFixed(2)} | Pump so far: +${(pumpedPct * 100).toFixed(1)}%`);
+  console.log(`   TP: $${(price * (1 + SNIPER.takeProfitPct)).toFixed(8)} (+${(SNIPER.takeProfitPct * 100).toFixed(0)}%)`);
+  console.log(`   SL: $${(price * (1 - SNIPER.stopLossPct)).toFixed(8)} (-${(SNIPER.stopLossPct * 100).toFixed(0)}%)`);
+  console.log(`   Timeout: ${SNIPER.maxHoldMin} minutes`);
+
+  let qty = sizeUSD / price;
+  let orderId = null;
+  try {
+    const order = await placeBitGetOrder(symbol, "buy", sizeUSD, price);
+    qty = order.confirmedQty ?? qty;
+    orderId = order.orderId;
+    console.log(`✅ SNIPER ORDER PLACED — ${orderId} | qty: ${qty.toFixed(8)}`);
+  } catch (err) {
+    console.log(`❌ SNIPER ORDER FAILED — ${err.message}`);
+    return;
+  }
+
+  if (!log.sniperPositions) log.sniperPositions = {};
+  log.sniperPositions[symbol] = {
+    open: true,
+    entryPrice: price,
+    quantity: String(qty),
+    entryTime: new Date().toISOString(),
+    orderId,
+    takeProfitPrice: price * (1 + SNIPER.takeProfitPct),
+    stopLossPrice:   price * (1 - SNIPER.stopLossPct),
+    maxHoldUntil:    new Date(Date.now() + SNIPER.maxHoldMin * 60 * 1000).toISOString(),
+  };
+
+  const entryLog = {
+    timestamp: new Date().toISOString(), type: "entry", symbol,
+    timeframe: "SNIPER", price, tradeSize: sizeUSD,
+    indicators: { pumpedPct: parseFloat((pumpedPct * 100).toFixed(1)) },
+    orderPlaced: true, orderId, paperTrading: false, tradeType: "sniper",
+  };
+  log.trades.push(entryLog);
+  saveLog(log);
+  writeTradeCsv(entryLog);
+  pushSignal(symbol, "ENTRY", `🎯 Sniper @ $${price.toFixed(8)} | TP +${(SNIPER.takeProfitPct * 100).toFixed(0)}% | SL -${(SNIPER.stopLossPct * 100).toFixed(0)}% | ${SNIPER.maxHoldMin}min timeout`);
+
+  sendEmail(
+    `🎯 SNIPER — ${symbol.replace("USDT", "")} new listing @ $${price.toFixed(8)}`,
+    `<h2 style="color:#4f8dff">🎯 New Listing Sniped</h2>
+     <table style="font-size:16px;line-height:1.8">
+       <tr><td><b>Symbol</b></td><td>${symbol}</td></tr>
+       <tr><td><b>Entry</b></td><td>$${price.toFixed(8)}</td></tr>
+       <tr><td><b>Size</b></td><td>$${sizeUSD.toFixed(2)}</td></tr>
+       <tr><td><b>Already pumped</b></td><td>+${(pumpedPct * 100).toFixed(1)}%</td></tr>
+       <tr><td><b>Take profit</b></td><td>$${(price * (1 + SNIPER.takeProfitPct)).toFixed(8)} (+${(SNIPER.takeProfitPct * 100).toFixed(0)}%)</td></tr>
+       <tr><td><b>Stop loss</b></td><td>$${(price * (1 - SNIPER.stopLossPct)).toFixed(8)} (-${(SNIPER.stopLossPct * 100).toFixed(0)}%)</td></tr>
+       <tr><td><b>Timeout</b></td><td>${SNIPER.maxHoldMin} minutes</td></tr>
+     </table>`
+  );
+}
+
+async function monitorSniperPositions() {
+  if (CONFIG.paperTrading || acct().exchange !== "bitget") return;
+  const log = loadLog();
+  const open = Object.entries(log.sniperPositions || {}).filter(([, p]) => p?.open);
+  if (open.length === 0) return;
+
+  let prices = {};
+  try {
+    const res = await fetch("https://api.bitget.com/api/v2/spot/market/tickers", { signal: AbortSignal.timeout(5000) });
+    const data = await res.json();
+    (data.data || []).forEach(t => { prices[t.symbol] = parseFloat(t.lastPr); });
+  } catch { return; }
+
+  for (const [symbol, pos] of open) {
+    const price = prices[symbol];
+    if (!price) continue;
+
+    const pnlPct  = (price - pos.entryPrice) / pos.entryPrice * 100;
+    const ageMin  = (Date.now() - new Date(pos.entryTime).getTime()) / 60000;
+    const hitTP   = price >= pos.takeProfitPrice;
+    const hitSL   = price <= pos.stopLossPrice;
+    const timedOut = Date.now() >= new Date(pos.maxHoldUntil).getTime();
+
+    if (!hitTP && !hitSL && !timedOut) {
+      console.log(`🎯 Sniper ${symbol.replace("USDT", "")} — $${price.toFixed(8)} | P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% | ${ageMin.toFixed(1)}min`);
+      continue;
+    }
+
+    const reason = hitTP    ? `TP +${pnlPct.toFixed(2)}% — target hit`
+                 : hitSL    ? `SL ${pnlPct.toFixed(2)}% — stopped out`
+                 :            `Timeout ${ageMin.toFixed(1)}min (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)`;
+    console.log(`\n${hitTP ? "💰" : "🔴"} SNIPER EXIT — ${symbol} | ${reason}`);
+
+    try {
+      await placeBitGetOrder(symbol, "sell", null, price, pos.quantity);
+    } catch (err) {
+      console.log(`❌ Sniper sell failed: ${err.message} — will retry next cycle`);
+      continue;
+    }
+
+    const pnlUSD = (price - pos.entryPrice) * parseFloat(pos.quantity);
+    log.sniperPositions[symbol] = { ...pos, open: false };
+
+    const exitLog = {
+      timestamp: new Date().toISOString(), type: "exit", symbol,
+      timeframe: "SNIPER", price, entryPrice: pos.entryPrice,
+      pnlPct: parseFloat(pnlPct.toFixed(3)), pnlUSD,
+      exitReasons: [reason], orderPlaced: true, tradeType: "sniper", paperTrading: false,
+    };
+    log.trades.push(exitLog);
+    saveLog(log);
+    writeTradeCsv(exitLog);
+    pushSignal(symbol, pnlUSD >= 0 ? "EXIT_WIN" : "EXIT_LOSS", `🎯 Sniper exit: ${reason}`);
+
+    sendEmail(
+      `${pnlUSD >= 0 ? "💰" : "🔴"} SNIPER EXIT — ${symbol.replace("USDT", "")} | ${pnlUSD >= 0 ? "+" : ""}$${pnlUSD.toFixed(2)}`,
+      `<h2>${pnlUSD >= 0 ? "💰 Profit" : "🔴 Loss"}</h2>
+       <table style="font-size:16px;line-height:1.8">
+         <tr><td><b>Symbol</b></td><td>${symbol}</td></tr>
+         <tr><td><b>Exit price</b></td><td>$${price.toFixed(8)}</td></tr>
+         <tr><td><b>P&L</b></td><td>${pnlUSD >= 0 ? "+" : ""}$${pnlUSD.toFixed(2)} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)</td></tr>
+         <tr><td><b>Reason</b></td><td>${reason}</td></tr>
+         <tr><td><b>Time held</b></td><td>${ageMin.toFixed(1)} min</td></tr>
+       </table>`
+    );
+  }
+}
+
   // Merge any coins the user added via the dashboard (persisted in log.customWatchlist)
   function mergeCustomWatchlist() {
     try {
@@ -5712,6 +5941,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           await reconcilePositions(startLog).catch(e => console.error("reconcilePositions failed:", e.message));
           await sweepDust(startLog).catch(e => console.error("sweepDust failed:", e.message));
           saveLog(startLog);
+          await initSniperSymbols().catch(e => console.error("initSniperSymbols failed:", e.message));
           sendEmail(
             "🤖 Bot Online — Trading Started",
             `<h2>🤖 Bot is now live</h2>
@@ -5843,6 +6073,18 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
     _currentAccount = ACCOUNTS[0];
   }, 60 * 60 * 1000);
+
+  // New listing sniper — poll for new USDT symbols every 90 seconds
+  setInterval(async () => {
+    _currentAccount = ACCOUNTS[0];
+    await checkNewListings().catch(e => console.error("checkNewListings failed:", e.message));
+  }, 90 * 1000);
+
+  // Sniper exit monitor — check TP/SL/timeout every 30 seconds
+  setInterval(async () => {
+    _currentAccount = ACCOUNTS[0];
+    await monitorSniperPositions().catch(e => console.error("monitorSniperPositions failed:", e.message));
+  }, 30 * 1000);
 
   // Check all symbols every 5 minutes (scalp entry scan + exit check) — 3 coins at a time
   setInterval(async () => {
