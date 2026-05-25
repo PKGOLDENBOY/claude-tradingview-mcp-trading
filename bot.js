@@ -3806,6 +3806,8 @@ if (process.argv.includes("--tax-summary")) {
     const pf = d.portfolioValue;
     const pnlColor = d.todayPnlUSD >= 0 ? "#00d4a0" : "#ff4d6a";
     const regColor = d.regime.includes("BEAR") ? "#ff4d6a" : d.regime.includes("BULL") ? "#00d4a0" : "#ffb800";
+    // ── tab helper ──────────────────────────────────────────────────
+    // (full tabbed UI built below — legacy variables kept for shared HTML fragments)
 
     const posHTML = d.openPositions.length === 0
       ? `<div style="padding:24px;text-align:center;color:#4a5272;font-size:14px">All cash — no open positions</div>`
@@ -4082,6 +4084,20 @@ if (process.argv.includes("--tax-summary")) {
     const wrNum = d.winRatePct;
     const wrColor = wrNum === null ? "#4a5272" : wrNum >= 60 ? "#00d4a0" : wrNum >= 40 ? "#ffb800" : "#ff4d6a";
 
+    // ── Daily goal block (reusable) ──────────────────────────────
+    const goalPct = 3;
+    const goalUSD = pf * goalPct / 100;
+    const earnedUSD = Math.max(0, d.todayGainUSD || 0);
+    const goalProgress = Math.min(100, Math.max(0, (earnedUSD / goalUSD) * 100));
+    const goalRemaining = Math.max(0, goalUSD - earnedUSD);
+    const goalColor = goalProgress >= 100 ? "#00d4a0" : goalProgress >= 50 ? "#ffb800" : "#4f8dff";
+    const goalIcon = goalProgress >= 100 ? "🏆" : goalProgress >= 75 ? "🔥" : goalProgress >= 50 ? "⚡" : "🎯";
+    const openGain = d.unrealizedPnlUSD ?? 0;
+    const realizedGain = d.todayPnlUSD ?? 0;
+    const goalSubLabel = goalProgress >= 100
+      ? "Goal hit — bot keeps trading"
+      : `+$${earnedUSD.toFixed(2)} of +$${goalUSD.toFixed(2)} · open ${openGain>=0?"+":""}$${openGain.toFixed(2)} · closed ${realizedGain>=0?"+":""}$${realizedGain.toFixed(2)}`;
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4090,8 +4106,19 @@ if (process.argv.includes("--tax-summary")) {
 <title>AlphaBot</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#07090f;color:#f0f2f7;max-width:430px;margin:0 auto;padding-bottom:48px}
-.sec{margin:14px 16px 0}
+html,body{height:100%}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#07090f;color:#f0f2f7;max-width:430px;margin:0 auto;display:flex;flex-direction:column;height:100%}
+/* ── Tabs ── */
+.tab-content{display:none;flex:1;overflow-y:auto;padding-bottom:80px}
+.tab-content.active{display:block}
+/* ── Bottom nav ── */
+#bottom-nav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#0a0c14;border-top:1px solid #1a1f2e;display:flex;z-index:100;padding-bottom:env(safe-area-inset-bottom,0)}
+.nav-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:8px 0 6px;cursor:pointer;border:none;background:transparent;color:#4a5272;font-family:inherit;font-size:10px;font-weight:600;letter-spacing:.02em;gap:3px;transition:color .15s}
+.nav-btn svg{width:22px;height:22px;stroke-width:1.8;fill:none;stroke:currentColor}
+.nav-btn.active{color:#4f8dff}
+.nav-btn.active svg{stroke:#4f8dff}
+/* ── Cards / rows ── */
+.sec{margin:12px 16px 0}
 .sec-title{font-size:11px;font-weight:700;color:#4a5272;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;padding:0 2px}
 .card{background:#0e1117;border:1px solid #1a1f2e;border-radius:18px;overflow:hidden}
 .card>*:last-child{border-bottom:none!important}
@@ -4102,180 +4129,164 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .btn-blue{background:linear-gradient(135deg,#4f8dff,#2563eb);color:#fff}
 .btn-red{background:linear-gradient(135deg,#ff4d6a,#dc2626);color:#fff}
 .btn-grey{background:#0e1117;color:#94a3b8;border:1px solid #1a1f2e}
-.chip{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600}
 .dot{width:6px;height:6px;border-radius:50%;background:#00d4a0;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 .bar-track{background:#1a1f2e;border-radius:99px;height:5px;overflow:hidden;margin-top:5px}
 .bar-fill{height:100%;border-radius:99px}
+/* ── Stat grid ── */
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 16px 0}
+.stat-card{background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:13px}
+.stat-label{font-size:10px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+.stat-val{font-size:22px;font-weight:800}
+.stat-sub{font-size:11px;color:#4a5272;margin-top:2px}
 </style>
 </head>
 <body>
 
-<!-- ── HEADER ─────────────────────────────────────────────────── -->
-<div style="padding:18px 18px 0;display:flex;align-items:center;justify-content:space-between">
+<!-- ══════════════ TAB: PORTFOLIO ══════════════ -->
+<div id="tab-portfolio" class="tab-content active">
+
+<!-- Header -->
+<div style="padding:16px 18px 0;display:flex;align-items:center;justify-content:space-between">
   <div style="display:flex;align-items:center;gap:10px">
-    <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#4f8dff,#00d4a0);display:flex;align-items:center;justify-content:center;font-size:18px">📈</div>
+    <div style="width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#4f8dff,#00d4a0);display:flex;align-items:center;justify-content:center;font-size:17px">📈</div>
     <div>
-      <div style="font-size:17px;font-weight:800;letter-spacing:-.3px">AlphaBot</div>
-      <div style="font-size:11px;color:#4a5272">Updated ${d.updatedAt}</div>
+      <div style="font-size:16px;font-weight:800;letter-spacing:-.3px">AlphaBot</div>
+      <div style="font-size:10px;color:#4a5272">${d.updatedAt}</div>
     </div>
   </div>
-  <div style="text-align:right">
-    <div style="display:flex;align-items:center;gap:6px;background:#00d4a015;border:1px solid #00d4a030;border-radius:99px;padding:5px 10px;font-size:11px;font-weight:600;color:#00d4a0"><span class="dot"></span>LIVE</div>
-    ${d.btcPrice ? `<div style="font-size:11px;color:#4a5272;margin-top:4px;text-align:right">BTC $${Number(d.btcPrice).toLocaleString()}</div>` : ""}
+  <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+    <div style="display:flex;align-items:center;gap:5px;background:#00d4a015;border:1px solid #00d4a030;border-radius:99px;padding:4px 10px;font-size:10px;font-weight:700;color:#00d4a0"><span class="dot"></span>LIVE</div>
+    ${d.btcPrice ? `<div style="font-size:10px;color:#4a5272">BTC $${Number(d.btcPrice).toLocaleString()}</div>` : ""}
   </div>
 </div>
 
-<!-- ── SEARCH ─────────────────────────────────────────────────── -->
-<div style="margin:12px 16px 0">
-  <form method="GET" action="/coin" onsubmit="var v=this.symbol.value.trim().toUpperCase();if(!v)return false;if(!v.endsWith('USDT'))this.symbol.value=v+'USDT';">
-    <input type="hidden" name="pin" value="${pin}">
-    <div style="display:flex;gap:8px">
-      <input type="text" name="symbol" placeholder="Search any coin — BTC, PEPE, DOGE..." autocomplete="off" autocapitalize="characters" spellcheck="false"
-        style="flex:1;background:#0e1117;border:1px solid #1a1f2e;border-radius:12px;padding:12px 16px;color:#f0f2f7;font-size:15px;outline:none;font-family:inherit">
-      <button type="submit" style="background:linear-gradient(135deg,#4f8dff,#2563eb);color:#fff;border:none;border-radius:12px;padding:12px 18px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit">Go</button>
-    </div>
-  </form>
-</div>
-
-<!-- ── SCAN PULSE ─────────────────────────────────────────────── -->
-<div style="margin:8px 16px 0;padding:9px 14px;background:#0e1117;border:1px solid #1a1f2e;border-radius:12px;display:flex;justify-content:space-between;align-items:center;gap:8px">
-  <div style="font-size:11px;color:#4a5272;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-    <span>Scanned: <span id="last-scan-ago" style="color:#94a3b8">${d.lastScanMs ? "just now" : "starting up…"}</span></span>
-    <span style="color:#252a3a">·</span>
-    <span>${d.coinsScanned || 0} coins</span>
-    <span style="color:#252a3a">·</span>
-    <span style="color:${d.nearEntry > 0 ? "#ffb800" : "#4a5272"};font-weight:${d.nearEntry > 0 ? "700" : "400"}">${d.nearEntry} near entry</span>
-  </div>
-  <div style="font-size:11px;white-space:nowrap;flex-shrink:0">
-    <span style="color:#4a5272">Next </span><span id="next-scan" style="color:#4f8dff;font-weight:700">${d.lastScanMs ? "—" : "~5m"}</span>
+<!-- Portfolio hero -->
+<div style="margin:12px 16px 0;background:linear-gradient(135deg,#0d1a33,#091020);border:1px solid #1a2a4a;border-radius:22px;padding:20px">
+  <div style="font-size:10px;color:#4a6494;text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px">Total Balance</div>
+  <div style="font-size:40px;font-weight:800;letter-spacing:-2px;line-height:1.1">$${Number(pf).toFixed(2)}</div>
+  <div style="font-size:13px;font-weight:600;color:${(d.todayGainUSD??0)>=0?"#00d4a0":"#ff4d6a"};margin:6px 0 16px">${(d.todayGainUSD??0)>=0?"+":""}$${Math.abs(d.todayGainUSD??0).toFixed(2)} today <span style="font-size:10px;opacity:.65">· open ${openGain>=0?"+":""}$${openGain.toFixed(2)} · closed ${realizedGain>=0?"+":""}$${realizedGain.toFixed(2)}</span></div>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+    <div><div style="font-size:9px;color:#4a6494;margin-bottom:2px">CASH</div><div style="font-size:13px;font-weight:700">$${Number(d.usdtBalance).toFixed(2)}</div></div>
+    <div><div style="font-size:9px;color:#4a6494;margin-bottom:2px">POSITIONS</div><div style="font-size:13px;font-weight:700">${d.openPositions.length}/4</div></div>
+    <div><div style="font-size:9px;color:#4a6494;margin-bottom:2px">TODAY</div><div style="font-size:13px;font-weight:700">${d.todayTrades} trades</div></div>
+    <div><div style="font-size:9px;color:#4a6494;margin-bottom:2px">LAST</div><div style="font-size:13px;font-weight:700" id="last-trade-ago">—</div></div>
   </div>
 </div>
 
-<!-- ── PORTFOLIO HERO ─────────────────────────────────────────── -->
-<div style="margin:14px 16px 0;background:linear-gradient(135deg,#0d1a33,#091020);border:1px solid #1a2a4a;border-radius:22px;padding:22px">
-  <div style="font-size:11px;color:#4a5272;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Total Portfolio</div>
-  <div style="font-size:44px;font-weight:800;letter-spacing:-2px;line-height:1;margin-bottom:4px">$${Number(pf).toFixed(2)}</div>
-  <div style="font-size:13px;font-weight:600;color:${(d.todayGainUSD??0) >= 0 ? "#00d4a0" : "#ff4d6a"};margin-bottom:18px">${(d.todayGainUSD??0) >= 0 ? "+" : ""}$${Math.abs(d.todayGainUSD??0).toFixed(2)} today <span style="font-size:11px;opacity:.7">(open ${(d.unrealizedPnlUSD??0)>=0?"+":""}$${(d.unrealizedPnlUSD??0).toFixed(2)} · closed ${(d.todayPnlUSD??0)>=0?"+":""}$${(d.todayPnlUSD??0).toFixed(2)})</span></div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 20px">
-    <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">CASH</div><div style="font-size:14px;font-weight:700">$${Number(d.usdtBalance).toFixed(2)}</div></div>
-    <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">POSITIONS</div><div style="font-size:14px;font-weight:700">${d.openPositions.length} / 4</div></div>
-    <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">TODAY TRADES</div><div style="font-size:14px;font-weight:700">${d.todayTrades}</div></div>
-    <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">LAST TRADE</div><div style="font-size:14px;font-weight:700" id="last-trade-ago">${d.lastTradeAt ? "—" : "—"}</div></div>
-  </div>
-</div>
-
-<!-- ── DAILY GOAL ──────────────────────────────────────────────── -->
-${(() => {
-  const goalPct = 3;
-  const goalUSD = pf * goalPct / 100;
-  const earnedUSD = Math.max(0, d.todayGainUSD || 0);
-  const progress = Math.min(100, Math.max(0, (earnedUSD / goalUSD) * 100));
-  const remaining = Math.max(0, goalUSD - earnedUSD);
-  const goalColor = progress >= 100 ? "#00d4a0" : progress >= 50 ? "#ffb800" : "#4f8dff";
-  const goalIcon = progress >= 100 ? "🏆" : progress >= 75 ? "🔥" : progress >= 50 ? "⚡" : "🎯";
-  const openGain = d.unrealizedPnlUSD ?? 0;
-  const realizedGain = d.todayPnlUSD ?? 0;
-  const subLabel = progress >= 100
-    ? "Goal hit — bot keeps trading"
-    : `+$${earnedUSD.toFixed(2)} of $+${goalUSD.toFixed(2)} (${openGain >= 0 ? "+" : ""}$${openGain.toFixed(2)} open, ${realizedGain >= 0 ? "+" : ""}$${realizedGain.toFixed(2)} closed)`;
-  return `<div style="margin:10px 16px 0;background:linear-gradient(135deg,#0d1f0d,#091209);border:1px solid #1a3a1a;border-radius:18px;padding:18px">
-  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
+<!-- Daily goal -->
+<div style="margin:8px 16px 0;background:linear-gradient(135deg,#0d1f0d,#091209);border:1px solid #1a3a1a;border-radius:18px;padding:16px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
     <div>
-      <div style="font-size:10px;color:#4a7a4a;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Daily Progress ${goalIcon}</div>
-      <div style="font-size:28px;font-weight:800;letter-spacing:-1px;color:${goalColor}">${progress.toFixed(0)}%</div>
-      <div style="font-size:11px;color:#4a7a4a;margin-top:2px;line-height:1.4">${subLabel}</div>
+      <div style="font-size:9px;color:#4a7a4a;text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px">Daily Goal ${goalIcon}</div>
+      <div style="font-size:24px;font-weight:800;color:${goalColor}">${goalProgress.toFixed(0)}%</div>
+      <div style="font-size:10px;color:#4a7a4a;margin-top:1px">${goalSubLabel}</div>
     </div>
     <div style="text-align:right">
-      <div style="font-size:11px;color:#4a7a4a;margin-bottom:4px">Target +${goalPct}%/day</div>
-      <div style="font-size:22px;font-weight:800;color:#00d4a0">+$${goalUSD.toFixed(2)}</div>
-      ${remaining > 0 ? `<div style="font-size:11px;color:#4a7a4a">$${remaining.toFixed(2)} to go</div>` : ""}
+      <div style="font-size:9px;color:#4a7a4a;margin-bottom:2px">Target +${goalPct}%</div>
+      <div style="font-size:18px;font-weight:800;color:#00d4a0">+$${goalUSD.toFixed(2)}</div>
+      ${goalRemaining>0?`<div style="font-size:10px;color:#4a7a4a">$${goalRemaining.toFixed(2)} to go</div>`:""}
     </div>
   </div>
-  <div style="background:#0a1f0a;border-radius:99px;height:8px;overflow:hidden;margin-bottom:8px">
-    <div style="width:${progress}%;height:100%;background:linear-gradient(90deg,#00d4a0,${goalColor});border-radius:99px;transition:width .5s"></div>
-  </div>
-  <div style="display:flex;justify-content:space-between;font-size:10px;color:#4a7a4a">
-    <span>$0</span>
-    <span>+$${goalUSD.toFixed(2)}</span>
-  </div>
-</div>`;
-})()}
-
-<!-- ── PERFORMANCE STATS ──────────────────────────────────────── -->
-<div style="margin:10px 16px 0;display:grid;grid-template-columns:1fr 1fr;gap:8px">
-  <div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:13px">
-    <div style="font-size:10px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Win Rate (last 10)</div>
-    <div style="font-size:22px;font-weight:800;color:${wrColor}">${wrNum !== null ? wrNum.toFixed(0) + "%" : "—"}</div>
-    <div style="font-size:11px;color:#4a5272;margin-top:2px">${d.winRate}</div>
-    ${wrNum !== null ? `<div class="bar-track" style="margin-top:8px"><div class="bar-fill" style="width:${wrNum}%;background:${wrColor}"></div></div>` : ""}
-  </div>
-  <div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:13px">
-    <div style="font-size:10px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Expectancy / Trade</div>
-    <div style="font-size:22px;font-weight:800;color:${d.expectancy !== null ? parseFloat(d.expectancy) >= 0 ? "#00d4a0" : "#ff4d6a" : "#4a5272"}">${d.expectancy !== null ? (parseFloat(d.expectancy) >= 0 ? "+" : "") + d.expectancy + "%" : "—"}</div>
-    <div style="font-size:11px;color:#4a5272;margin-top:2px">${d.totalTrades} total trades</div>
-  </div>
-</div>
-<div style="margin:8px 16px 0;display:grid;grid-template-columns:1fr 1fr;gap:8px">
-  <div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:13px">
-    <div style="font-size:10px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Avg Win</div>
-    <div style="font-size:22px;font-weight:800;color:#00d4a0">${d.avgWin != null ? "+" + d.avgWin + "%" : "—"}</div>
-    <div style="font-size:11px;color:#4a5272;margin-top:2px">${d.totalWins} wins</div>
-  </div>
-  <div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:13px">
-    <div style="font-size:10px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Avg Loss</div>
-    <div style="font-size:22px;font-weight:800;color:#ff4d6a">${d.avgLoss != null ? d.avgLoss + "%" : "—"}</div>
-    <div style="font-size:11px;color:#4a5272;margin-top:2px">${d.totalTrades - d.totalWins} losses</div>
+  <div style="background:#0a1f0a;border-radius:99px;height:7px;overflow:hidden">
+    <div style="width:${goalProgress}%;height:100%;background:linear-gradient(90deg,#00d4a0,${goalColor});border-radius:99px"></div>
   </div>
 </div>
 
-<!-- ── ACCOUNT HEALTH ─────────────────────────────────────────── -->
+<!-- Scan pulse -->
+<div style="margin:8px 16px 0;padding:8px 14px;background:#0e1117;border:1px solid #1a1f2e;border-radius:12px;display:flex;justify-content:space-between;align-items:center">
+  <div style="font-size:11px;color:#4a5272;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <span>Scanned: <span id="last-scan-ago" style="color:#94a3b8">${d.lastScanMs?"just now":"starting…"}</span></span>
+    <span>·</span><span>${d.coinsScanned||0} coins</span>
+    <span>·</span><span style="color:${d.nearEntry>0?"#ffb800":"#4a5272"};font-weight:${d.nearEntry>0?"700":"400"}">${d.nearEntry} near entry</span>
+  </div>
+  <div style="font-size:11px;white-space:nowrap;flex-shrink:0">Next <span id="next-scan" style="color:#4f8dff;font-weight:700">${d.lastScanMs?"—":"~5m"}</span></div>
+</div>
+
+<!-- Open positions -->
+<div class="sec"><div class="sec-title">Open Positions</div><div class="card">${posHTML}</div></div>
+
+<!-- Stats grid -->
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Win Rate (10)</div>
+    <div class="stat-val" style="color:${wrColor}">${wrNum!==null?wrNum.toFixed(0)+"%":"—"}</div>
+    <div class="stat-sub">${d.winRate}</div>
+    ${wrNum!==null?`<div class="bar-track" style="margin-top:8px"><div class="bar-fill" style="width:${wrNum}%;background:${wrColor}"></div></div>`:""}
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Expectancy</div>
+    <div class="stat-val" style="color:${d.expectancy!==null?parseFloat(d.expectancy)>=0?"#00d4a0":"#ff4d6a":"#4a5272"}">${d.expectancy!==null?(parseFloat(d.expectancy)>=0?"+":"")+d.expectancy+"%":"—"}</div>
+    <div class="stat-sub">${d.totalTrades} total trades</div>
+  </div>
+</div>
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Avg Win</div>
+    <div class="stat-val" style="color:#00d4a0">${d.avgWin!=null?"+"+d.avgWin+"%":"—"}</div>
+    <div class="stat-sub">${d.totalWins} wins</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Avg Loss</div>
+    <div class="stat-val" style="color:#ff4d6a">${d.avgLoss!=null?d.avgLoss+"%":"—"}</div>
+    <div class="stat-sub">${d.totalTrades-d.totalWins} losses</div>
+  </div>
+</div>
+
+<!-- Account health -->
 <div class="sec">
   <div class="sec-title">Account Health</div>
   <div class="card">
     <div class="row">
-      <div>
-        <div class="lbl">Daily Drawdown</div>
-        <div class="bar-track" style="width:140px;margin-top:5px"><div class="bar-fill" style="width:${ddUsed.toFixed(0)}%;background:${ddColor}"></div></div>
-      </div>
-      <div style="text-align:right">
-        <div class="val" style="color:${ddColor}">-${(d.drawdownPct||0).toFixed(2)}%</div>
-        <div class="lbl">limit ${d.drawdownLimit}%</div>
-      </div>
+      <div><div class="lbl">Daily Drawdown</div><div class="bar-track" style="width:140px"><div class="bar-fill" style="width:${ddUsed.toFixed(0)}%;background:${ddColor}"></div></div></div>
+      <div style="text-align:right"><div class="val" style="color:${ddColor}">-${(d.drawdownPct||0).toFixed(2)}%</div><div class="lbl">limit ${d.drawdownLimit}%</div></div>
     </div>
     <div class="row">
-      <div>
-        <div class="lbl">Portfolio Heat (risk exposure)</div>
-        <div class="bar-track" style="width:140px;margin-top:5px"><div class="bar-fill" style="width:${Math.min(100,(d.heatPct/8)*100).toFixed(0)}%;background:${heatColor}"></div></div>
-      </div>
-      <div style="text-align:right">
-        <div class="val" style="color:${heatColor}">${d.heatPct}%</div>
-        <div class="lbl">max 8%</div>
-      </div>
+      <div><div class="lbl">Portfolio Heat</div><div class="bar-track" style="width:140px"><div class="bar-fill" style="width:${Math.min(100,(d.heatPct/8)*100).toFixed(0)}%;background:${heatColor}"></div></div></div>
+      <div style="text-align:right"><div class="val" style="color:${heatColor}">${d.heatPct}%</div><div class="lbl">max 8%</div></div>
     </div>
-    <div class="row">
-      <div class="lbl">Strategy Mode</div>
-      <div style="font-size:12px;font-weight:700;color:${modeColor}">${modeIcon} ${d.adaptiveMode?.toUpperCase()}</div>
-    </div>
-    <div class="row">
-      <div class="lbl">Market Regime</div>
-      <div style="font-size:12px;font-weight:700;color:${regColor}">${d.regime}</div>
-    </div>
-    <div class="row">
-      <div class="lbl">Bot Status</div>
-      <div style="font-size:12px;font-weight:700;color:${d.paused ? "#ffb800" : "#00d4a0"}">${d.paused ? "⚠️ " + (d.pauseReason || "Paused") : "✅ Active — scanning"}</div>
-    </div>
+    <div class="row"><div class="lbl">Strategy Mode</div><div style="font-size:12px;font-weight:700;color:${modeColor}">${modeIcon} ${d.adaptiveMode?.toUpperCase()}</div></div>
+    <div class="row"><div class="lbl">Market Regime</div><div style="font-size:12px;font-weight:700;color:${regColor}">${d.regime}</div></div>
+    <div class="row"><div class="lbl">Bot Status</div><div style="font-size:12px;font-weight:700;color:${d.paused?"#ffb800":"#00d4a0"}">${d.paused?"⚠️ "+(d.pauseReason||"Paused"):"✅ Active — scanning"}</div></div>
   </div>
 </div>
 
-<!-- ── TOP MOVERS ─────────────────────────────────────────────── -->
-${d.topGainers && d.topGainers.length > 0 ? `
+<!-- Controls -->
+<div class="sec"><div class="sec-title">Controls</div></div>
+<div style="margin:0 16px;display:flex;flex-direction:column;gap:8px">
+  <form method="POST" action="/action?pin=${pin}&action=scan" style="display:contents"><button class="btn btn-blue" type="submit">⚡ Scan All Coins Now</button></form>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+    <form method="POST" action="/action?pin=${pin}&action=${d.paused?"resume":"pause"}" style="display:contents"><button class="btn btn-grey" type="submit">${d.paused?"▶ Resume":"⏸ Pause"}</button></form>
+    <form method="POST" action="/action?pin=${pin}&action=sell-all" style="display:contents" onsubmit="return confirm('Sell ALL open positions now?')"><button class="btn btn-red" type="submit">🚨 Sell All</button></form>
+  </div>
+</div>
+<div style="text-align:center;color:#2a2f42;font-size:11px;margin:18px 0 4px">Refreshing in <span id="refresh-in">15s</span></div>
+</div><!-- /tab-portfolio -->
+
+
+<!-- ══════════════ TAB: MARKETS ══════════════ -->
+<div id="tab-markets" class="tab-content">
+
+<!-- Search -->
+<div style="padding:16px 16px 0">
+  <form method="GET" action="/coin" onsubmit="var v=this.symbol.value.trim().toUpperCase();if(!v)return false;if(!v.endsWith('USDT'))this.symbol.value=v+'USDT';">
+    <input type="hidden" name="pin" value="${pin}">
+    <div style="display:flex;gap:8px">
+      <input type="text" name="symbol" placeholder="Search any coin — BTC, PEPE, DOGE..." autocomplete="off" autocapitalize="characters" spellcheck="false"
+        style="flex:1;background:#0e1117;border:1px solid #1a1f2e;border-radius:12px;padding:11px 14px;color:#f0f2f7;font-size:14px;outline:none;font-family:inherit">
+      <button type="submit" style="background:linear-gradient(135deg,#4f8dff,#2563eb);color:#fff;border:none;border-radius:12px;padding:11px 16px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Go</button>
+    </div>
+  </form>
+</div>
+
+<!-- Top movers -->
+${d.topGainers&&d.topGainers.length>0?`
 <div class="sec">
   <div class="sec-title">🚀 Top Movers Today</div>
   <div class="card">
-    ${d.topGainers.slice(0,10).map((t, i) => {
-      const coin = t.symbol.replace("USDT","");
-      const vol = t.vol >= 1e9 ? (t.vol/1e9).toFixed(1)+"B" : t.vol >= 1e6 ? (t.vol/1e6).toFixed(0)+"M" : (t.vol/1e3).toFixed(0)+"K";
+    ${d.topGainers.slice(0,10).map((t,i)=>{
+      const coin=t.symbol.replace("USDT","");
+      const vol=t.vol>=1e9?(t.vol/1e9).toFixed(1)+"B":t.vol>=1e6?(t.vol/1e6).toFixed(0)+"M":(t.vol/1e3).toFixed(0)+"K";
       return `<a href="/coin?symbol=${t.symbol}&pin=${pin}" style="display:flex;align-items:center;justify-content:space-between;padding:11px 16px;border-bottom:1px solid #1a1f2e;text-decoration:none;color:inherit">
         <div style="display:flex;align-items:center;gap:10px">
           <div style="width:22px;font-size:11px;color:#4a5272;font-weight:700">${i+1}</div>
@@ -4284,29 +4295,20 @@ ${d.topGainers && d.topGainers.length > 0 ? `
         </div>
         <div style="text-align:right">
           <div style="font-size:15px;font-weight:800;color:#00d4a0">+${t.change24h.toFixed(1)}%</div>
-          <div style="font-size:11px;color:#4a5272">$${t.price < 0.01 ? t.price.toFixed(6) : t.price < 1 ? t.price.toFixed(4) : t.price.toFixed(2)}</div>
+          <div style="font-size:11px;color:#4a5272">$${t.price<0.01?t.price.toFixed(6):t.price<1?t.price.toFixed(4):t.price.toFixed(2)}</div>
         </div>
       </a>`;
     }).join("")}
   </div>
-</div>` : ""}
+</div>`:""}
 
-<!-- ── OPEN POSITIONS ─────────────────────────────────────────── -->
-<div class="sec"><div class="sec-title">Open Positions</div><div class="card">${posHTML}</div></div>
-
-<!-- ── CLOSEST TO ENTRY ───────────────────────────────────────── -->
+<!-- Closest to entry -->
 <div class="sec"><div class="sec-title">🎯 Closest to Entry</div><div class="card">${readinessHTML}</div></div>
 
-<!-- ── RECENT TRADES ─────────────────────────────────────────── -->
-<div class="sec"><div class="sec-title">Recent Trades</div><div class="card">${tradesHTML}</div></div>
-
-<!-- ── SIGNAL LOG ─────────────────────────────────────────────── -->
-<div class="sec"><div class="sec-title">Signal Log</div><div class="card">${sigHTML}</div></div>
-
-<!-- ── ALL COINS WATCHED ──────────────────────────────────────── -->
+<!-- All coins -->
 <div class="sec">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-    <div class="sec-title" style="margin-bottom:0">Coins Being Watched (${coinsArr.length})</div>
+    <div class="sec-title" style="margin-bottom:0">Watching (${coinsArr.length})</div>
     <input id="coin-filter" type="text" placeholder="Filter..." autocomplete="off"
       style="background:#0e1117;border:1px solid #1a1f2e;border-radius:8px;padding:5px 10px;color:#f0f2f7;font-size:12px;outline:none;width:90px;font-family:inherit"
       oninput="filterCoins(this.value)">
@@ -4314,34 +4316,99 @@ ${d.topGainers && d.topGainers.length > 0 ? `
   <div class="card" id="coins-list">${coinsHTML}</div>
 </div>
 
-<!-- ── CONTROLS ───────────────────────────────────────────────── -->
-<div class="sec"><div class="sec-title">Controls</div></div>
-<div style="margin:0 16px;display:flex;flex-direction:column;gap:8px">
-  <form method="POST" action="/action?pin=${pin}&action=scan" style="display:contents"><button class="btn btn-blue" type="submit">⚡ Scan All Coins Now</button></form>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-    <form method="POST" action="/action?pin=${pin}&action=${d.paused ? "resume" : "pause"}" style="display:contents"><button class="btn btn-grey" type="submit">${d.paused ? "▶ Resume" : "⏸ Pause"}</button></form>
-    <form method="POST" action="/action?pin=${pin}&action=sell-all" style="display:contents" onsubmit="return confirm('Sell ALL open positions now?')"><button class="btn btn-red" type="submit">🚨 Sell All</button></form>
+</div><!-- /tab-markets -->
+
+
+<!-- ══════════════ TAB: TRADES ══════════════ -->
+<div id="tab-trades" class="tab-content">
+
+<!-- Today summary bar -->
+<div style="padding:16px 16px 0">
+  <div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:16px;padding:16px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px;text-align:center">
+    <div>
+      <div style="font-size:9px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Today</div>
+      <div style="font-size:18px;font-weight:800;color:${(d.todayGainUSD??0)>=0?"#00d4a0":"#ff4d6a"}">${(d.todayGainUSD??0)>=0?"+":""}$${Math.abs(d.todayGainUSD??0).toFixed(2)}</div>
+    </div>
+    <div>
+      <div style="font-size:9px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Win Rate</div>
+      <div style="font-size:18px;font-weight:800;color:${wrColor}">${wrNum!==null?wrNum.toFixed(0)+"%":"—"}</div>
+    </div>
+    <div>
+      <div style="font-size:9px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Trades</div>
+      <div style="font-size:18px;font-weight:800">${d.todayTrades}</div>
+    </div>
   </div>
 </div>
 
-<div style="text-align:center;color:#2a2f42;font-size:11px;margin-top:20px">AlphaBot &middot; refreshing in <span id="refresh-in">15s</span></div>
+<div class="sec"><div class="sec-title">Recent Trades</div><div class="card">${tradesHTML}</div></div>
+
+</div><!-- /tab-trades -->
+
+
+<!-- ══════════════ TAB: SIGNALS ══════════════ -->
+<div id="tab-signals" class="tab-content">
+
+<div style="padding:16px 16px 0;display:flex;justify-content:space-between;align-items:center">
+  <div style="font-size:15px;font-weight:800">Signal Log</div>
+  <div style="font-size:11px;color:#4a5272">${d.coinsScanned||0} coins · <span id="sig-scan-ago">${d.lastScanMs?"just now":"starting…"}</span></div>
+</div>
+
+<div class="sec" style="margin-top:10px"><div class="card">${sigHTML}</div></div>
+
+</div><!-- /tab-signals -->
+
+
+<!-- ══════════════ BOTTOM NAV ══════════════ -->
+<nav id="bottom-nav">
+  <button class="nav-btn active" id="nav-portfolio" onclick="switchTab('portfolio')">
+    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+    Portfolio
+  </button>
+  <button class="nav-btn" id="nav-markets" onclick="switchTab('markets')">
+    <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+    Markets
+  </button>
+  <button class="nav-btn" id="nav-trades" onclick="switchTab('trades')">
+    <svg viewBox="0 0 24 24"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+    Trades
+  </button>
+  <button class="nav-btn" id="nav-signals" onclick="switchTab('signals')">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M20.66 3.34a12 12 0 0 1 0 16.97M3.34 20.66a12 12 0 0 1 0-16.97"/></svg>
+    Signals
+  </button>
+</nav>
 
 <script>
+// ── Tab switching ────────────────────────────────────────────────
+function switchTab(name){
+  document.querySelectorAll('.tab-content').forEach(function(el){el.classList.remove('active')});
+  document.querySelectorAll('.nav-btn').forEach(function(el){el.classList.remove('active')});
+  document.getElementById('tab-'+name).classList.add('active');
+  document.getElementById('nav-'+name).classList.add('active');
+  sessionStorage.setItem('activeTab',name);
+}
+// Restore last tab on reload
+(function(){
+  const t=sessionStorage.getItem('activeTab');
+  if(t)switchTab(t);
+})();
+
+// ── Coin filter (Markets tab) ────────────────────────────────────
 function filterCoins(q){
   q=q.trim().toLowerCase();
   document.querySelectorAll('#coins-list a[data-coin]').forEach(function(el){
     el.style.display=(!q||el.dataset.coin.includes(q))?'block':'none';
   });
 }
-// ── Live timers ───────────────────────────────────────────────────
-const _LS=${d.lastScanMs || "null"};
+
+// ── Live timers ──────────────────────────────────────────────────
+const _LS=${d.lastScanMs||"null"};
 const _LI=${d.scanIntervalMs};
-const _LT=${d.lastTradeAt ? `"${d.lastTradeAt}"` : "null"};
+const _LT=${d.lastTradeAt?`"${d.lastTradeAt}"`:"null"};
 const _PL=Date.now();
 function fmtAgo(ms){
   const s=Math.floor((Date.now()-ms)/1000);
-  if(s<5)return'just now';
-  if(s<60)return s+'s ago';
+  if(s<5)return'just now';if(s<60)return s+'s ago';
   if(s<3600)return Math.floor(s/60)+'m ago';
   return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m ago';
 }
@@ -4351,29 +4418,18 @@ function fmtCd(ms){
   return m+':'+String(s).padStart(2,'0');
 }
 function tick(){
-  const el=document.getElementById('last-scan-ago');
-  const ni=document.getElementById('next-scan');
   if(_LS){
-    if(el)el.textContent=fmtAgo(_LS);
+    ['last-scan-ago','sig-scan-ago'].forEach(function(id){const el=document.getElementById(id);if(el)el.textContent=fmtAgo(_LS);});
     const nms=Math.max(0,_LI-(Date.now()-_LS));
-    if(ni)ni.textContent=fmtCd(nms);
-  } else {
-    if(el)el.textContent='starting up…';
-    if(ni)ni.textContent='~5m';
+    const ni=document.getElementById('next-scan');if(ni)ni.textContent=fmtCd(nms);
   }
-  if(_LT){
-    const el=document.getElementById('last-trade-ago');
-    if(el)el.textContent=fmtAgo(new Date(_LT).getTime());
-  }
+  if(_LT){const el=document.getElementById('last-trade-ago');if(el)el.textContent=fmtAgo(new Date(_LT).getTime());}
   const ri=document.getElementById('refresh-in');
-  const left=Math.max(0,15000-(Date.now()-_PL));
-  if(ri)ri.textContent=Math.ceil(left/1000)+'s';
+  if(ri)ri.textContent=Math.ceil(Math.max(0,15000-(Date.now()-_PL))/1000)+'s';
 }
 setInterval(tick,1000);tick();
-// Soft reload every 15s — skip if user is typing
-setInterval(function(){
-  if(!document.querySelector('input:focus'))location.reload();
-},15000);
+// Soft reload every 15s
+setInterval(function(){if(!document.querySelector('input:focus'))location.reload();},15000);
 </script>
 </body>
 </html>`;
