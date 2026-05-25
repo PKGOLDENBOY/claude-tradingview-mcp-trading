@@ -1203,7 +1203,7 @@ async function getFundingRate(symbol) {
 // Kelly Criterion — mathematically optimal position size based on your own live trade history.
 // f = W - (1-W)/R | W = win rate, R = avg win / avg loss
 // Uses half-Kelly for safety (full Kelly maximises growth but has large drawdowns).
-function kellyPositionPct(log, symbol, fallback = 0.25) {
+function kellyPositionPct(log, symbol, fallback = 0.20) {
   const exits = log.trades.filter(t =>
     t.type === "exit" && t.symbol === symbol && t.orderPlaced && t.pnlPct !== undefined
   );
@@ -1286,8 +1286,8 @@ async function detectMarketRegime() {
 // ─── Portfolio Heat ───────────────────────────────────────────────────────────
 // Tracks total $ at risk across ALL open positions (scalp + swing + breakout).
 // Hard cap at 8% — never risk more than this simultaneously.
-function calcPortfolioHeat(log) {
-  const portfolio = log.portfolioValue || acct().portfolioValue;
+function calcPortfolioHeat(log, livePortfolioValue = null) {
+  const portfolio = livePortfolioValue || log.portfolioValue || acct().portfolioValue;
   let totalRisk = 0;
   const positions = [];
   const addPos = (map, stopPct, type) => {
@@ -3039,13 +3039,13 @@ async function run(tvSignal = null, symbol = null) {
       else console.log(`  ✅ Support ok — $${sr.nearestSupport.toFixed(4)} (${sr.distToSupport?.toFixed(2)}% below price, ${sr.supportConf} TF confluences)`);
     }
 
-    // Fix 4: Max 5 concurrent positions
+    // Max 3 concurrent scalp positions — keeps capital diversified and avoids going all-in
     const openPositions = Object.entries(log.positions || {}).filter(([,p]) => p && p.open);
     const openCount = openPositions.length;
-    if (openCount >= 5) {
+    if (openCount >= 3) {
       const held = openPositions.map(([s]) => s).join(", ");
-      console.log(`🚫 MAX POSITIONS — already holding ${held}. Max 5 positions at a time.`);
-      pushSignal(symbol, "BLOCKED", `Max positions (5/5) reached`);
+      console.log(`🚫 MAX POSITIONS — already holding ${held}. Max 3 positions at a time.`);
+      pushSignal(symbol, "BLOCKED", `Max positions (3/3) reached`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
@@ -3602,7 +3602,7 @@ if (process.argv.includes("--tax-summary")) {
     const portfolioValue = usdtBalance + openPositionValue;
     const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
     const adaptiveMode = getAdaptiveMode(log.trades || []);
-    const heat = calcPortfolioHeat(log);
+    const heat = calcPortfolioHeat(log, portfolioValue);
     const unrealizedPnlUSD = openPositions.reduce((s, p) => s + (p.pnlUSD ?? 0), 0);
     const todayGainUSD = totalPnlUSD + unrealizedPnlUSD;
     const allExits = (log.trades || []).filter(t => t.type === "exit" && t.pnlPct !== undefined && t.orderPlaced);
@@ -4014,7 +4014,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   <div style="font-size:13px;font-weight:600;color:${(d.todayGainUSD??0) >= 0 ? "#00d4a0" : "#ff4d6a"};margin-bottom:18px">${(d.todayGainUSD??0) >= 0 ? "+" : ""}$${Math.abs(d.todayGainUSD??0).toFixed(2)} today <span style="font-size:11px;opacity:.7">(open ${(d.unrealizedPnlUSD??0)>=0?"+":""}$${(d.unrealizedPnlUSD??0).toFixed(2)} · closed ${(d.todayPnlUSD??0)>=0?"+":""}$${(d.todayPnlUSD??0).toFixed(2)})</span></div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 20px">
     <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">CASH</div><div style="font-size:14px;font-weight:700">$${Number(d.usdtBalance).toFixed(2)}</div></div>
-    <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">POSITIONS</div><div style="font-size:14px;font-weight:700">${d.openPositions.length} / 5</div></div>
+    <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">POSITIONS</div><div style="font-size:14px;font-weight:700">${d.openPositions.length} / 3</div></div>
     <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">TODAY TRADES</div><div style="font-size:14px;font-weight:700">${d.todayTrades}</div></div>
     <div><div style="font-size:10px;color:#4a5272;margin-bottom:3px">LAST TRADE</div><div style="font-size:14px;font-weight:700" id="last-trade-ago">${d.lastTradeAt ? "—" : "—"}</div></div>
   </div>
