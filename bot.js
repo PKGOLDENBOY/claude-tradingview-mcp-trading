@@ -331,7 +331,7 @@ function countTodaysTrades(log) {
 function calcWinRate(trades, n = 10) {
   const closed = trades.filter((t) => t.type === "exit" && t.pnlPct !== undefined && t.orderPlaced === true);
   const recent = closed.slice(-n);
-  if (recent.length < 5) return null; // not enough history (min 5 trades for statistical validity)
+  if (recent.length < 3) return null; // not enough history (min 3 trades)
   // Count wins as > 0.25% net — filters out trades that were "positive" but lost money after fees (0.2% round-trip)
   const wins = recent.filter((t) => t.pnlPct > 0.25).length;
   return { winRate: wins / recent.length, sample: recent.length, wins };
@@ -3590,10 +3590,10 @@ if (process.argv.includes("--tax-summary")) {
     const allExits = (log.trades || []).filter(t => t.type === "exit" && t.pnlPct !== undefined && t.orderPlaced);
     const allWins = allExits.filter(t => t.pnlPct > 0);
     const allLosses = allExits.filter(t => t.pnlPct <= 0);
-    const avgWin = allWins.length ? allWins.reduce((s,t) => s + t.pnlPct, 0) / allWins.length : 0;
-    const avgLoss = allLosses.length ? allLosses.reduce((s,t) => s + t.pnlPct, 0) / allLosses.length : 0;
+    const avgWin = allWins.length ? allWins.reduce((s,t) => s + t.pnlPct, 0) / allWins.length : null;
+    const avgLoss = allLosses.length ? allLosses.reduce((s,t) => s + t.pnlPct, 0) / allLosses.length : null;
     const wrRate = allExits.length ? allWins.length / allExits.length : 0;
-    const expectancy = allExits.length >= 3 ? (wrRate * avgWin + (1 - wrRate) * avgLoss).toFixed(2) : null;
+    const expectancy = allExits.length >= 2 ? (wrRate * (avgWin ?? 0) + (1 - wrRate) * (avgLoss ?? 0)).toFixed(2) : null;
     const btcSnap = coinSnapshots["BTCUSDT"] || null;
     const btcPrice = btcSnap?.price ?? (_topGainers.find(t => t.symbol === "BTCUSDT")?.price ?? null);
     const nearEntry = Object.values(coinSnapshots).filter(c => {
@@ -3615,7 +3615,7 @@ if (process.argv.includes("--tax-summary")) {
       todayPnlUSD: totalPnlUSD,
       winRate: winRate ? `${winRate.wins}/${winRate.sample} (${(winRate.winRate * 100).toFixed(0)}%)` : "—",
       winRatePct: winRate ? winRate.winRate * 100 : null,
-      avgWin: avgWin.toFixed(2), avgLoss: avgLoss.toFixed(2),
+      avgWin: avgWin != null ? avgWin.toFixed(2) : null, avgLoss: avgLoss != null ? avgLoss.toFixed(2) : null,
       expectancy, totalTrades: allExits.length, totalWins: allWins.length,
       drawdownPct: drawdown.drawdownPct, drawdownLimit: drawdown.limit,
       heatPct: heat.heatPct, isOverheated: heat.isOverheated,
@@ -3642,18 +3642,18 @@ if (process.argv.includes("--tax-summary")) {
     const posHTML = d.openPositions.length === 0
       ? `<div style="padding:24px;text-align:center;color:#4a5272;font-size:14px">All cash — no open positions</div>`
       : d.openPositions.map(p => {
-          const pc = p.pnlPct >= 0 ? "#00d4a0" : "#ff4d6a";
-          const slPct = p.slPct * 100;
-          const tpPct = p.tpPct * 100;
-          const slPrice = (p.entryPrice * (1 - p.slPct)).toFixed(4);
-          const tpPrice = (p.entryPrice * (1 + p.tpPct)).toFixed(4);
-          // Progress bar: 0% = stop loss, 100% = take profit
-          const range = tpPct + slPct;
-          const progress = Math.min(100, Math.max(0, ((p.pnlPct + slPct) / range) * 100));
-          const barColor = p.pnlPct >= 0 ? "#00d4a0" : "#ff4d6a";
+          const pc = p.pnlPct != null ? (p.pnlPct >= 0 ? "#00d4a0" : "#ff4d6a") : "#4f8dff";
+          const hasEntry = p.entryPrice != null && p.slPct != null && p.tpPct != null;
+          const slPct = hasEntry ? p.slPct * 100 : 0;
+          const tpPct = hasEntry ? p.tpPct * 100 : 0;
+          const slPrice = hasEntry ? (p.entryPrice * (1 - p.slPct)).toFixed(4) : "—";
+          const tpPrice = hasEntry ? (p.entryPrice * (1 + p.tpPct)).toFixed(4) : "—";
+          const range = hasEntry ? (tpPct + slPct) : 100;
+          const progress = hasEntry && p.pnlPct != null ? Math.min(100, Math.max(0, ((p.pnlPct + slPct) / range) * 100)) : 50;
+          const barColor = p.pnlPct != null ? (p.pnlPct >= 0 ? "#00d4a0" : "#ff4d6a") : "#4f8dff";
           const timeStr = p.minsOpen != null ? (p.minsOpen >= 60 ? `${Math.floor(p.minsOpen/60)}h ${p.minsOpen%60}m` : `${p.minsOpen}m`) : "—";
-          const typeLabel = p.entryType === "momentum" ? "MOMENTUM" : p.entryType === "snapback" ? "SNAP-BACK" : "SCALP";
-          const stopLabel = p.breakEvenActive ? `Break-even stop $${p.trailStop.toFixed(4)}` : `Stop-loss $${slPrice} (-${slPct.toFixed(0)}%)`;
+          const typeLabel = p.entryType === "momentum" ? "MOMENTUM" : p.entryType === "snapback" ? "SNAP-BACK" : p.entryType === "untracked" ? "LIVE" : "SCALP";
+          const stopLabel = p.breakEvenActive ? `Break-even stop $${p.trailStop?.toFixed(4) ?? "—"}` : hasEntry ? `Stop-loss $${slPrice} (-${slPct.toFixed(0)}%)` : "Entry untracked";
           return `<a href="/coin?symbol=${p.sym}&pin=${pin}" style="display:block;padding:16px 18px;border-bottom:1px solid #1a1f2e;text-decoration:none;color:inherit">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
               <div style="display:flex;align-items:center;gap:10px">
@@ -3664,8 +3664,8 @@ if (process.argv.includes("--tax-summary")) {
                 </div>
               </div>
               <div style="text-align:right">
-                <div style="font-size:20px;font-weight:800;color:${pc}">${p.pnlPct >= 0 ? "+" : ""}${Number(p.pnlPct).toFixed(2)}%</div>
-                <div style="font-size:13px;font-weight:600;color:${pc}">${p.pnlUSD >= 0 ? "+" : ""}$${Math.abs(Number(p.pnlUSD)).toFixed(2)}</div>
+                <div style="font-size:20px;font-weight:800;color:${pc}">${p.pnlPct != null ? (p.pnlPct >= 0 ? "+" : "") + Number(p.pnlPct).toFixed(2) + "%" : "—"}</div>
+                <div style="font-size:13px;font-weight:600;color:${pc}">${p.pnlUSD != null ? (p.pnlUSD >= 0 ? "+" : "") + "$" + Math.abs(Number(p.pnlUSD)).toFixed(2) : ""}</div>
                 <div style="font-size:11px;color:#4a5272">$${Number(p.price).toFixed(4)}</div>
               </div>
             </div>
@@ -3674,7 +3674,7 @@ if (process.argv.includes("--tax-summary")) {
             </div>
             <div style="display:flex;justify-content:space-between;font-size:10px;color:#4a5272">
               <span style="color:#ff4d6a">▼ ${stopLabel}</span>
-              <span style="color:#00d4a0">▲ Target +${tpPct.toFixed(0)}% ($${tpPrice})</span>
+              <span style="color:#00d4a0">▲ ${hasEntry ? `Target +${tpPct.toFixed(0)}% ($${tpPrice})` : "—"}</span>
             </div>
           </a>`;
         }).join("");
@@ -3999,7 +3999,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 ${(() => {
   const goalPct = 50;
   const goalUSD = pf * goalPct / 100;
-  const earnedUSD = d.todayPnlUSD || 0;
+  const earnedUSD = Math.max(0, d.todayPnlUSD || 0);
   const progress = Math.min(100, Math.max(0, (earnedUSD / goalUSD) * 100));
   const remaining = Math.max(0, goalUSD - earnedUSD);
   const goalColor = progress >= 100 ? "#00d4a0" : progress >= 50 ? "#ffb800" : "#4f8dff";
@@ -4048,12 +4048,12 @@ ${(() => {
 <div style="margin:8px 16px 0;display:grid;grid-template-columns:1fr 1fr;gap:8px">
   <div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:13px">
     <div style="font-size:10px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Avg Win</div>
-    <div style="font-size:22px;font-weight:800;color:#00d4a0">+${d.avgWin}%</div>
+    <div style="font-size:22px;font-weight:800;color:#00d4a0">${d.avgWin != null ? "+" + d.avgWin + "%" : "—"}</div>
     <div style="font-size:11px;color:#4a5272;margin-top:2px">${d.totalWins} wins</div>
   </div>
   <div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:14px;padding:13px">
     <div style="font-size:10px;color:#4a5272;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Avg Loss</div>
-    <div style="font-size:22px;font-weight:800;color:#ff4d6a">${d.avgLoss}%</div>
+    <div style="font-size:22px;font-weight:800;color:#ff4d6a">${d.avgLoss != null ? d.avgLoss + "%" : "—"}</div>
     <div style="font-size:11px;color:#4a5272;margin-top:2px">${d.totalTrades - d.totalWins} losses</div>
   </div>
 </div>
@@ -4566,16 +4566,18 @@ async function load(){
     document.getElementById('positions-card').innerHTML=pos.length===0
       ?'<div class="empty-state muted">All cash — no open positions</div>'
       :pos.map(p=>{
-        const pc=p.pnlPct>=0?'green':'red';
+        const pc=p.pnlPct!=null?(p.pnlPct>=0?'green':'red'):'muted';
         const initials=p.coin.slice(0,3);
+        const entryStr=p.entryPrice!=null?'$'+Number(p.entryPrice).toFixed(4):'untracked';
+        const pnlStr=p.pnlPct!=null?(p.pnlPct>=0?'+':'')+p.pnlPct.toFixed(2)+'%':'—';
         return '<div class="pos-item">'+
           '<div class="pos-left">'+
             '<div class="pos-icon">'+initials+'</div>'+
-            '<div><div class="pos-name">'+p.coin+'</div><div class="pos-qty">'+Number(p.qty).toFixed(4)+' @ $'+Number(p.entryPrice).toFixed(4)+'</div></div>'+
+            '<div><div class="pos-name">'+p.coin+'</div><div class="pos-qty">'+Number(p.qty).toFixed(4)+' @ '+entryStr+'</div></div>'+
           '</div>'+
           '<div class="pos-right">'+
             '<div class="pos-usd">$'+Number(p.usdVal).toFixed(2)+'</div>'+
-            '<div class="pos-pnl '+pc+'">'+(p.pnlPct>=0?'+':'')+p.pnlPct.toFixed(2)+'%</div>'+
+            '<div class="pos-pnl '+pc+'">'+pnlStr+'</div>'+
           '</div>'+
         '</div>';
       }).join('');
