@@ -2946,10 +2946,10 @@ async function run(tvSignal = null, symbol = null) {
     if (gainerInfo && gainerInfo.change24h >= 5 && !(position && position.open)) {
       console.log(`\n🚀 BIG MOVER — ${symbol} +${gainerInfo.change24h.toFixed(1)}% today`);
       const volRatio = vol.current / vol.avg;
-      const rsiOk    = rsi3 >= 40 && rsi3 <= 82;           // healthy momentum, not exhausted
-      const stochOk  = !stochRsi || stochRsi.k < 90;       // not at extreme top
+      const rsiOk    = rsi3 >= 50 && rsi3 <= 75;           // healthy momentum zone, not exhausted
+      const stochOk  = !stochRsi || stochRsi.k < 80;       // not ramping toward top
       const priceOk  = price > ema8;                        // price above fast EMA
-      const volOk    = volRatio >= 1.5;                     // real buying, not thin air
+      const volOk    = volRatio >= 2.0;                     // real crowd buying, not thin air
       const notTooHot = gainerInfo.change24h <= 40;         // cap at 40% — beyond that is exit liquidity
 
       console.log(`  Vol: ${volRatio.toFixed(1)}x avg | RSI(3): ${rsi3?.toFixed(1)} | StochRSI K: ${stochRsi?.k?.toFixed(1) ?? "—"} | Above EMA8: ${price > ema8 ? "yes" : "no"}`);
@@ -3092,11 +3092,10 @@ async function run(tvSignal = null, symbol = null) {
       }
     }
 
-    // VWAP Bounce Mode — price at VWAP support, ready to bounce
-    // Pro scalpers BUY AT VWAP, not after it bounces — VWAP is the entry, not the confirmation
+    // VWAP Bounce Mode — price at VWAP support with RSI not too high (tightened: RSI<50, not 70)
     const _vwapPct = (price - vwap) / vwap * 100;
     const _nearVwap = _vwapPct >= -1.5 && _vwapPct <= 2.0; // within 1.5% below or 2% above VWAP
-    const vwapBounceMode = _nearVwap && rsi3 < 70;
+    const vwapBounceMode = _nearVwap && rsi3 < 50;
     if (vwapBounceMode) {
       console.log(`  ✅ VWAP BOUNCE MODE — price $${price.toFixed(4)} is ${_vwapPct.toFixed(2)}% from VWAP $${vwap.toFixed(4)}`);
     }
@@ -3273,8 +3272,8 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
 
-    // Upgrade 6: Multi-timeframe RSI — 15min RSI must also be oversold (< 40, or < 65 in VWAP bounce mode)
-    const rsi15mLimit = vwapBounceMode ? 65 : 40;
+    // Upgrade 6: Multi-timeframe RSI — 15min RSI must also be oversold (< 35, or < 55 in VWAP bounce mode)
+    const rsi15mLimit = vwapBounceMode ? 55 : 35;
     if (rsi15m !== null && rsi15m > rsi15mLimit) {
       console.log(`🚫 15MIN RSI BLOCK — RSI(15m)=${rsi15m.toFixed(1)} is not low enough (need < ${rsi15mLimit}${vwapBounceMode ? " — VWAP bounce mode" : ". 1H oversold but 15min recovering"}).`);
       console.log("═══════════════════════════════════════════════════════════\n");
@@ -3283,7 +3282,7 @@ async function run(tvSignal = null, symbol = null) {
     }
     if (rsi15m !== null) console.log(`  ✅ 15min RSI ${rsi15m.toFixed(1)} confirmed (< ${rsi15mLimit})`);
 
-    // Fix 1: Reversal confirmation — price bouncing right now or last candle showed reversal
+    // Fix 1: Reversal confirmation — need at least 2 signals to confirm the turn
     const formingCandle   = candles[candles.length - 1]; // currently forming (real-time price)
     const lastClosedCandle = candles[candles.length - 2];
     const prevCandle       = candles[candles.length - 3];
@@ -3293,26 +3292,27 @@ async function run(tvSignal = null, symbol = null) {
     const isHigherLow   = lastClosedCandle && prevCandle && lastClosedCandle.low   > prevCandle.low;
     const hasLongWick   = lastClosedCandle && (lastClosedCandle.high - lastClosedCandle.low) > 0 &&
                           (lastClosedCandle.close - lastClosedCandle.low) / (lastClosedCandle.high - lastClosedCandle.low) > 0.4;
-    if (!priceBouncing && !isClosingUp && !isHigherHigh && !isHigherLow && !hasLongWick) {
-      console.log(`🚫 REVERSAL BLOCK — price still falling (live:${formingCandle?.close.toFixed(4)} vs last close:${lastClosedCandle?.close.toFixed(4)})`);
+    const reversalSignals = [priceBouncing, isClosingUp, isHigherHigh, isHigherLow, hasLongWick].filter(Boolean).length;
+    if (reversalSignals < 2) {
+      console.log(`🚫 REVERSAL BLOCK — only ${reversalSignals}/2 reversal signals (live bounce: ${priceBouncing}, closing up: ${isClosingUp}, higher high: ${isHigherHigh}, higher low: ${isHigherLow}, long wick: ${hasLongWick})`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Price still falling — no reversal signal yet`);
+      pushSignal(symbol, "BLOCKED", `Weak reversal — only ${reversalSignals}/2 signals confirmed`);
       return;
     }
-    const reason = priceBouncing ? `live price bouncing ($${formingCandle?.close.toFixed(4)} > $${lastClosedCandle?.close.toFixed(4)})` : isClosingUp ? "closing above prev close" : isHigherHigh ? "higher high" : isHigherLow ? "higher low" : "long lower wick";
-    console.log(`  ✅ Reversal confirmed — ${reason}`);
+    const reversalReasons = [priceBouncing && "live bounce", isClosingUp && "closing up", isHigherHigh && "higher high", isHigherLow && "higher low", hasLongWick && "long wick"].filter(Boolean);
+    console.log(`  ✅ Reversal confirmed — ${reversalReasons.join(" + ")} (${reversalSignals}/5 signals)`);
 
-    // Fix 2: Volume acceleration — buying pressure check
+    // Fix 2: Volume acceleration — require flat-to-rising volume (buyers present, not retreating)
     const curVol  = candles[candles.length - 1].volume;
     const prevVol = candles[candles.length - 2].volume;
     const volAccel = curVol / prevVol;
-    if (!vwapBounceMode && volAccel < 0.8) {
-      console.log(`🚫 VOLUME BLOCK — volume fading (${volAccel.toFixed(2)}× prev candle). No buying pressure yet.`);
+    if (!vwapBounceMode && volAccel < 1.0) {
+      console.log(`🚫 VOLUME BLOCK — volume declining (${volAccel.toFixed(2)}× prev candle). Need flat or rising volume to confirm buying pressure.`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Volume fading ${volAccel.toFixed(2)}× — no buying pressure`);
+      pushSignal(symbol, "BLOCKED", `Volume declining ${volAccel.toFixed(2)}× — need ≥1.0× for buying pressure`);
       return;
     }
-    console.log(`  ${volAccel >= 0.8 ? "✅" : "⚠️ "} Volume ${volAccel >= 1.2 ? "surging" : volAccel >= 0.8 ? "holding" : "light"} (${volAccel.toFixed(2)}× prev candle)${vwapBounceMode && volAccel < 0.8 ? " — bypassed (VWAP bounce)" : ""}`);
+    console.log(`  ${volAccel >= 1.0 ? "✅" : "⚠️ "} Volume ${volAccel >= 1.5 ? "surging" : volAccel >= 1.0 ? "holding/rising" : "light"} (${volAccel.toFixed(2)}× prev candle)${vwapBounceMode && volAccel < 1.0 ? " — bypassed (VWAP bounce)" : ""}`);
 
     // Live backtest gate — run fresh 1000-candle backtest before every buy
     console.log(`\n── Live Backtest Gate ───────────────────────────────────\n`);
@@ -3382,26 +3382,26 @@ async function run(tvSignal = null, symbol = null) {
       console.log(`  Score: ${baseEntryScore} (base) → ${entryScore} (with advanced signals)`);
     }
 
-    // Entry quality gate — trend-follow entries need score >= 3 (RSI extreme + 1 confirming signal)
-    if (rulesPass && entryType === "trend-follow" && entryScore < 3 && !vwapBounceMode) {
-      console.log(`🚫 ENTRY QUALITY BLOCK — score ${entryScore}/3 needed. Signals: RSI<20, BB%<0.35, StochRSI oversold, vol surge, divergence, liquidity sweep, or negative funding.`);
+    // Entry quality gate — trend-follow entries need score >= 5 (strong confluence required)
+    if (rulesPass && entryType === "trend-follow" && entryScore < 5 && !vwapBounceMode) {
+      console.log(`🚫 ENTRY QUALITY BLOCK — score ${entryScore}/5 needed. Need strong confluence: RSI<20 (+2), StochRSI oversold (+2), BB%<0.35 (+1), vol surge (+1), divergence (+3), liquidity sweep (+3), neg funding (+2).`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Entry quality ${entryScore}/3 — need RSI<20, StochRSI oversold, vol surge, or divergence`);
+      pushSignal(symbol, "BLOCKED", `Entry quality ${entryScore}/5 — need stronger confluence (RSI extreme + StochRSI + vol surge)`);
       return;
     }
-    // Snapback quality gate — counter-trend entries need confirmation (StochRSI/BB%/divergence)
-    if (rulesPass && entryType === "snapback" && entryScore < 2 && !vwapBounceMode) {
-      console.log(`🚫 SNAPBACK QUALITY BLOCK — score ${entryScore}/2 needed. Counter-trend needs: StochRSI oversold, BB% near low, RSI<15, divergence, or liquidity sweep.`);
+    // Snapback quality gate — counter-trend entries need strong confirmation
+    if (rulesPass && entryType === "snapback" && entryScore < 4 && !vwapBounceMode) {
+      console.log(`🚫 SNAPBACK QUALITY BLOCK — score ${entryScore}/4 needed. Counter-trend needs multiple signals: StochRSI oversold, BB% near low, RSI<15, divergence, or liquidity sweep.`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Snapback quality ${entryScore}/2 — need StochRSI oversold, BB% low, or divergence`);
+      pushSignal(symbol, "BLOCKED", `Snapback quality ${entryScore}/4 — need StochRSI oversold + another signal`);
       return;
     }
 
-    // StochRSI entry block — don't buy when momentum is already overbought
-    if (rulesPass && stochRsi && stochRsi.k > 75 && !vwapBounceMode) {
-      console.log(`🚫 STOCHRSI BLOCK — K=${stochRsi.k.toFixed(1)} already overbought (>75). Wait for pullback before entering.`);
+    // StochRSI entry block — don't buy when momentum is already building (tightened from 75 to 65)
+    if (rulesPass && stochRsi && stochRsi.k > 65 && !vwapBounceMode) {
+      console.log(`🚫 STOCHRSI BLOCK — K=${stochRsi.k.toFixed(1)} already overbought (>65). Wait for pullback before entering.`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `StochRSI overbought K=${stochRsi.k.toFixed(1)} — wait for pullback`);
+      pushSignal(symbol, "BLOCKED", `StochRSI building K=${stochRsi.k.toFixed(1)} — wait for pullback`);
       return;
     }
 
