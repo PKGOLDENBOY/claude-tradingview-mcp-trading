@@ -811,8 +811,11 @@ async function refreshTopMovers() {
 
     // ── Full market scan ────────────────────────────────────────────────────
     // Score every liquid USDT pair — both gainers and high-volume movers
+    // Never trade exchange tokens, stablecoins, or leveraged tokens
+    const NEVER_TRADE = new Set(["BGBUSDT","BSVUSDT","WBTCUSDT","STETHUSDT","CBETHUSDT","BETHUSDT"]);
     const allCoins = (json.data || []).filter(t =>
       t.symbol.endsWith("USDT") &&
+      !NEVER_TRADE.has(t.symbol) &&
       !/UP|DOWN|BEAR|BULL|USDC|TUSD|BUSD|DAI|USD1|FDUSD|RLUSD|PAXG|XAUT/.test(t.symbol) &&
       parseFloat(t.lastPr) >= 0.001 &&
       parseFloat(t.usdtVolume) > 1_000_000   // $1M+ volume — broad but liquid
@@ -2986,6 +2989,12 @@ async function run(tvSignal = null, symbol = null) {
   } else {
     // ── ENTRY FLOW ──────────────────────────────────────────────────────────
 
+    // Hard block — never trade exchange tokens or wrapped assets
+    if (["BGBUSDT","BSVUSDT","WBTCUSDT","STETHUSDT"].includes(symbol)) {
+      console.log(`🚫 NEVER_TRADE block — ${symbol} is an exchange token / wrapped asset`);
+      return;
+    }
+
     // Concurrent entry guard — if another async call is already processing an entry
     // for this symbol, bail out immediately before touching the log.
     if (_processingEntries.has(symbol)) {
@@ -3860,6 +3869,12 @@ if (process.argv.includes("--tax-summary")) {
       nearEntry,
       lastTradeAt,
       lastTrades: (log.trades || []).slice(-20).reverse(),
+      totalFeesPaid: (() => {
+        if (!existsSync(CSV_FILE)) return 0;
+        return readFileSync(CSV_FILE, "utf8").split("\n")
+          .filter(l => l.includes(",LIVE,"))
+          .reduce((s, l) => { const f = parseFloat(l.split(",")[8]); return s + (isNaN(f) ? 0 : f); }, 0);
+      })(),
       strats,
       signals: signalLog.slice(-30).reverse(),
       coins: coinSnapshots,
@@ -4303,6 +4318,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div class="sec">
   <div class="sec-title">Account Health</div>
   <div class="card">
+    <div class="row">
+      <div class="lbl">Fees Paid (live trades)</div>
+      <div style="text-align:right"><div class="val" style="color:#ffb800">$${(d.totalFeesPaid||0).toFixed(4)}</div><div class="lbl">0.08% per side</div></div>
+    </div>
     <div class="row">
       <div><div class="lbl">Daily Drawdown</div><div class="bar-track" style="width:140px"><div class="bar-fill" style="width:${ddUsed.toFixed(0)}%;background:${ddColor}"></div></div></div>
       <div style="text-align:right"><div class="val" style="color:${ddColor}">-${(d.drawdownPct||0).toFixed(2)}%</div><div class="lbl">limit ${d.drawdownLimit}%</div></div>
