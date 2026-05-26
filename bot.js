@@ -123,6 +123,26 @@ let priceStreamWs = null;
 const _processingStops = new Set(); // guard against double-exits
 const _processingEntries = new Set(); // guard against duplicate concurrent entries
 
+// Claude rate limiting — shared pool across all entry + exit calls
+let _claudeCallsToday = 0;
+let _claudeDate = "";
+let _lastClaudeCallMs = 0;
+const CLAUDE_DAILY_CAP = 5;          // max calls per day (entries + exits combined)
+const CLAUDE_GLOBAL_COOLDOWN_MS = 30 * 60 * 1000; // 30 min between any two calls
+
+function claudeAvailable() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (_claudeDate !== today) { _claudeDate = today; _claudeCallsToday = 0; }
+  if (_claudeCallsToday >= CLAUDE_DAILY_CAP) return "daily-cap";
+  if (Date.now() - _lastClaudeCallMs < CLAUDE_GLOBAL_COOLDOWN_MS) return "cooldown";
+  return "ok";
+}
+
+function recordClaudeCall() {
+  _claudeCallsToday++;
+  _lastClaudeCallMs = Date.now();
+}
+
 // Signal log — ring buffer of last 60 scan decisions shown on dashboard
 const signalLog = [];
 function pushSignal(symbol, result, reason, indicators = {}) {
@@ -2843,29 +2863,34 @@ async function run(tvSignal = null, symbol = null) {
     } else if (!hasHardExit && tvSignal !== "SELL" && _pnlPct > 0 && heldMins < 5) {
       console.log(`\n⏱ Min hold — ${heldMins.toFixed(1)} min old, need 5 min before profit exit. Claude blocked.`);
       finalExit = false;
-    // Exit Claude calls: cap at 20/day to control API spend
     } else if (hasHardExit) {
       finalExit = true;
       console.log(`\n⚠️  Hard stop — Claude analysis skipped (${reasons.filter(r => HARD_EXIT_KEYWORDS.some(kw => r.startsWith(kw))).join(", ")})`);
-    } else if (anthropic && !((log.trades.filter(t => t.claudeAnalysis && t.type === "exit" && t.timestamp?.startsWith(today)).length) >= 20)) {
-      console.log("\n── Claude AI Analysis ───────────────────────────────────\n");
-      try {
-        claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, position, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h: bullTrendConfirmed, vol }, symbol);
-        finalExit = claudeAnalysis.action === "EXIT";
-        console.log(`  Decision:   ${claudeAnalysis.action} (${claudeAnalysis.confidence}% confidence)`);
-        console.log(`  Reasoning:  ${claudeAnalysis.reasoning}`);
-        if (claudeAnalysis.key_factors?.length) {
-          claudeAnalysis.key_factors.forEach((f) => console.log(`  • ${f}`));
+    } else {
+      // Use Claude for ambiguous soft exits — only if pool allows
+      const exitClaudeStatus = claudeAvailable();
+      if (anthropic && exitClaudeStatus === "ok") {
+        console.log("\n── Claude AI Analysis ───────────────────────────────────\n");
+        try {
+          claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, position, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h: bullTrendConfirmed, vol }, symbol);
+          recordClaudeCall();
+          finalExit = claudeAnalysis.action === "EXIT";
+          console.log(`  Decision:   ${claudeAnalysis.action} (${claudeAnalysis.confidence}% confidence) [${_claudeCallsToday}/${CLAUDE_DAILY_CAP} today]`);
+          console.log(`  Reasoning:  ${claudeAnalysis.reasoning}`);
+          if (claudeAnalysis.key_factors?.length) {
+            claudeAnalysis.key_factors.forEach((f) => console.log(`  • ${f}`));
+          }
+          if (finalExit !== shouldExit) {
+            console.log(`\n  ⚡ Override: rules said ${shouldExit ? "EXIT" : "HOLD"} — Claude says ${claudeAnalysis.action}`);
+          }
+        } catch (err) {
+          console.log(`  ⚠️  Claude unavailable (${err.message}) — using rule-based decision`);
+          finalExit = shouldExit;
         }
-        if (finalExit !== shouldExit) {
-          console.log(`\n  ⚡ Override: rules said ${shouldExit ? "EXIT" : "HOLD"} — Claude says ${claudeAnalysis.action}`);
-        }
-      } catch (err) {
-        console.log(`  ⚠️  Claude unavailable (${err.message}) — using rule-based decision`);
+      } else {
+        console.log(`\n💰 Claude skipped — ${exitClaudeStatus === "daily-cap" ? `daily cap (${_claudeCallsToday}/${CLAUDE_DAILY_CAP})` : `global cooldown (${Math.round((CLAUDE_GLOBAL_COOLDOWN_MS - (Date.now() - _lastClaudeCallMs)) / 60000)}min left)`}`);
         finalExit = shouldExit;
       }
-    } else {
-      console.log(`\n💰 Claude exit cap reached (20/day) — using rule-based decision`);
     }
 
     console.log("\n── Decision ─────────────────────────────────────────────\n");
@@ -3466,33 +3491,25 @@ async function run(tvSignal = null, symbol = null) {
     let claudeAnalysis = null;
     let allPass = rulesPass;
 
-    // Skip Claude if it said HOLD for this coin within the last 30 minutes
-    const CLAUDE_COOLDOWN_MS = 60 * 60 * 1000;
-    const lastClaudeEntry = log.trades
-      .filter(t => t.symbol === symbol && t.claudeAnalysis)
-      .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0];
-    const claudeCoolingDown = lastClaudeEntry &&
-      (Date.now() - new Date(lastClaudeEntry.timestamp).getTime()) < CLAUDE_COOLDOWN_MS &&
-      lastClaudeEntry.claudeAnalysis.action !== "BUY";
+    // Only spend a Claude call on very high-conviction entries:
+    // RSI(3) must be deeply oversold (<30) and volume above avg (if known)
+    const highConviction = rsi3 < 30 && (vol ? vol.aboveAvg : true);
 
-    if (claudeCoolingDown) {
-      console.log(`\n⏳ Claude cooldown — last said ${lastClaudeEntry.claudeAnalysis.action} ${Math.round((Date.now() - new Date(lastClaudeEntry.timestamp).getTime()) / 60000)}min ago`);
+    const claudeStatus = claudeAvailable();
+    if (claudeStatus !== "ok") {
+      console.log(`\n💰 Claude skipped — ${claudeStatus === "daily-cap" ? `daily cap (${_claudeCallsToday}/${CLAUDE_DAILY_CAP})` : `global cooldown (${Math.round((CLAUDE_GLOBAL_COOLDOWN_MS - (Date.now() - _lastClaudeCallMs)) / 60000)}min left)`}`);
+    } else if (!highConviction) {
+      console.log(`\n⏩ Claude skipped — setup not high-conviction enough (RSI ${rsi3.toFixed(1)}${vol ? `, vol ${vol.aboveAvg ? "✅" : "⚠️"}` : ""})`);
     }
 
-    // Hard cap: max 10 Claude calls per calendar day to limit API spend
-    const claudeCallsToday = log.trades.filter(t => t.claudeAnalysis && t.timestamp?.startsWith(today)).length;
-    const claudeDailyCapReached = claudeCallsToday >= 10;
-    if (claudeDailyCapReached) {
-      console.log(`\n💰 Claude daily cap reached (${claudeCallsToday}/10) — using rule-based decision`);
-    }
-
-    if (anthropic && rulesPass && !claudeCoolingDown && !claudeDailyCapReached) {
+    if (anthropic && rulesPass && highConviction && claudeStatus === "ok") {
       console.log("\n── Claude AI Analysis ───────────────────────────────────\n");
       try {
         claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, null, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h: bullTrendConfirmed, vol }, symbol);
+        recordClaudeCall();
         const meetsConfidence = claudeAnalysis.confidence >= CONFIDENCE_MIN;
         allPass = claudeAnalysis.action === "BUY" && meetsConfidence;
-        console.log(`  Decision:   ${claudeAnalysis.action} (${claudeAnalysis.confidence}% confidence)`);
+        console.log(`  Decision:   ${claudeAnalysis.action} (${claudeAnalysis.confidence}% confidence) [${_claudeCallsToday}/${CLAUDE_DAILY_CAP} today]`);
         console.log(`  Min confidence required: ${CONFIDENCE_MIN}% (high-conviction mode)`);
         console.log(`  Reasoning:  ${claudeAnalysis.reasoning}`);
         if (claudeAnalysis.key_factors?.length) {
