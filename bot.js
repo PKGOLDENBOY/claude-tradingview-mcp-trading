@@ -875,9 +875,9 @@ async function refreshTopMovers() {
     const newListings = await scanNewListings(json.data || []);
     if (newListings.length === 0) console.log("  None found.");
 
-    // Add top daily gainers (5%+) directly — they get the momentum path in run(), skip backtest gate
-    const bigMovers = _topGainers.filter(t => t.change24h >= 5).map(t => t.symbol);
-    if (bigMovers.length > 0) console.log(`\n🚀 Big movers today (5%+): ${bigMovers.join(", ")}`);
+    // Add top daily gainers (3%+) directly — they get the momentum path in run(), skip backtest gate
+    const bigMovers = _topGainers.filter(t => t.change24h >= 3).map(t => t.symbol);
+    if (bigMovers.length > 0) console.log(`\n🚀 Big movers today (3%+): ${bigMovers.join(", ")}`);
 
     const combined = [...new Set([...qualified, ...heldSymbols, ...WATCHLIST, ...newListings, ...bigMovers])];
 
@@ -3032,24 +3032,24 @@ async function run(tvSignal = null, symbol = null) {
     }
 
     // ── Big Daily Mover — momentum path (bypasses mean-reversion filters) ────────
-    // If a coin is up 5%+ on the day with real volume, trade the momentum instead
+    // If a coin is up 3%+ on the day with real volume, trade the momentum instead
     // of waiting for it to become oversold. Different rules, smaller size, tight stop.
     const gainerInfo = _topGainers.find(t => t.symbol === symbol);
-    if (gainerInfo && gainerInfo.change24h >= 5 && !(position && position.open)) {
+    if (gainerInfo && gainerInfo.change24h >= 3 && !(position && position.open)) {
       console.log(`\n🚀 BIG MOVER — ${symbol} +${gainerInfo.change24h.toFixed(1)}% today`);
       const volRatio = vol.current / vol.avg;
-      const rsiOk    = rsi3 >= 50 && rsi3 <= 75;           // healthy momentum zone, not exhausted
-      const stochOk  = !stochRsi || stochRsi.k < 80;       // not ramping toward top
+      const rsiOk    = rsi3 >= 45 && rsi3 <= 85;           // momentum zone, wider range
+      const stochOk  = !stochRsi || stochRsi.k < 88;       // not fully exhausted
       const priceOk  = price > ema8;                        // price above fast EMA
-      const volOk    = volRatio >= 2.0;                     // real crowd buying, not thin air
+      const volOk    = volRatio >= 1.5;                     // real crowd buying
       const notTooHot = gainerInfo.change24h <= 40;         // cap at 40% — beyond that is exit liquidity
 
       console.log(`  Vol: ${volRatio.toFixed(1)}x avg | RSI(3): ${rsi3?.toFixed(1)} | StochRSI K: ${stochRsi?.k?.toFixed(1) ?? "—"} | Above EMA8: ${price > ema8 ? "yes" : "no"}`);
 
       if (rsiOk && stochOk && priceOk && volOk && notTooHot) {
-        console.log(`\n✅ MOMENTUM ENTRY — big mover conditions met. Small position (30% size, 2% SL, 6% TP).`);
+        console.log(`\n✅ MOMENTUM ENTRY — big mover conditions met. Position (50% size, 2% SL, trailing stop).`);
         pushSignal(symbol, "ENTRY", `Big mover +${gainerInfo.change24h.toFixed(1)}% — momentum entry`);
-        const momSize = Math.min(currentPortfolio * sizePct * 0.30, CONFIG.maxTradeSizeUSD ?? Infinity);
+        const momSize = Math.min(currentPortfolio * sizePct * 0.50, CONFIG.maxTradeSizeUSD ?? Infinity);
         const momEntry = {
           timestamp: new Date().toISOString(), type: "entry", symbol,
           timeframe: CONFIG.timeframe, price, indicators: { ema8, vwap, rsi3 },
@@ -3077,10 +3077,13 @@ async function run(tvSignal = null, symbol = null) {
         writeTradeCsv(momEntry);
         console.log("═══════════════════════════════════════════════════════════\n");
         return;
+      } else if (rsi3 !== null && rsi3 < 35) {
+        // Big mover pulled back to oversold — fall through to mean-reversion path
+        console.log(`  📉 Big mover but RSI=${rsi3.toFixed(1)} pulled back to oversold — continuing to mean-reversion path\n`);
       } else {
         const reasons = [];
-        if (!rsiOk)    reasons.push(`RSI ${rsi3?.toFixed(1)} not in 40-82 range`);
-        if (!stochOk)  reasons.push(`StochRSI K=${stochRsi?.k?.toFixed(1)} too high (>90)`);
+        if (!rsiOk)    reasons.push(`RSI ${rsi3?.toFixed(1)} not in 45-85 range`);
+        if (!stochOk)  reasons.push(`StochRSI K=${stochRsi?.k?.toFixed(1)} exhausted (>88)`);
         if (!priceOk)  reasons.push(`price below EMA8`);
         if (!volOk)    reasons.push(`volume only ${volRatio.toFixed(1)}x avg (need 1.5x)`);
         if (!notTooHot) reasons.push(`up ${gainerInfo.change24h.toFixed(0)}% — too extended`);
