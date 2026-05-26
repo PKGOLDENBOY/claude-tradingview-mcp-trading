@@ -5194,6 +5194,20 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           run(null, addSym).catch(() => {});
         }
         res.writeHead(302, { Location: `/coin?symbol=${addSym}&pin=${pin}` }); res.end();
+      } else if (action === "clear-position") {
+        // Remove a stale position from the log without placing a sell order
+        const cpSym = (urlObj.searchParams.get("symbol") || "").toUpperCase();
+        if (cpSym) {
+          const cpLog = loadLog();
+          let cleared = false;
+          if (cpLog.positions?.[cpSym]) { delete cpLog.positions[cpSym]; cleared = true; }
+          if (cpLog.swingPositions?.[cpSym]) { delete cpLog.swingPositions[cpSym]; cleared = true; }
+          if (cpLog.breakoutPositions?.[cpSym]) { delete cpLog.breakoutPositions[cpSym]; cleared = true; }
+          if (cpLog.sniperPositions?.[cpSym]) { delete cpLog.sniperPositions[cpSym]; cleared = true; }
+          if (cleared) { saveLog(cpLog); console.log(`\n🗑️  Dashboard: cleared stale position ${cpSym} from log`); }
+          else { console.log(`\n⚠️  Dashboard: no position found for ${cpSym}`); }
+        }
+        redirect();
       } else if (action === "remove-coin") {
         const rmSym = (urlObj.searchParams.get("symbol") || "").toUpperCase();
         if (rmSym) {
