@@ -6410,6 +6410,31 @@ async function monitorSniperPositions() {
     startPriceStream(CONFIG.symbols);
   }, 4 * 60 * 60 * 1000);
 
+  // Quick gainer scan every 15 minutes — adds any new 3%+ mover immediately, no 4h wait
+  setInterval(async () => {
+    try {
+      const res  = await fetch("https://api.bitget.com/api/v2/spot/market/tickers");
+      const json = await res.json();
+      if (json.code !== "00000") return;
+      const NEVER_TRADE = new Set(["BGBUSDT","BSVUSDT","WBTCUSDT","STETHUSDT","CBETHUSDT","BETHUSDT"]);
+      const allCoins = (json.data || []).filter(t =>
+        t.symbol.endsWith("USDT") && !NEVER_TRADE.has(t.symbol) &&
+        parseFloat(t.usdtVolume) > 1_000_000
+      );
+      _topGainers = allCoins
+        .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPr), change24h: parseFloat(t.change24h) * 100, vol: parseFloat(t.usdtVolume) }))
+        .filter(t => t.change24h > 0)
+        .sort((a, b) => b.change24h - a.change24h)
+        .slice(0, 20);
+      const newMovers = _topGainers.filter(t => t.change24h >= 3 && !CONFIG.symbols.includes(t.symbol));
+      if (newMovers.length > 0) {
+        console.log(`\n⚡ Quick scan — new movers: ${newMovers.map(t => `${t.symbol} +${t.change24h.toFixed(1)}%`).join(", ")}`);
+        newMovers.forEach(t => CONFIG.symbols.push(t.symbol));
+        startPriceStream(CONFIG.symbols);
+      }
+    } catch { /* silent */ }
+  }, 15 * 60 * 1000);
+
   // Daily summary email — fires at midnight UTC
   setInterval(async () => {
     const now = new Date();
