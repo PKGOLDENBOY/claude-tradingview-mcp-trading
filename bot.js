@@ -4314,6 +4314,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="row"><div class="lbl">Strategy Mode</div><div style="font-size:12px;font-weight:700;color:${modeColor}">${modeIcon} ${d.adaptiveMode?.toUpperCase()}</div></div>
     <div class="row"><div class="lbl">Market Regime</div><div style="font-size:12px;font-weight:700;color:${regColor}">${d.regime}</div></div>
     <div class="row"><div class="lbl">Bot Status</div><div style="font-size:12px;font-weight:700;color:${d.paused?"#ffb800":"#00d4a0"}">${d.paused?"⚠️ "+(d.pauseReason||"Paused"):"✅ Active — scanning"}</div></div>
+    <div class="row">
+      <div class="lbl">Claude AI</div>
+      <div style="text-align:right">
+        ${_claudeCallsToday >= CLAUDE_DAILY_CAP
+          ? `<div style="font-size:12px;font-weight:700;color:#ffb800">⚠️ Cap reached (${_claudeCallsToday}/${CLAUDE_DAILY_CAP})</div><div style="font-size:10px;color:#4a5272">Resets at midnight UTC</div>`
+          : `<div style="font-size:12px;font-weight:700;color:#00d4a0">✅ ${_claudeCallsToday}/${CLAUDE_DAILY_CAP} calls used</div><div style="font-size:10px;color:#4a5272">${Date.now()-_lastClaudeCallMs < CLAUDE_GLOBAL_COOLDOWN_MS ? Math.round((CLAUDE_GLOBAL_COOLDOWN_MS-(Date.now()-_lastClaudeCallMs))/60000)+"min cooldown" : "Ready"}</div>`
+        }
+      </div>
+    </div>
   </div>
 </div>
 
@@ -4406,7 +4415,57 @@ ${d.topGainers&&d.topGainers.length>0?`
   </div>
 </div>
 
-<div class="sec"><div class="sec-title">Recent Trades</div><div class="card">${tradesHTML}</div></div>
+<!-- Strategy breakdown -->
+<div class="sec"><div class="sec-title">Strategy Breakdown</div></div>
+<div style="margin:0 16px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+${[["Scalp","scalp","⚡"],["Momentum","momentum","🚀"],["Sniper","sniper","🎯"],["Swing","swing","🌊"]].map(([label,key,icon])=>{
+  const s = d.strats?.[key];
+  if(!s) return `<div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:16px;padding:14px;opacity:.5"><div style="font-size:11px;color:#4a5272;margin-bottom:6px">${icon} ${label}</div><div style="font-size:20px;font-weight:800;color:#4a5272">—</div><div style="font-size:10px;color:#4a5272">No trades yet</div></div>`;
+  const wrColor = s.wrPct>=60?"#00d4a0":s.wrPct>=45?"#ffb800":"#ff4d6a";
+  return `<div style="background:#0e1117;border:1px solid #1a1f2e;border-radius:16px;padding:14px">
+    <div style="font-size:11px;color:#4a5272;margin-bottom:6px">${icon} ${label}</div>
+    <div style="font-size:22px;font-weight:800;color:${wrColor}">${s.wrPct}%</div>
+    <div style="background:#1a1f2e;border-radius:99px;height:4px;margin:6px 0">
+      <div style="width:${s.wrPct}%;height:100%;background:${wrColor};border-radius:99px"></div>
+    </div>
+    <div style="font-size:10px;color:#4a5272">${s.wins}W / ${s.losses}L &nbsp;·&nbsp; ${s.total} trades</div>
+    ${s.expectancy!=null?`<div style="font-size:10px;margin-top:3px;color:${s.expectancy>=0?"#00d4a0":"#ff4d6a"}">Exp: ${s.expectancy>=0?"+":""}${s.expectancy}%</div>`:""}
+    ${s.avgWin!=null?`<div style="font-size:9px;color:#4a5272;margin-top:2px">W̄ +${s.avgWin}% / L̄ ${s.avgLoss}%</div>`:""}
+  </div>`;
+}).join("")}
+</div>
+
+<div class="sec"><div class="sec-title">Recent Trades</div></div>
+<div class="card" style="margin:0 16px">
+${d.lastTrades.length===0
+  ? `<div style="padding:24px;text-align:center;color:#4a5272;font-size:14px">No trades yet</div>`
+  : d.lastTrades.map(t => {
+      const isEntry = t.type === "entry";
+      const pv = t.pnlPct != null ? parseFloat(t.pnlPct) : null;
+      const pc = pv == null ? "#4a5272" : pv >= 0 ? "#00d4a0" : "#ff4d6a";
+      const icon = isEntry ? "↑" : pv != null && pv >= 0 ? "✓" : "↓";
+      const iconBg = isEntry ? "#4f8dff18" : pv != null && pv >= 0 ? "#00d4a018" : "#ff4d6a18";
+      const iconColor = isEntry ? "#4f8dff" : pv != null && pv >= 0 ? "#00d4a0" : "#ff4d6a";
+      const isLive = t.paperTrading === false || t.orderPlaced === true;
+      const modeBadge = isLive
+        ? `<span style="font-size:8px;font-weight:700;color:#00d4a0;background:#00d4a015;border:1px solid #00d4a030;padding:1px 5px;border-radius:4px">LIVE</span>`
+        : `<span style="font-size:8px;font-weight:700;color:#4a5272;background:#1a1f2e;padding:1px 5px;border-radius:4px">PAPER</span>`;
+      return `<div style="padding:14px 18px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1a1f2e">
+        <div style="display:flex;align-items:center;gap:12px">
+          <div style="width:38px;height:38px;border-radius:12px;background:${iconBg};color:${iconColor};display:flex;align-items:center;justify-content:center;font-size:16px">${icon}</div>
+          <div>
+            <div style="font-size:15px;font-weight:700;display:flex;align-items:center;gap:6px">${(t.symbol||"").replace("USDT","")} ${modeBadge}</div>
+            <div style="font-size:12px;color:#4a5272">${isEntry?"Entry":"Exit"} &middot; $${Number(t.price||0).toFixed(4)}</div>
+          </div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:14px;font-weight:700;color:${pc}">${t.pnlPct != null ? (t.pnlPct >= 0 ? "+" : "") + Number(t.pnlPct).toFixed(2) + "%" : ""}</div>
+          <div style="font-size:12px;color:#4a5272">${(t.timestamp||"").slice(11,16)} UTC</div>
+        </div>
+      </div>`;
+    }).join("")
+}
+</div>
 
 </div><!-- /tab-trades -->
 
