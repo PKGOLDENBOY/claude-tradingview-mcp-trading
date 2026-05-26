@@ -121,6 +121,7 @@ async function emailDailySummary(log) {
 const livePrices = new Map(); // symbol → { price, timestamp }
 let priceStreamWs = null;
 const _processingStops = new Set(); // guard against double-exits
+const _processingEntries = new Set(); // guard against duplicate concurrent entries
 
 // Signal log — ring buffer of last 60 scan decisions shown on dashboard
 const signalLog = [];
@@ -2960,6 +2961,16 @@ async function run(tvSignal = null, symbol = null) {
   } else {
     // ── ENTRY FLOW ──────────────────────────────────────────────────────────
 
+    // Concurrent entry guard — if another async call is already processing an entry
+    // for this symbol, bail out immediately before touching the log.
+    if (_processingEntries.has(symbol)) {
+      console.log(`⏳ ENTRY LOCK — another scan is already processing ${symbol}. Skipping.`);
+      return;
+    }
+    _processingEntries.add(symbol);
+
+    try {
+
     // Trading 24/7 — no time block
 
     // Per-coin cooldown — skip re-entry for 2h after a loss on this coin
@@ -3629,6 +3640,10 @@ async function run(tvSignal = null, symbol = null) {
         console.log(`\nDecision log saved → ${LOG_FILE}`);
         writeTradeCsv(logEntry);
       }
+    }
+
+    } finally {
+      _processingEntries.delete(symbol);
     }
   }
 
