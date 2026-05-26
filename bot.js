@@ -6426,9 +6426,16 @@ async function monitorSniperPositions() {
         .filter(t => t.change24h > 0)
         .sort((a, b) => b.change24h - a.change24h)
         .slice(0, 20);
-      const newMovers = _topGainers.filter(t => t.change24h >= 3 && !CONFIG.symbols.includes(t.symbol));
+      const newMovers = _topGainers.filter(t => {
+        if (t.change24h < 3) return false;
+        if (CONFIG.symbols.includes(t.symbol)) return false;
+        // Unknown coins (not pre-validated by weekly backtest) need $5M+ daily volume
+        // to rule out thin pump-and-dumps. Established coins keep the $1M floor.
+        if (!BACKTEST[t.symbol] && t.vol < 5_000_000) return false;
+        return true;
+      });
       if (newMovers.length > 0) {
-        console.log(`\n⚡ Quick scan — new movers: ${newMovers.map(t => `${t.symbol} +${t.change24h.toFixed(1)}%`).join(", ")}`);
+        console.log(`\n⚡ Quick scan — new movers: ${newMovers.map(t => `${t.symbol} +${t.change24h.toFixed(1)}% ($${(t.vol/1e6).toFixed(0)}M vol)`).join(", ")}`);
         newMovers.forEach(t => CONFIG.symbols.push(t.symbol));
         startPriceStream(CONFIG.symbols);
       }
