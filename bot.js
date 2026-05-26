@@ -3047,9 +3047,9 @@ async function run(tvSignal = null, symbol = null) {
       console.log(`  Vol: ${volRatio.toFixed(1)}x avg | RSI(3): ${rsi3?.toFixed(1)} | StochRSI K: ${stochRsi?.k?.toFixed(1) ?? "—"} | Above EMA8: ${price > ema8 ? "yes" : "no"}`);
 
       if (rsiOk && stochOk && priceOk && volOk && notTooHot) {
-        console.log(`\n✅ MOMENTUM ENTRY — big mover conditions met. Position (50% size, 2% SL, trailing stop).`);
+        console.log(`\n✅ MOMENTUM ENTRY — big mover conditions met. Position (40% size, 2% SL, trailing stop).`);
         pushSignal(symbol, "ENTRY", `Big mover +${gainerInfo.change24h.toFixed(1)}% — momentum entry`);
-        const momSize = Math.min(currentPortfolio * sizePct * 0.50, CONFIG.maxTradeSizeUSD ?? Infinity);
+        const momSize = Math.min(currentPortfolio * sizePct * 0.40, CONFIG.maxTradeSizeUSD ?? Infinity);
         const momEntry = {
           timestamp: new Date().toISOString(), type: "entry", symbol,
           timeframe: CONFIG.timeframe, price, indicators: { ema8, vwap, rsi3 },
