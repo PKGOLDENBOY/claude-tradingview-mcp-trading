@@ -296,9 +296,9 @@ let _currentAccount = ACCOUNTS[0];
 const acct = () => _currentAccount;
 
 // Per-side taker fee rate for the active exchange.
-// BitGet spot: 0.10% | BitMart spot: 0.25%
+// BitGet spot with BGB deduction: 0.064% | BitMart spot: 0.25%
 function getFeePct() {
-  return acct().exchange === "bitmart" ? 0.0025 : 0.0008;
+  return acct().exchange === "bitmart" ? 0.0025 : 0.00064;
 }
 
 // ─── Swing Trading Config ────────────────────────────────────────────────────
@@ -4320,7 +4320,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   <div class="card">
     <div class="row">
       <div class="lbl">Fees Paid (live trades)</div>
-      <div style="text-align:right"><div class="val" style="color:#ffb800">$${(d.totalFeesPaid||0).toFixed(4)}</div><div class="lbl">0.08% per side</div></div>
+      <div style="text-align:right"><div class="val" style="color:#ffb800">$${(d.totalFeesPaid||0).toFixed(4)}</div><div class="lbl">0.064% per side (BGB)</div></div>
     </div>
     <div class="row">
       <div><div class="lbl">Daily Drawdown</div><div class="bar-track" style="width:140px"><div class="bar-fill" style="width:${ddUsed.toFixed(0)}%;background:${ddColor}"></div></div></div>
