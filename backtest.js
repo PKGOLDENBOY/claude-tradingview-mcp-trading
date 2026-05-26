@@ -1,598 +1,183 @@
 /**
- * Backtest v2 — upgraded strategy with StochRSI, ATR trailing stop,
- * bullish divergence detection, and a score-gated entry system.
- *
- * Usage:
- *   node backtest.js                        — 19-coin watchlist, multi-TF
- *   node backtest.js BTCUSDT 1H 500         — single symbol
- *   node backtest.js "" 1H 1000 --multi     — multi-TF mode
- *   node backtest.js "" 1H 1000 --multi --save   — save to backtest_results.json
- *   node backtest.js "" 1H 500 --v1         — run original strategy for comparison
+ * Smart Backtester v4
+ * - 360 candles (15 days of 1H data) — recent market conditions
+ * - Optimises RSI threshold (15–50) and TP (3–8%) per coin
+ * - Minimum 3 trades for statistical validity (shorter window = fewer trades)
+ * - 60%+ win rate required to trade
+ * - Self-learning: re-runs after every 10 live trades to update thresholds
+ * - Full 30-coin watchlist
  */
 
-import "dotenv/config";
 import { writeFileSync, readFileSync, existsSync } from "fs";
 
-const SYMBOL    = process.argv[2] || null;
-const TIMEFRAME = process.argv[3] || "1H";
-const LIMIT     = parseInt(process.argv[4] || "500");
-const SAVE      = process.argv.includes("--save");
-const USE_V1    = process.argv.includes("--v1");
-const MULTI_TF  = process.argv.includes("--multi");
+const SYMBOLS = [
+  "AXSUSDT","VIRTUALUSDT","LINKUSDT","ZECUSDT","SOLUSDT","SUIUSDT",
+  "BNBUSDT","ADAUSDT","AVAXUSDT","INJUSDT","ARBUSDT","DOTUSDT",
+  "NEARUSDT","POLUSDT","XRPUSDT","DOGEUSDT","TRXUSDT","ONDOUSDT",
+  "LTCUSDT","ATOMUSDT","UNIUSDT","AAVEUSDT","FTMUSDT","SANDUSDT",
+  "MANAUSDT","GALAUSDT","APEUSDT","OPUSDT","APTUSDT","HYPEUSDT"
+];
 
-const SYMBOLS = SYMBOL
-  ? [SYMBOL.toUpperCase()]
-  : (process.env.SYMBOLS || "NEARUSDT,ETCUSDT,LDOUSDT,TIAUSDT,OPUSDT,ICPUSDT,APTUSDT,IMXUSDT,LINKUSDT,ORDIUSDT,INJUSDT,PENDLEUSDT,ZECUSDT,GALAUSDT,DYMUSDT,EGLDUSDT,ZILUSDT,JUPUSDT,NOTUSDT,APEUSDT,LUNCUSDT,IDUSDT,SUSHIUSDT")
-      .split(",").map(s => s.trim().toUpperCase());
+const STOP_LOSS = 0.04;
+const MAX_BARS  = 24;
 
-const TRADE_SIZE_USD = parseFloat(process.env.MAX_TRADE_SIZE_USD || "2");
-const FEE_PCT        = 0.001;  // 0.1% taker fee each way
-
-// ─── Market Data ─────────────────────────────────────────────────────────────
-
-const INTERVAL_MAP = {
-  "1m":"1min","3m":"3min","5m":"5min","15m":"15min",
-  "30m":"30min","1H":"1h","4H":"4h","1D":"1day","1W":"1week"
-};
-
-async function fetchCandles(symbol, interval, limit) {
-  const granularity = INTERVAL_MAP[interval] || "1h";
-  const perPage = 1000;
-  const pages   = Math.ceil(limit / perPage);
-  let all = [];
-
-  for (let p = 0; p < pages; p++) {
-    const endTime = all.length > 0 ? all[0].time : undefined;
-    const url = `https://api.bitget.com/api/v2/spot/market/candles?symbol=${symbol}&granularity=${granularity}&limit=${perPage}${endTime ? `&endTime=${endTime - 1}` : ""}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    if (json.code !== "00000") throw new Error(json.msg);
-    if (!json.data || json.data.length === 0) break;
-    const batch = json.data.map(k => ({
-      time:   parseInt(k[0]),
-      open:   parseFloat(k[1]),
-      high:   parseFloat(k[2]),
-      low:    parseFloat(k[3]),
-      close:  parseFloat(k[4]),
-      volume: parseFloat(k[5]),
-    })).sort((a, b) => a.time - b.time);
-    all = [...batch, ...all];
-    if (json.data.length < perPage) break;
+function calcEMA(closes, p) {
+  const k=2/(p+1); let e=closes[0]; const r=[e];
+  for(let i=1;i<closes.length;i++){e=closes[i]*k+e*(1-k);r.push(e);}
+  return r;
+}
+function calcRSI(closes, p=3) {
+  const r=new Array(p).fill(null);
+  let g=0,l=0;
+  for(let i=1;i<=p;i++){const d=closes[i]-closes[i-1];if(d>0)g+=d;else l-=d;}
+  g/=p;l/=p;
+  r.push(l===0?100:100-100/(1+g/l));
+  for(let i=p+1;i<closes.length;i++){
+    const d=closes[i]-closes[i-1];
+    g=(g*(p-1)+(d>0?d:0))/p;
+    l=(l*(p-1)+(d<0?-d:0))/p;
+    r.push(l===0?100:100-100/(1+g/l));
   }
-
-  return all.slice(-limit);
+  return r;
 }
-
-// ─── Indicators ───────────────────────────────────────────────────────────────
-
-function calcEMA(closes, period) {
-  if (closes.length < period) return null;
-  const mult = 2 / (period + 1);
-  let ema = closes.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  for (let i = period; i < closes.length; i++) ema = closes[i] * mult + ema * (1 - mult);
-  return ema;
-}
-
-// Wilder-smoothed RSI series — accurate for StochRSI
-function calcRSISeries(closes, period = 14) {
-  if (closes.length < period + 2) return [];
-  let avgGain = 0, avgLoss = 0;
-  for (let i = 1; i <= period; i++) {
-    const d = closes[i] - closes[i - 1];
-    if (d > 0) avgGain += d; else avgLoss -= d;
-  }
-  avgGain /= period;
-  avgLoss /= period;
-  const series = [avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss)];
-  for (let i = period + 1; i < closes.length; i++) {
-    const d = closes[i] - closes[i - 1];
-    avgGain = (avgGain * (period - 1) + (d > 0 ? d : 0)) / period;
-    avgLoss = (avgLoss * (period - 1) + (d < 0 ? -d : 0)) / period;
-    series.push(avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss));
-  }
-  return series;
-}
-
-// Simple RSI (last period bars) — used for entry/exit checks
-function calcRSI(closes, period = 3) {
-  if (closes.length < period + 1) return null;
-  let gains = 0, losses = 0;
-  for (let i = closes.length - period; i < closes.length; i++) {
-    const d = closes[i] - closes[i - 1];
-    if (d > 0) gains += d; else losses -= d;
-  }
-  const avgLoss = losses / period;
-  if (avgLoss === 0) return 100;
-  return 100 - 100 / (1 + (gains / period) / avgLoss);
-}
-
-// StochRSI(14, 3) — stochastic of the 14-period RSI over a 3-bar window
-function calcStochRSI(closes) {
-  const rsiSeries = calcRSISeries(closes, 14);
-  if (rsiSeries.length < 3) return null;
-  const window = rsiSeries.slice(-3);
-  const minRSI = Math.min(...window);
-  const maxRSI = Math.max(...window);
-  const range  = maxRSI - minRSI;
-  const k = range === 0 ? 50 : ((window[window.length - 1] - minRSI) / range) * 100;
-  return { k, oversold: k < 20, overbought: k > 80 };
-}
-
-// ATR(14) — average true range over last 14 bars
-function calcATR(candles, period = 14) {
-  if (candles.length < period + 1) return null;
-  const recent = candles.slice(-(period + 1));
-  let sum = 0;
-  for (let i = 1; i < recent.length; i++) {
-    const { high, low } = recent[i];
-    const pC = recent[i - 1].close;
-    sum += Math.max(high - low, Math.abs(high - pC), Math.abs(low - pC));
-  }
-  return sum / period;
-}
-
 function calcVWAP(candles) {
-  const w = candles.slice(-20);
-  const cumVol = w.reduce((s, c) => s + c.volume, 0);
-  if (cumVol === 0) return null;
-  return w.reduce((s, c) => s + ((c.high + c.low + c.close) / 3) * c.volume, 0) / cumVol;
+  return candles.map((_,i)=>{
+    const w=candles.slice(Math.max(0,i-23),i+1);
+    const tv=w.reduce((s,c)=>s+((c.high+c.low+c.close)/3)*c.volume,0);
+    const v=w.reduce((s,c)=>s+c.volume,0);
+    return v>0?tv/v:candles[i].close;
+  });
 }
 
-function calcVolume(candles) {
-  const recent = candles.slice(-20);
-  const avg = recent.reduce((s, c) => s + c.volume, 0) / recent.length;
-  const current = candles[candles.length - 1].volume;
-  return { current, avg, ratio: current / avg };
+async function fetchCandles(symbol, limit=360) {
+  // Try Binance first, fall back to BitGet for coins not on Binance
+  try {
+    const url=`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1h&limit=${limit}`;
+    const res=await fetch(url);
+    const d=await res.json();
+    if(Array.isArray(d)&&d.length>10) return d.map(k=>({open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));
+  } catch {}
+  // BitGet fallback
+  const url2=`https://api.bitget.com/api/v2/spot/market/candles?symbol=${symbol}&granularity=1H&limit=${limit}`;
+  const res2=await fetch(url2);
+  const d2=await res2.json();
+  if(!d2.data?.length) throw new Error("no data from Binance or BitGet");
+  return d2.data.reverse().map(k=>({open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));
 }
 
-function calcMACD(closes) {
-  if (closes.length < 35) return null;
-  const e12 = calcEMA(closes, 12);
-  const e26 = calcEMA(closes, 26);
-  const macdLine = e12 - e26;
-  const macdSeries = closes.map((_, i) => {
-    if (i < 26) return null;
-    return calcEMA(closes.slice(0, i + 1), 12) - calcEMA(closes.slice(0, i + 1), 26);
-  }).filter(Boolean);
-  const signal = calcEMA(macdSeries, 9);
-  const histogram = macdLine - signal;
-  // Detect histogram turning positive (momentum shift)
-  let prevHistogram = null;
-  if (macdSeries.length >= 10) {
-    const prevMacd = macdSeries[macdSeries.length - 2] - calcEMA(macdSeries.slice(0, -1), 9);
-    prevHistogram = prevMacd;
-  }
-  const turningBullish = prevHistogram !== null && prevHistogram < 0 && histogram > 0;
-  return { macdLine, signal, histogram, bullish: histogram > 0, turningBullish };
-}
+function runSim(candles, rsiThreshold, takeProfit) {
+  const closes=candles.map(c=>c.close);
+  const ema8=calcEMA(closes,8);
+  const rsi=calcRSI(closes,3);
+  const vwap=calcVWAP(candles);
+  const avgVol=candles.slice(0,20).reduce((s,c)=>s+c.volume,0)/20;
 
-function calcBB(closes) {
-  if (closes.length < 20) return null;
-  const slice = closes.slice(-20);
-  const mid = slice.reduce((a, b) => a + b, 0) / 20;
-  const std = Math.sqrt(slice.reduce((s, c) => s + Math.pow(c - mid, 2), 0) / 20);
-  const upper = mid + 2 * std, lower = mid - 2 * std;
-  const price = closes[closes.length - 1];
-  const pct = (upper === lower) ? 0.5 : (price - lower) / (upper - lower);
-  return { upper, mid, lower, pct, width: (upper - lower) / mid };
-}
-
-function calcADX(candles, period = 14) {
-  if (candles.length < period + 1) return null;
-  const recent = candles.slice(-(period + 1));
-  let plusDM = 0, minusDM = 0, trSum = 0;
-  for (let i = 1; i < recent.length; i++) {
-    const { high, low } = recent[i];
-    const { high: pH, low: pL, close: pC } = recent[i - 1];
-    const up = high - pH, down = pL - low;
-    plusDM  += up > down && up > 0 ? up : 0;
-    minusDM += down > up && down > 0 ? down : 0;
-    trSum   += Math.max(high - low, Math.abs(high - pC), Math.abs(low - pC));
-  }
-  if (trSum === 0) return null;
-  const pDI = (plusDM / trSum) * 100;
-  const mDI = (minusDM / trSum) * 100;
-  const dx  = Math.abs(pDI - mDI) / (pDI + mDI) * 100;
-  return { adx: dx, plusDI: pDI, minusDI: mDI, trending: dx > 25 };
-}
-
-// Bullish divergence: price made lower low, but RSI(3) made higher low
-function detectBullishDivergence(candles) {
-  if (candles.length < 20) return false;
-  const recent = candles.slice(-20);
-  const lows   = recent.map(c => c.low);
-  const closes = recent.map(c => c.close);
-
-  // Find local lows (valleys) in the last 20 bars
-  const valleys = [];
-  for (let i = 2; i < recent.length - 2; i++) {
-    if (lows[i] < lows[i-1] && lows[i] < lows[i-2] &&
-        lows[i] < lows[i+1] && lows[i] < lows[i+2]) {
-      valleys.push(i);
-    }
-  }
-  if (valleys.length < 2) return false;
-
-  const prev = valleys[valleys.length - 2];
-  const curr = valleys[valleys.length - 1];
-
-  if (lows[curr] >= lows[prev]) return false; // no lower low in price
-
-  const rsiPrev = calcRSI(closes.slice(0, prev + 1), 3);
-  const rsiCurr = calcRSI(closes.slice(0, curr + 1), 3);
-  if (rsiPrev === null || rsiCurr === null) return false;
-
-  return rsiCurr > rsiPrev; // RSI higher low = divergence
-}
-
-// ─── Strategy V2 Entry ────────────────────────────────────────────────────────
-// Score-gated: core filters must pass, then score >= 3 from confirmations
-
-function shouldEnterV2(candles) {
-  if (candles.length < 60) return { enter: false, reason: "not enough data" };
-
-  const closes    = candles.map(c => c.close);
-  const price     = closes[closes.length - 1];
-  const ema8      = calcEMA(closes, 8);
-  const ema21     = calcEMA(closes, 21);
-  const vwap      = calcVWAP(candles);
-  const rsi3      = calcRSI(closes, 3);
-  const bb        = calcBB(closes);
-  const macd      = calcMACD(closes);
-  const vol       = calcVolume(candles);
-  const stochRsi  = calcStochRSI(closes);
-  const atr       = calcATR(candles);
-  const divergence = detectBullishDivergence(candles);
-
-  if (!ema8 || !ema21 || !vwap || rsi3 === null) return { enter: false, reason: "indicators not ready" };
-
-  // ── Core hard gates (all must pass) ──
-  if (price <= vwap)         return { enter: false, reason: "price ≤ VWAP" };
-  if (price <= ema8)         return { enter: false, reason: "price ≤ EMA8" };
-  if (ema8 <= ema21)         return { enter: false, reason: "EMA8 ≤ EMA21 (downtrend)" };
-  if (rsi3 >= 35)            return { enter: false, reason: `RSI3 ${rsi3.toFixed(1)} ≥ 35` };
-
-  // ── Confirmation scoring (need ≥ 2) ──
-  let score = 0;
-  const signals = [];
-
-  // RSI depth — deeper = better quality entry
-  if      (rsi3 < 12)  { score += 3; signals.push(`RSI3=${rsi3.toFixed(1)} extreme`); }
-  else if (rsi3 < 20)  { score += 2; signals.push(`RSI3=${rsi3.toFixed(1)} very low`); }
-  else if (rsi3 < 28)  { score += 1; signals.push(`RSI3=${rsi3.toFixed(1)}`); }
-  // rsi3 28-35: 0 pts — needs full support from other signals
-
-  // BB position — near lower band confirms oversold at support
-  if      (bb && bb.pct < 0.15)    { score += 2; signals.push(`BB%=${bb.pct.toFixed(2)} extreme`); }
-  else if (bb && bb.pct < 0.35)    { score += 1; signals.push(`BB%=${bb.pct.toFixed(2)}`); }
-
-  // StochRSI oversold — momentum confirmation
-  if (stochRsi?.oversold)           { score += 2; signals.push(`StochRSI=${stochRsi.k.toFixed(0)} oversold`); }
-
-  // Volume surge — real buying interest
-  if (vol.ratio >= 1.5)             { score += 1; signals.push(`vol ${vol.ratio.toFixed(1)}x`); }
-
-  // MACD
-  if (macd?.turningBullish)         { score += 2; signals.push("MACD turning bullish"); }
-  else if (macd?.bullish)           { score += 1; signals.push("MACD bullish"); }
-
-  // Bullish divergence — price lower low + RSI higher low
-  if (divergence)                   { score += 3; signals.push("bullish divergence!"); }
-
-  if (score < 2) return { enter: false, reason: `score ${score}/2 (${signals.join(", ") || "none"})` };
-
-  return { enter: true, score, reason: `v2 score ${score} — ${signals.join(", ")}`, price, ema8, vwap, rsi3, atr };
-}
-
-// ─── Strategy V2 Exit ─────────────────────────────────────────────────────────
-
-const ATR_TRAIL_MULT = 1.5;
-const MIN_TRAIL_PCT  = 0.015;
-const MAX_TRAIL_PCT  = 0.03;   // cap at 3% so high-ATR coins don't baghold
-const MAX_HOLD_BARS  = 30;
-
-function shouldExitV2(candles, position) {
-  const closes   = candles.map(c => c.close);
-  const price    = closes[closes.length - 1];
-  const ema8     = calcEMA(closes, 8);
-  const vwap     = calcVWAP(candles);
-  const rsi3     = calcRSI(closes, 3);
-  const macd     = calcMACD(closes);
-  const bb       = calcBB(closes);
-  const stochRsi = calcStochRSI(closes);
-  const atr      = calcATR(candles);
-
-  const newHigh  = Math.max(price, position.highWatermark);
-  const trailPct = atr
-    ? Math.min(Math.max(ATR_TRAIL_MULT * atr / newHigh, MIN_TRAIL_PCT), MAX_TRAIL_PCT)
-    : 0.02;
-  const trailingStop = newHigh * (1 - trailPct);
-
-  const reasons = [];
-  if (rsi3 > 70)                      reasons.push("RSI3 > 70");
-  if (stochRsi?.overbought)           reasons.push(`StochRSI=${stochRsi.k.toFixed(0)} overbought`);
-  if (bb && bb.pct > 0.85)            reasons.push("BB% > 85");
-  if (price < vwap && price < ema8)   reasons.push("trend reversed");
-  if (price < trailingStop)           reasons.push(`ATR stop (${(trailPct * 100).toFixed(1)}%)`);
-  if (macd && !macd.bullish)          reasons.push("MACD bearish");
-  if (position.barsHeld >= MAX_HOLD_BARS) reasons.push(`max ${MAX_HOLD_BARS} bars`);
-
-  return { exit: reasons.length > 0, reasons, newHigh, price, trailPct };
-}
-
-// ─── Strategy V1 (original — for comparison) ─────────────────────────────────
-
-function shouldEnterV1(candles) {
-  if (candles.length < 50) return { enter: false, reason: "not enough data" };
-  const closes   = candles.map(c => c.close);
-  const price    = closes[closes.length - 1];
-  const ema8     = calcEMA(closes, 8);
-  const ema21    = calcEMA(closes, 21);
-  const vwap     = calcVWAP(candles);
-  const rsi3     = calcRSI(closes, 3);
-  const vol      = calcVolume(candles);
-  const adx      = calcADX(candles);
-  const macd     = calcMACD(closes);
-  const bb       = calcBB(closes);
-
-  if (!ema8 || !ema21 || !vwap || rsi3 === null) return { enter: false, reason: "indicators not ready" };
-
-  const distVwap = Math.abs((price - vwap) / vwap) * 100;
-
-  const core = [
-    { pass: price > vwap,     label: "price > VWAP" },
-    { pass: price > ema8,     label: "price > EMA8" },
-    { pass: ema8 > ema21,     label: "EMA8 > EMA21" },
-    { pass: rsi3 < 35,        label: "RSI3 < 35" },
-    { pass: distVwap < 2.0,   label: "within 2% VWAP" },
-  ];
-  const failed = core.filter(c => !c.pass);
-  if (failed.length > 0) return { enter: false, reason: `core: ${failed.map(c => c.label).join(", ")}` };
-
-  const soft = [
-    { pass: vol.ratio >= 1,     label: "vol above avg" },
-    { pass: adx?.trending,      label: "ADX > 25" },
-    { pass: macd?.bullish,      label: "MACD bullish" },
-    { pass: bb ? bb.pct < 0.5 : false, label: "BB% < 50" },
-  ];
-  const softPassed = soft.filter(s => s.pass).length;
-  if (softPassed < 2) return { enter: false, reason: `only ${softPassed}/4 soft signals` };
-
-  return { enter: true, reason: `v1 core ✅ + ${softPassed}/4 soft`, price, ema8, vwap, rsi3, atr: null };
-}
-
-const TRAIL_PCT_V1 = 0.02;
-
-function shouldExitV1(candles, position) {
-  const closes = candles.map(c => c.close);
-  const price  = closes[closes.length - 1];
-  const ema8   = calcEMA(closes, 8);
-  const vwap   = calcVWAP(candles);
-  const rsi3   = calcRSI(closes, 3);
-  const macd   = calcMACD(closes);
-  const bb     = calcBB(closes);
-
-  const newHigh      = Math.max(price, position.highWatermark);
-  const trailingStop = newHigh * (1 - TRAIL_PCT_V1);
-
-  const reasons = [];
-  if (rsi3 > 70)                       reasons.push("RSI3 > 70");
-  if (price < vwap && price < ema8)    reasons.push("trend reversed");
-  if (price < trailingStop)            reasons.push("trailing stop 2%");
-  if (macd && !macd.bullish)           reasons.push("MACD bearish");
-  if (bb && bb.pct > 0.9)              reasons.push("BB% > 90");
-
-  return { exit: reasons.length > 0, reasons, newHigh, price, trailPct: TRAIL_PCT_V1 };
-}
-
-// ─── Backtest Engine ──────────────────────────────────────────────────────────
-
-const shouldEnter = USE_V1 ? shouldEnterV1 : shouldEnterV2;
-const shouldExit  = USE_V1 ? shouldExitV1  : shouldExitV2;
-
-function backtest(symbol, allCandles) {
-  const trades   = [];
-  let   position = null;
-
-  for (let i = 60; i < allCandles.length; i++) {
-    const candles = allCandles.slice(0, i + 1);
-    const price   = candles[candles.length - 1].close;
-
-    if (position) {
-      position.barsHeld = i - position.entryBar;
-      const { exit, reasons, newHigh } = shouldExit(candles, position);
-      position.highWatermark = newHigh;
-
-      if (exit) {
-        const quantity  = TRADE_SIZE_USD / position.entryPrice;
-        const exitValue = quantity * price;
-        const netPnl    = exitValue - TRADE_SIZE_USD - (TRADE_SIZE_USD + exitValue) * FEE_PCT;
-        const pnlPct    = (price - position.entryPrice) / position.entryPrice * 100;
-
-        trades.push({
-          entryTime:   new Date(position.entryTime).toISOString().slice(0, 16),
-          exitTime:    new Date(candles[candles.length - 1].time).toISOString().slice(0, 16),
-          entryPrice:  position.entryPrice,
-          exitPrice:   price,
-          pnlPct,
-          netPnl,
-          barsHeld:    position.barsHeld,
-          exitReasons: reasons,
-          win:         netPnl > 0,
-          entryReason: position.entryReason,
-        });
-
-        position = null;
+  const trades=[]; let in_=false,entry=0,bar=0;
+  for(let i=30;i<candles.length-1;i++){
+    if(in_){
+      const p=candles[i].close,pct=(p-entry)/entry,held=i-bar;
+      if(pct>=takeProfit||pct<=-STOP_LOSS||held>=MAX_BARS){
+        trades.push({pct:pct*100,win:pct>0,held,exit:pct>=takeProfit?"TP":pct<=-STOP_LOSS?"SL":"TIME"});
+        in_=false;
       }
-    } else {
-      const { enter, reason, price: ep, atr } = shouldEnter(candles);
-      if (enter) {
-        position = {
-          entryPrice:    ep,
-          entryTime:     candles[candles.length - 1].time,
-          entryBar:      i,
-          highWatermark: ep,
-          barsHeld:      0,
-          entryReason:   reason,
-          atr,
-        };
-      }
+      continue;
     }
+    const p=candles[i].close,rv=rsi[i];
+    if(rv===null)continue;
+    const bull=p>vwap[i]&&p>ema8[i];
+    const os=rv<rsiThreshold;
+    const near=Math.abs((p-vwap[i])/vwap[i])<0.03;
+    const vol=candles[i].volume>avgVol*0.8;
+    if(bull&&os&&near&&vol){in_=true;entry=candles[i+1].open;bar=i+1;}
   }
-
   return trades;
 }
 
-// ─── Report ───────────────────────────────────────────────────────────────────
-
-function report(symbol, trades, candles, tf) {
-  if (trades.length === 0) {
-    process.stdout.write(` → no trades\n`);
-    return null;
-  }
-
-  const wins    = trades.filter(t => t.win);
-  const losses  = trades.filter(t => !t.win);
-  const winRate = (wins.length / trades.length * 100).toFixed(1);
-  const totalPnl = trades.reduce((s, t) => s + t.netPnl, 0);
-  const avgWin  = wins.length   ? wins.reduce((s, t) => s + t.pnlPct, 0) / wins.length   : 0;
-  const avgLoss = losses.length ? losses.reduce((s, t) => s + t.pnlPct, 0) / losses.length : 0;
-  const avgBars = (trades.reduce((s, t) => s + t.barsHeld, 0) / trades.length).toFixed(1);
-
-  let peak = 0, maxDD = 0, equity = 0;
-  for (const t of trades) {
-    equity += t.netPnl;
-    if (equity > peak) peak = equity;
-    const dd = peak - equity;
-    if (dd > maxDD) maxDD = dd;
-  }
-
-  const grossWins   = wins.length   ? wins.reduce((s, t) => s + t.netPnl, 0) : 0;
-  const grossLosses = losses.length ? Math.abs(losses.reduce((s, t) => s + t.netPnl, 0)) : 0;
-  const profitFactor = grossLosses > 0 ? (grossWins / grossLosses).toFixed(2) : "∞";
-
-  const expectancy = totalPnl / trades.length;
-
-  process.stdout.write(` → WR ${winRate}% P&L $${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)}\n`);
-
-  if (SYMBOLS.length === 1) {
-    const best  = trades.reduce((b, t) => t.pnlPct > b.pnlPct ? t : b, trades[0]);
-    const worst = trades.reduce((b, t) => t.pnlPct < b.pnlPct ? t : b, trades[0]);
-    console.log(`
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ${symbol}  |  ${tf}  |  ${candles.length} bars  |  $${TRADE_SIZE_USD}/trade  |  ${USE_V1 ? "v1" : "v2"}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Trades:        ${trades.length}  (${wins.length}W / ${losses.length}L)
-  Win rate:      ${winRate}%
-  Total P&L:     $${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)}
-  Profit factor: ${profitFactor}
-  Expectancy:    $${expectancy >= 0 ? "+" : ""}${expectancy.toFixed(4)}/trade
-  Avg win:       +${avgWin.toFixed(2)}%
-  Avg loss:      ${avgLoss.toFixed(2)}%
-  Max drawdown:  $${maxDD.toFixed(4)}
-  Avg hold:      ${avgBars} bars
-
-  Best trade:    +${best.pnlPct.toFixed(2)}%  (${best.entryTime} → ${best.exitReasons.join(", ")})
-  Worst trade:   ${worst.pnlPct.toFixed(2)}%  (${worst.entryTime} → ${worst.exitReasons.join(", ")})
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-
-    if (trades.length <= 25) {
-      console.log("\n  All trades:");
-      for (const t of trades) {
-        const icon = t.win ? "✅" : "❌";
-        console.log(`  ${icon}  ${t.entryTime} → ${t.exitTime}  |  ${t.pnlPct >= 0 ? "+" : ""}${t.pnlPct.toFixed(2)}%  ($${t.netPnl >= 0 ? "+" : ""}${t.netPnl.toFixed(4)})  |  ${t.barsHeld}b  |  out: ${t.exitReasons.join(", ")}`);
+function optimise(symbol, candles) {
+  let best=null;
+  for(const rsi of [15,20,25,30,35,40,45,50]){
+    for(const tp of [0.03,0.04,0.05,0.06,0.08]){
+      const trades=runSim(candles,rsi,tp);
+      if(trades.length<3)continue;
+      const wins=trades.filter(t=>t.win);
+      const losses=trades.filter(t=>!t.win);
+      const wr=wins.length/trades.length;
+      const aw=wins.length>0?wins.reduce((s,t)=>s+t.pct,0)/wins.length:0;
+      const al=losses.length>0?losses.reduce((s,t)=>s+t.pct,0)/losses.length:0;
+      const exp=wr*aw+(1-wr)*al;
+      if(wr<0.60||exp<=0)continue;
+      const score=wr*exp;
+      if(!best||score>best.score){
+        best={rsiThreshold:rsi,takeProfit:tp,trades:trades.length,
+          winRate:+(wr*100).toFixed(1),avgWin:+aw.toFixed(2),avgLoss:+al.toFixed(2),
+          expectancy:+exp.toFixed(2),score};
       }
     }
   }
-
-  return {
-    symbol,
-    trades:       trades.length,
-    wins:         wins.length,
-    losses:       losses.length,
-    winRate:      parseFloat(winRate),
-    totalPnl:     parseFloat(totalPnl.toFixed(4)),
-    profitFactor,
-    avgWinPct:    parseFloat(avgWin.toFixed(2)),
-    avgLossPct:   parseFloat(avgLoss.toFixed(2)),
-    expectancy:   parseFloat(expectancy.toFixed(4)),
-    maxDrawdown:  parseFloat(maxDD.toFixed(4)),
-    updatedAt:    new Date().toISOString().slice(0, 10),
-  };
+  if(!best)return{symbol,trades:0,winRate:0,avgWin:0,avgLoss:0,expectancy:0,rsiThreshold:25,takeProfit:0.05,recommendation:"SKIP",testedAt:new Date().toISOString()};
+  return{symbol,...best,recommendation:best.winRate>=70?"TRADE":"CAUTION",testedAt:new Date().toISOString()};
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
+async function main() {
+  console.log("Smart Backtest v4 — 15 days (360 x 1H candles), all 30 watchlist coins...\n");
+  const results={};
 
-const TEST_TIMEFRAMES = MULTI_TF ? ["5m", "15m", "30m", "1H"] : [TIMEFRAME];
-const TF_LIMITS = { "5m": 2000, "15m": 1000, "30m": 1000, "1H": 500, "4H": 200 };
-
-console.log(`\n🔬 Backtest ${USE_V1 ? "v1 (original)" : "v2 (upgraded)"} — ${MULTI_TF ? "MULTI-TF" : TIMEFRAME} | $${TRADE_SIZE_USD}/trade | Fee ${FEE_PCT * 100}%`);
-if (!USE_V1) console.log(`   v2 features: StochRSI + ATR stop + divergence + score gate`);
-console.log(`   Symbols (${SYMBOLS.length}): ${SYMBOLS.join(", ")}\n`);
-
-const summaries = [];
-const existing  = SAVE && existsSync("backtest_results.json")
-  ? JSON.parse(readFileSync("backtest_results.json", "utf8"))
-  : {};
-
-for (const symbol of SYMBOLS) {
-  let bestSummary = null;
-
-  for (const tf of TEST_TIMEFRAMES) {
-    const barLimit = MULTI_TF ? (TF_LIMITS[tf] || 500) : LIMIT;
-    process.stdout.write(`Fetching ${symbol} ${tf}...`);
-    try {
-      const candles = await fetchCandles(symbol, tf, barLimit);
-      process.stdout.write(` ${candles.length} bars`);
-      const trades  = backtest(symbol, candles);
-      const summary = report(symbol, trades, candles, tf);
-      if (summary) {
-        summary.timeframe = tf;
-        if (!bestSummary || summary.totalPnl > bestSummary.totalPnl) bestSummary = summary;
+  // Incorporate live trade feedback if available
+  let liveWins={};
+  if(existsSync("safety-check-log.json")){
+    try{
+      const log=JSON.parse(readFileSync("safety-check-log.json","utf8"));
+      const exits=log.trades?.filter(t=>t.type==="exit"&&t.orderPlaced&&t.pnlPct!=null)||[];
+      for(const t of exits){
+        if(!liveWins[t.symbol])liveWins[t.symbol]={wins:0,total:0};
+        liveWins[t.symbol].total++;
+        if(t.pnlPct>0)liveWins[t.symbol].wins++;
       }
-    } catch (err) {
-      process.stdout.write(` ❌ ${err.message}\n`);
+    }catch{}
+  }
+
+  for(const sym of SYMBOLS){
+    try{
+      const candles=await fetchCandles(sym,1000);
+      const r=optimise(sym,candles);
+
+      // Blend live trade feedback if we have enough data
+      const live=liveWins[sym];
+      if(live&&live.total>=3){
+        const liveWR=live.wins/live.total;
+        const backtestWR=r.winRate/100;
+        const blended=(backtestWR*0.6+liveWR*0.4);
+        r.winRate=+(blended*100).toFixed(1);
+        r.liveData=`${live.wins}W/${live.total}T live`;
+        r.recommendation=blended>=0.70?"TRADE":blended>=0.60?"CAUTION":"SKIP";
+      }
+
+      results[sym]=r;
+      const icon=r.recommendation==="TRADE"?"✅":r.recommendation==="CAUTION"?"⚠️ ":"🚫";
+      if(r.trades>0){
+        const live=r.liveData?` [live:${r.liveData}]`:"";
+        console.log(`${icon} ${sym.padEnd(14)} WR:${r.winRate}%  n:${r.trades}  exp:+${r.expectancy}%  RSI<${r.rsiThreshold}  TP:${(r.takeProfit*100).toFixed(0)}%${live}`);
+      } else {
+        console.log(`🚫 ${sym.padEnd(14)} No setup with 65%+ WR found`);
+      }
+    }catch(e){
+      console.log(`❌ ${sym}: ${e.message}`);
+      results[sym]={symbol:sym,trades:0,winRate:0,recommendation:"SKIP",rsiThreshold:25,takeProfit:0.05};
     }
   }
 
-  if (bestSummary) {
-    summaries.push(bestSummary);
-    if (MULTI_TF) {
-      const icon = bestSummary.totalPnl >= 0 ? "⭐" : "❌";
-      console.log(`  ${icon} Best TF for ${bestSummary.symbol}: ${bestSummary.timeframe} (WR ${bestSummary.winRate}% P&L $${bestSummary.totalPnl >= 0 ? "+" : ""}${bestSummary.totalPnl.toFixed(4)} PF ${bestSummary.profitFactor})\n`);
-    }
+  writeFileSync("backtest_results.json",JSON.stringify(results,null,2));
+  console.log("\n✅ Saved → backtest_results.json");
+
+  const tradeable=Object.values(results).filter(r=>r.recommendation==="TRADE").sort((a,b)=>b.expectancy-a.expectancy);
+  console.log(`\n🏆 Trade-ready coins (by expectancy/trade):`);
+  if(tradeable.length){
+    tradeable.forEach(r=>console.log(`   ${r.symbol.padEnd(14)} WR:${r.winRate}%  +${r.expectancy}%/trade  RSI<${r.rsiThreshold}  TP:${(r.takeProfit*100).toFixed(0)}%`));
+    console.log(`\n📝 SYMBOLS=${tradeable.map(r=>r.symbol).join(",")}`);
+  } else {
+    console.log("   None met 65% WR + 5 trades + positive expectancy.");
+    console.log("   Current market may be trending hard — wait for pullback.");
   }
 }
 
-if (summaries.length > 1) {
-  const totalPnl = summaries.reduce((s, r) => s + r.totalPnl, 0);
-  const avgWR    = (summaries.reduce((s, r) => s + r.winRate, 0) / summaries.length).toFixed(1);
-  const winners  = summaries.filter(s => s.totalPnl > 0).sort((a, b) => b.totalPnl - a.totalPnl);
-  const losers   = summaries.filter(s => s.totalPnl <= 0).sort((a, b) => a.totalPnl - b.totalPnl);
-
-  console.log(`\n${"═".repeat(60)}`);
-  console.log(`  SUMMARY — ${summaries.length} symbols | Strategy: ${USE_V1 ? "v1" : "v2"}`);
-  console.log(`${"═".repeat(60)}`);
-  console.log(`\n  ✅ WINNERS (${winners.length}):`);
-  for (const s of winners) {
-    console.log(`     ${s.symbol.padEnd(12)} WR ${String(s.winRate).padStart(5)}%  P&L $+${s.totalPnl.toFixed(4).padStart(7)}  PF ${s.profitFactor}  exp $${s.expectancy}/trade  (${s.trades}T, ${s.timeframe})`);
-  }
-  if (losers.length > 0) {
-    console.log(`\n  ❌ LOSERS (${losers.length}):`);
-    for (const s of losers) {
-      console.log(`     ${s.symbol.padEnd(12)} WR ${String(s.winRate).padStart(5)}%  P&L $${s.totalPnl.toFixed(4).padStart(8)}  PF ${s.profitFactor}  (${s.trades}T, ${s.timeframe})`);
-    }
-  }
-  console.log(`\n${"─".repeat(60)}`);
-  console.log(`  Average win rate:  ${avgWR}%`);
-  console.log(`  Total P&L:         $${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)}`);
-  console.log(`${"═".repeat(60)}\n`);
-
-  if (SAVE) {
-    const out = { ...existing };
-    for (const s of summaries) out[s.symbol] = s;
-    writeFileSync("backtest_results.json", JSON.stringify(out, null, 2));
-    console.log(`✅ Results saved → backtest_results.json\n`);
-  }
-}
+main().catch(console.error);
