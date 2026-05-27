@@ -3427,7 +3427,17 @@ async function run(tvSignal = null, symbol = null) {
     // Swing (8% target, 1-5 days) beats scalp (1% target, 1-6h) when:
     //   • multiple timeframes align bullishly, AND
     //   • coin is genuinely oversold on 4H (not just a short-term noise dip)
-    if (!vwapBounceMode && !(log.swingPositions || {})[symbol]?.open) {
+    const openSwingCount = Object.values(log.swingPositions || {}).filter(p => p && p.open).length;
+    const utcHour = new Date().getUTCHours();
+    const swingOffHours = utcHour >= SWING.entryBlockH[0] || utcHour < SWING.entryBlockH[1]; // 22:00–06:00 UTC
+    const weeklyOkForSwing = bullTrendWeekly !== false; // null = unknown (new coin) = allow; false = weekly bearish = block
+
+    if (swingOffHours)       console.log(`  📊 Strategy: SCALP — swing off-hours (22:00–06:00 UTC)`);
+    else if (!weeklyOkForSwing) console.log(`  📊 Strategy: SCALP — weekly trend bearish, no swing`);
+    else if (openSwingCount >= SWING.maxOpen) console.log(`  📊 Strategy: SCALP — max swing positions (${SWING.maxOpen}) already open`);
+
+    if (!vwapBounceMode && !(log.swingPositions || {})[symbol]?.open &&
+        openSwingCount < SWING.maxOpen && !swingOffHours && weeklyOkForSwing) {
       const swingSetup = scoreSwingSetup(
         closes4h, candlesDay.map(c => c.close), closesWeek,
         bullTrend4h, rsi14_1h, adx, vol
