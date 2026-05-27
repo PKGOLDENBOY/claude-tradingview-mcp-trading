@@ -158,6 +158,9 @@ let _lastScanTime = null;   // ms epoch when last full cycle finished
 let _lastScanCount = 0;     // how many coins were in last cycle
 let _lastTradeAt = null;    // ISO timestamp of most recent executed order
 
+// Per-symbol mutex — prevents duplicate exits when poll + webhook run concurrently
+const _runningSymbols = new Set();
+
 // Per-coin latest scan data — shown in dashboard coin detail view
 const coinSnapshots = {};
 
@@ -413,7 +416,7 @@ function getAdaptiveMode(trades) {
   if (wr.winRate >= 0.65) return { mode: "normal",    label: `✅ Normal — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample})`,    rsiThreshold: 30, confidenceMin: 70, sizeMultiplier: 1.0 };
   if (wr.winRate >= 0.45) return { mode: "cautious",  label: `⚠️  Cautious — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample})`,  rsiThreshold: 25, confidenceMin: 80, sizeMultiplier: 0.75 };
   if (wr.winRate >= 0.35) return { mode: "defensive", label: `🔴 Defensive — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample})`, rsiThreshold: 20, confidenceMin: 85, sizeMultiplier: 0.5 };
-  return { mode: "paused", label: `🛑 Paused — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample}) too low`, rsiThreshold: 20, confidenceMin: 90, sizeMultiplier: 0 };
+  return { mode: "paused", label: `🛑 Paused — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample}) too low`, rsiThreshold: 20, confidenceMin: 90, sizeMultiplier: 0.10 };
 }
 
 // ─── Self-Learning: Post-Trade Threshold Optimization ────────────────────────
@@ -2615,6 +2618,12 @@ async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
 
 async function run(tvSignal = null, symbol = null) {
   symbol = (symbol || CONFIG.symbols[0]).toUpperCase();
+  if (_runningSymbols.has(symbol)) {
+    console.log(`⏳ ${symbol} already being processed — skipping concurrent call`);
+    return;
+  }
+  _runningSymbols.add(symbol);
+  try {
   checkOnboarding();
   initCsv();
   console.log("═══════════════════════════════════════════════════════════");
@@ -3847,6 +3856,9 @@ async function run(tvSignal = null, symbol = null) {
   }
 
   console.log("═══════════════════════════════════════════════════════════\n");
+  } finally {
+    _runningSymbols.delete(symbol);
+  }
 }
 
 if (process.argv.includes("--tax-summary")) {
