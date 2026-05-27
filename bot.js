@@ -1654,17 +1654,15 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     }
     check(`ATR stop hit — $${effectiveStop.toFixed(2)} (${breakEvenActive ? "break-even floor" : `${(trailPct*100).toFixed(1)}% trail`})`, price < effectiveStop);
 
-    // Max hold time — exit stale trades and recycle capital
+    // Max hold time — give positions time to reach StochRSI target, only cut clear failures
     if (position.entryTime) {
       const hoursOpen = (Date.now() - new Date(position.entryTime).getTime()) / (1000 * 60 * 60);
-      if (hoursOpen > 3.5) {
-        check(`Max hold exceeded — open ${hoursOpen.toFixed(1)}h (limit 3.5h)`, true);
+      if (hoursOpen > 6.0) {
+        check(`Max hold exceeded — open ${hoursOpen.toFixed(1)}h (limit 6h)`, true);
       } else if (hoursOpen > 0.75 && pnlPct < -1.5) {
         check(`Stale trade — ${(hoursOpen * 60).toFixed(0)}min, down ${pnlPct.toFixed(2)}% (cut early)`, true);
-      } else if (hoursOpen > 1.5 && pnlPct < -0.3) {
+      } else if (hoursOpen > 2.0 && pnlPct < -1.5) {
         check(`Stale trade — ${hoursOpen.toFixed(1)}h, P&L ${pnlPct.toFixed(2)}% (cutting loss)`, true);
-      } else if (hoursOpen > 2.5 && pnlPct < 0.5) {
-        check(`Capital stuck — ${hoursOpen.toFixed(1)}h at only ${pnlPct.toFixed(2)}% (recycling)`, true);
       }
     }
   }
@@ -1674,7 +1672,7 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
   // Hard stops (stop-loss, ATR trail, max hold) always fire regardless
   const FEE_MIN_PCT = parseFloat((getFeePct() * 2 * 100 + 0.10).toFixed(2));
   if (pnlPct > 0 && pnlPct < FEE_MIN_PCT) {
-    const HARD_STOPS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Capital stuck", "Failed bounce", "Momentum stop"];
+    const HARD_STOPS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Failed bounce", "Momentum stop"];
     const hardOnly = reasons.filter(r => HARD_STOPS.some(kw => r.startsWith(kw)));
     if (hardOnly.length < reasons.length) {
       console.log(`  ℹ️  Fee gate — holding at +${pnlPct.toFixed(2)}% (need +${FEE_MIN_PCT}% to cover fees)`);
@@ -2865,7 +2863,7 @@ async function run(tvSignal = null, symbol = null) {
     let claudeAnalysis = null;
 
     // Hard stops are non-negotiable — Claude cannot override these
-    const HARD_EXIT_KEYWORDS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Capital stuck", "Failed bounce", "Momentum stop", "Trend reversed"];
+    const HARD_EXIT_KEYWORDS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Failed bounce", "Momentum stop", "Trend reversed"];
     const hasHardExit = reasons.some(r => HARD_EXIT_KEYWORDS.some(kw => r.startsWith(kw)));
 
     // Pre-compute for gate checks
