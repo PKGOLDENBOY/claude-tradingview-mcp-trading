@@ -1078,6 +1078,47 @@ function calcSupportResistance(candles1h, candles4h = [], candlesDay = []) {
   };
 }
 
+// ─── Strategy scorer — picks scalp vs swing based on multi-TF alignment ─────
+// Swing targets 8% over 1-5 days; scalp targets 1% over 1-6h.
+// When multiple timeframes align bullishly AND the coin is genuinely oversold
+// on the 4H, swing almost always returns more than scalp.
+function scoreSwingSetup(closes4h, closesDay, closesWeek, bullTrend4h, rsi14_1h, adx, vol) {
+  let score = 0;
+  const reasons = [];
+
+  // 4H trend (EMA8 > EMA21) — base requirement for any swing
+  if (bullTrend4h) { score++; reasons.push("4H uptrend"); }
+
+  // 4H RSI(14) — is the medium-term trend actually pulling back to a buyable level?
+  const rsi14_4h = closes4h.length > 20 ? calcRSI(closes4h, 14) : null;
+  if (rsi14_4h !== null && rsi14_4h < 40)      { score += 2; reasons.push(`4H RSI(14)=${rsi14_4h.toFixed(0)} deeply OS`); }
+  else if (rsi14_4h !== null && rsi14_4h < 50)  { score++;   reasons.push(`4H RSI(14)=${rsi14_4h.toFixed(0)} pulling back`); }
+
+  // 1H RSI(14) also oversold — TF alignment confirms the dip is real
+  if (rsi14_1h !== null && rsi14_1h < 45) { score++; reasons.push(`1H RSI(14)=${rsi14_1h.toFixed(0)} OS`); }
+
+  // Daily trend — the bigger trend is up (not fighting a daily downtrend)
+  if (closesDay.length >= 30) {
+    const dEma8  = calcEMA(closesDay, 8);
+    const dEma21 = calcEMA(closesDay, 21);
+    const dRsi14 = calcRSI(closesDay, 14);
+    if (dEma8 > dEma21)                                    { score++; reasons.push("Daily uptrend"); }
+    if (dRsi14 !== null && dRsi14 > 30 && dRsi14 < 60)    { score++; reasons.push(`Daily RSI=${dRsi14.toFixed(0)} — room`); }
+  }
+
+  // Weekly bullish — macro not fighting the trade
+  if (closesWeek.length >= 20) {
+    const wEma8  = calcEMA(closesWeek, 8);
+    const wEma21 = calcEMA(closesWeek, 21);
+    if (wEma8 > wEma21) { score++; reasons.push("Weekly bull"); }
+  }
+
+  // ADX > 20 on 4H — directional trend, not chop
+  if (adx && adx.adx > 20) { score++; reasons.push(`ADX=${adx.adx.toFixed(0)}`); }
+
+  return { score, reasons, maxScore: 9 };
+}
+
 function calcRSI(closes, period = 14) {
   if (closes.length < period + 1) return null;
   let gains = 0,
@@ -3379,6 +3420,62 @@ async function run(tvSignal = null, symbol = null) {
       console.log("═══════════════════════════════════════════════════════════\n");
       pushSignal(symbol, "BLOCKED", `${todayLossesOnSymbol} stop-outs today — skipping until tomorrow`);
       return;
+    }
+
+    // ── Strategy selector — pick the approach with the highest expected return ──
+    // Uses already-fetched candle data; zero extra API calls.
+    // Swing (8% target, 1-5 days) beats scalp (1% target, 1-6h) when:
+    //   • multiple timeframes align bullishly, AND
+    //   • coin is genuinely oversold on 4H (not just a short-term noise dip)
+    if (!vwapBounceMode && !(log.swingPositions || {})[symbol]?.open) {
+      const swingSetup = scoreSwingSetup(
+        closes4h, candlesDay.map(c => c.close), closesWeek,
+        bullTrend4h, rsi14_1h, adx, vol
+      );
+      const swingLabel = `Swing score ${swingSetup.score}/9: ${swingSetup.reasons.join(" | ") || "conditions not met"}`;
+      console.log(`\n  📊 ${swingSetup.score >= 5 ? "🔄 SWING" : "📉 SCALP"} selected — ${swingLabel}`);
+
+      if (swingSetup.score >= 5) {
+        console.log(`   Swing targets +${(SWING.takeProfit * 100).toFixed(0)}% over 1-5 days vs scalp's +1% — better R:R here`);
+        const swingSize = (log.portfolioValue || acct().portfolioValue) * SWING.sizePct;
+        let qty = swingSize / price;
+        let orderId = `PAPER-SWING-${Date.now()}`;
+
+        if (!CONFIG.paperTrading) {
+          try {
+            const order = await placeOrder(symbol, "buy", swingSize, price);
+            qty = order.confirmedQty ?? qty;
+            orderId = order.orderId;
+            console.log(`✅ SWING ORDER — ${orderId} | qty:${qty.toFixed(6)}`);
+            emailEntry({ symbol, price, tradeSize: swingSize, orderId });
+          } catch (e) {
+            console.log(`❌ SWING ORDER FAILED — ${e.message}`);
+            console.log("═══════════════════════════════════════════════════════════\n");
+            return;
+          }
+        } else {
+          console.log(`📋 PAPER SWING — $${swingSize.toFixed(2)} ${symbol} @ $${price.toFixed(4)} | TP:+${(SWING.takeProfit*100).toFixed(0)}% SL:-${(SWING.stopLoss*100).toFixed(0)}%`);
+        }
+
+        log.swingPositions = { ...(log.swingPositions || {}), [symbol]: {
+          open: true, side: "long", entryPrice: price, highWatermark: price,
+          entryTime: new Date().toISOString(), quantity: qty.toFixed(6),
+          orderId, tradeType: "swing", partialExitDone: false,
+        }};
+        const swingLog = {
+          timestamp: new Date().toISOString(), type: "entry", symbol,
+          timeframe: "4H", price, strategy: "swing", swingScore: swingSetup.score,
+          tradeSize: swingSize, orderPlaced: true, orderId,
+          paperTrading: CONFIG.paperTrading,
+        };
+        log.trades.push(swingLog);
+        saveLog(log);
+        writeTradeCsv(swingLog);
+        pushSignal(symbol, "SWING ENTRY", `Score ${swingSetup.score}/9 — TP +${(SWING.takeProfit*100).toFixed(0)}% | ${swingSetup.reasons.slice(0, 2).join(", ")}`);
+        _processingEntries.delete(symbol);
+        console.log("═══════════════════════════════════════════════════════════\n");
+        return;
+      }
     }
 
     // Upgrade 6: Multi-timeframe RSI — 15min RSI must also be oversold (< 35, or < 55 in VWAP bounce mode)
