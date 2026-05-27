@@ -2001,6 +2001,13 @@ async function reconcilePositions(log) {
       const usdValue = qty * price;
       if (usdValue < 5) continue; // skip dust < $5
 
+      // Skip coins recently sold by the bot — reconciliation would re-add dust as a position
+      const recentlySold = (log.trades || []).slice(-50).some(t =>
+        t.type === "exit" && t.symbol === symbol && t.orderPlaced &&
+        Date.now() - new Date(t.timestamp).getTime() < 4 * 60 * 60 * 1000
+      );
+      if (recentlySold) continue;
+
       if (!log.positions[symbol]?.open) {
         console.log(`🔄 Reconcile: ${qty.toFixed(6)} ${asset.coin} ($${usdValue.toFixed(2)}) not in log — tracking as open position`);
         log.positions[symbol] = {
@@ -2470,7 +2477,7 @@ async function checkLiveHardStops() {
       } else {
         console.log(`📋 PAPER STOP SELL`);
       }
-      log.positions[sym] = null;
+      delete log.positions[sym];
       log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
       log.trades.push({
         timestamp: new Date().toISOString(), type: "exit", symbol: sym,
@@ -2945,7 +2952,7 @@ async function run(tvSignal = null, symbol = null) {
         console.log(`\n📋 PAPER SELL — would sell ${position.quantity} ${symbol} at market`);
         logEntry.orderPlaced = true;
         logEntry.orderId = `PAPER-SELL-${Date.now()}`;
-        log.positions = { ...(log.positions || {}), [symbol]: null };
+        delete (log.positions || {})[symbol]; log.positions = { ...(log.positions || {}) };
         // Compound portfolio value
         log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
         console.log(`💰 Portfolio updated: $${log.portfolioValue.toFixed(4)} (${pnlUSD >= 0 ? "+" : ""}$${pnlUSD.toFixed(4)})`);
@@ -2955,7 +2962,7 @@ async function run(tvSignal = null, symbol = null) {
           const order = await placeOrder(symbol, "sell", null, price, position.quantity);
           logEntry.orderPlaced = true;
           logEntry.orderId = order.orderId;
-          log.positions = { ...(log.positions || {}), [symbol]: null };
+          delete (log.positions || {})[symbol]; log.positions = { ...(log.positions || {}) };
           // Compound portfolio value
           log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
           console.log(`✅ SELL ORDER PLACED — ${order.orderId}`);
