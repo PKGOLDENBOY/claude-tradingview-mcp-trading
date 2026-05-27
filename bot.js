@@ -2695,6 +2695,23 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
+  // Session gate — only open NEW positions during historically profitable hours
+  // Data from 116 live trades: Asian 00-08 UTC (72% WR) + NY 13-21 UTC (69% WR) = profitable
+  // London 08-12 UTC (-2.06% total) and late-NY/dead-zone 22-23 UTC (0% WR) = block entries
+  if (!earlyPosition?.open) {
+    const utcH = new Date().getUTCHours();
+    const londonMorning = utcH >= 8 && utcH < 13;   // 08:00–12:59 UTC — London open, losing session
+    const deadZone      = utcH >= 22;                // 22:00–23:59 UTC — between NY close and Asia open
+    if (londonMorning || deadZone) {
+      const sessionName = deadZone ? "dead zone (22-00 UTC)" : "London morning (08-13 UTC)";
+      const nextGood    = deadZone ? "00:00 UTC (Asia open)" : "13:00 UTC (NY open)";
+      console.log(`\n🕐 SESSION BLOCK — ${sessionName} has poor results from historical data. Next good window: ${nextGood}.`);
+      console.log(`   Best sessions: Asian 00-08 UTC (72% WR) | NY 13-21 UTC (69% WR)`);
+      pushSignal(symbol, "BLOCKED", `Off-session — ${sessionName}, waiting for ${nextGood}`);
+      return;
+    }
+  }
+
   // In BEAR regime: only manage exits on existing positions, skip all new scalp entries
   // In VOLATILE regime: reduce scalp size by 50% (applied in tradeSize calc below)
 
