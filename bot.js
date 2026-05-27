@@ -3498,7 +3498,7 @@ async function run(tvSignal = null, symbol = null) {
     }
     if (rsi15m !== null) console.log(`  ✅ 15min RSI ${rsi15m.toFixed(1)} confirmed (< ${rsi15mLimit})`);
 
-    // Fix 1: Reversal confirmation — need at least 2 signals to confirm the turn
+    // Reversal confirmation — need at least 3 signals to confirm the turn is real
     const formingCandle   = candles[candles.length - 1]; // currently forming (real-time price)
     const lastClosedCandle = candles[candles.length - 2];
     const prevCandle       = candles[candles.length - 3];
@@ -3509,10 +3509,10 @@ async function run(tvSignal = null, symbol = null) {
     const hasLongWick   = lastClosedCandle && (lastClosedCandle.high - lastClosedCandle.low) > 0 &&
                           (lastClosedCandle.close - lastClosedCandle.low) / (lastClosedCandle.high - lastClosedCandle.low) > 0.4;
     const reversalSignals = [priceBouncing, isClosingUp, isHigherHigh, isHigherLow, hasLongWick].filter(Boolean).length;
-    if (reversalSignals < 2) {
-      console.log(`🚫 REVERSAL BLOCK — only ${reversalSignals}/2 reversal signals (live bounce: ${priceBouncing}, closing up: ${isClosingUp}, higher high: ${isHigherHigh}, higher low: ${isHigherLow}, long wick: ${hasLongWick})`);
+    if (reversalSignals < 3 && !vwapBounceMode) {
+      console.log(`🚫 REVERSAL BLOCK — only ${reversalSignals}/3 reversal signals (live bounce: ${priceBouncing}, closing up: ${isClosingUp}, higher high: ${isHigherHigh}, higher low: ${isHigherLow}, long wick: ${hasLongWick})`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Weak reversal — only ${reversalSignals}/2 signals confirmed`);
+      pushSignal(symbol, "BLOCKED", `Weak reversal — only ${reversalSignals}/3 signals confirmed`);
       return;
     }
     const reversalReasons = [priceBouncing && "live bounce", isClosingUp && "closing up", isHigherHigh && "higher high", isHigherLow && "higher low", hasLongWick && "long wick"].filter(Boolean);
@@ -3527,6 +3527,26 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
     if (rsi14_1h !== null) console.log(`  ✅ 1H RSI(14) ${rsi14_1h.toFixed(1)} ≥ 45 — hourly trend ok`);
+
+    // 4H trend hard gate — medium-term trend must be bullish to scalp bounces
+    if (!bullTrend4h && !vwapBounceMode) {
+      console.log(`🚫 4H TREND BLOCK — 4H EMA(8) < EMA(21). Medium-term downtrend. Scalp bounces in a 4H downtrend fail. Wait for 4H to turn bullish.`);
+      console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `4H downtrend — EMA8 < EMA21, no scalp entries`);
+      return;
+    }
+    if (bullTrend4h) console.log(`  ✅ 4H trend bullish — EMA(8) > EMA(21)`);
+
+    // MACD momentum gate — histogram must be improving (momentum turning up, not still falling)
+    const macdPrev = calcMACD(closes.slice(0, -1));
+    const macdImproving = macd.histogram > macdPrev.histogram;
+    if (!macdImproving && !vwapBounceMode && !macd.bullish) {
+      console.log(`🚫 MACD MOMENTUM BLOCK — histogram ${macd.histogram.toFixed(4)} ≤ prev ${macdPrev.histogram.toFixed(4)}. Momentum still falling — not safe to buy.`);
+      console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `MACD momentum falling — wait for histogram to turn up`);
+      return;
+    }
+    console.log(`  ${macdImproving ? "✅" : "⚠️ "} MACD histogram ${macd.histogram.toFixed(4)} ${macdImproving ? "improving ↑" : "(bullish — ok)"}`);
 
     // Fix 2: Volume acceleration — require flat-to-rising volume (buyers present, not retreating)
     const curVol  = candles[candles.length - 1].volume;
@@ -3623,11 +3643,13 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
 
-    // StochRSI entry block — don't buy when momentum is already building (tightened from 75 to 65)
-    if (rulesPass && stochRsi && stochRsi.k > 65 && !vwapBounceMode) {
-      console.log(`🚫 STOCHRSI BLOCK — K=${stochRsi.k.toFixed(1)} already overbought (>65). Wait for pullback before entering.`);
+    // StochRSI entry gate — must be genuinely oversold to enter (K < 40)
+    // Entering at K=50 leaves only 38 points to the exit target (K=88); entering at K=20 leaves 68.
+    // Less room to bounce = lower win rate. Require oversold zone for reliable exits.
+    if (rulesPass && stochRsi && stochRsi.k > 40 && !vwapBounceMode) {
+      console.log(`🚫 STOCHRSI BLOCK — K=${stochRsi.k.toFixed(1)} not deeply oversold (need < 40). Bounce has less room to develop.`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `StochRSI building K=${stochRsi.k.toFixed(1)} — wait for pullback`);
+      pushSignal(symbol, "BLOCKED", `StochRSI K=${stochRsi.k.toFixed(1)} — need <40 for reliable bounce`);
       return;
     }
 
