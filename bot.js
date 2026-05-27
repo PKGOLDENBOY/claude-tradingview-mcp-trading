@@ -2689,6 +2689,7 @@ async function run(tvSignal = null, symbol = null) {
   const ema8_1h  = calcEMA(closes1h, 8);
   const ema21_1h = calcEMA(closes1h, 21);
   const bullTrend1h = ema8_1h > ema21_1h;
+  const rsi14_1h = calcRSI(closes1h, 14);
 
   // 4H trend confirmation
   const ema8_4h  = calcEMA(closes4h, 8);
@@ -2715,7 +2716,7 @@ async function run(tvSignal = null, symbol = null) {
   const doubleBottom = detectDoubleBottom(candles);
 
   console.log(`  EMA(8):   $${ema8.toFixed(2)} | EMA(21): $${ema21.toFixed(2)} | ${ema8 > ema21 ? "✅ entry TF uptrend" : "🔴 entry TF downtrend"}`);
-  console.log(`  1H trend: EMA(8) $${ema8_1h.toFixed(2)} vs EMA(21) $${ema21_1h.toFixed(2)} | ${bullTrend1h ? "✅ 1H uptrend" : "🔴 1H downtrend"}`);
+  console.log(`  1H trend: EMA(8) $${ema8_1h.toFixed(2)} vs EMA(21) $${ema21_1h.toFixed(2)} | ${bullTrend1h ? "✅ 1H uptrend" : "🔴 1H downtrend"} | RSI(14): ${rsi14_1h !== null ? rsi14_1h.toFixed(1) : "N/A"}${rsi14_1h !== null && rsi14_1h < 45 ? " ⚠️ bearish zone" : ""}`);
   console.log(`  4H trend: EMA(8) $${ema8_4h.toFixed(2)} vs EMA(21) $${ema21_4h.toFixed(2)} | ${bullTrend4h ? "✅ 4H uptrend" : "🔴 4H downtrend"}`);
   if (bullTrendWeekly !== null) console.log(`  Weekly:   EMA(8) $${ema8_week.toFixed(4)} vs EMA(21) $${ema21_week.toFixed(4)} | ${bullTrendWeekly ? "✅ Weekly bull market" : "🔴 Weekly bear market — stricter filters apply"}`);
   if (rsi15m !== null) console.log(`  RSI(15m): ${rsi15m.toFixed(2)}`);
@@ -2744,7 +2745,7 @@ async function run(tvSignal = null, symbol = null) {
     vwap: vwap?.toFixed(4),
     ema8: ema8?.toFixed(4), ema21: ema21?.toFixed(4),
     trend15m: ema8 > ema21 ? "up" : "down",
-    trend1h: bullTrend1h ? "up" : "down",
+    trend1h: bullTrend1h ? "up" : "down", rsi14_1h: rsi14_1h?.toFixed(1),
     trend4h: bullTrend4h ? "up" : "down",
     trendWeekly: bullTrendWeekly === null ? null : bullTrendWeekly ? "up" : "down",
     macdBullish: macd.bullish, macdHist: macd.histogram?.toFixed(4),
@@ -3411,6 +3412,16 @@ async function run(tvSignal = null, symbol = null) {
     }
     const reversalReasons = [priceBouncing && "live bounce", isClosingUp && "closing up", isHigherHigh && "higher high", isHigherLow && "higher low", hasLongWick && "long wick"].filter(Boolean);
     console.log(`  ✅ Reversal confirmed — ${reversalReasons.join(" + ")} (${reversalSignals}/5 signals)`);
+
+    // 1H RSI(14) trend gate — analysis of today's trades: 14/16 losses when 1H RSI(14) < 45
+    // When the hourly trend is bearish, mean-reversion dip-buys almost never recover in time
+    if (rsi14_1h !== null && rsi14_1h < 45 && !vwapBounceMode) {
+      console.log(`🚫 1H TREND BLOCK — 1H RSI(14)=${rsi14_1h.toFixed(1)} < 45. Hourly trend is bearish — buying a dip in a downtrend. Wait for 1H RSI to recover above 45.`);
+      console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `1H RSI(14) ${rsi14_1h.toFixed(1)} < 45 — hourly downtrend, no entry`);
+      return;
+    }
+    if (rsi14_1h !== null) console.log(`  ✅ 1H RSI(14) ${rsi14_1h.toFixed(1)} ≥ 45 — hourly trend ok`);
 
     // Fix 2: Volume acceleration — require flat-to-rising volume (buyers present, not retreating)
     const curVol  = candles[candles.length - 1].volume;
