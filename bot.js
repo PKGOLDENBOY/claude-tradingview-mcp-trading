@@ -1429,15 +1429,23 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
       console.log(`  ℹ️  Trend context (not a hard gate): ${bullTrend4h ? "✅ bullish" : "⚠️  bearish — Claude must be 90%+ confident"}`);
     }
 
-    // 7. Volume — soft signal only, Claude weighs it
-    if (vol) {
+    // 7. Volume — hard gate: don't enter when volume is below average (no crowd participation)
+    if (vol && !vwapBounce) {
       const volRatio = (vol.current / vol.avg).toFixed(1);
-      console.log(`  ℹ️  Volume: ${vol.aboveAvg ? "✅ above avg" : "⚠️ below avg"} (${volRatio}x avg) — not a hard block`);
+      if (!vol.aboveAvg) {
+        check(`Volume above average (${volRatio}x avg) — need crowd participation`, "> 1.0x avg", `${volRatio}x avg`, false);
+      } else {
+        console.log(`  ✅ Volume above avg (${volRatio}x avg)`);
+      }
     }
 
-    // 8. ADX — soft signal only
-    if (adx !== null) {
-      console.log(`  ℹ️  ADX: ${adx.adx.toFixed(2)} (${adx.trending ? "✅ trending" : "⚠️ choppy"}) — not a hard block`);
+    // 8. ADX — hard gate: block entries when market has no trend at all (pure chop)
+    if (adx !== null && !vwapBounce) {
+      if (adx.adx < 15) {
+        check(`ADX > 15 (some directional movement)`, "> 15", adx.adx.toFixed(1), false);
+      } else {
+        console.log(`  ✅ ADX ${adx.adx.toFixed(1)} (${adx.trending ? "trending" : "weak trend — ok"})`);
+      }
     }
 
     // 9. StochRSI — v2 confirmation signal
@@ -3484,18 +3492,18 @@ async function run(tvSignal = null, symbol = null) {
       console.log(`  Score: ${baseEntryScore} (base) → ${entryScore} (with advanced signals)`);
     }
 
-    // Entry quality gate — trend-follow entries need score >= 5 (strong confluence required)
-    if (rulesPass && entryType === "trend-follow" && entryScore < 5 && !vwapBounceMode) {
-      console.log(`🚫 ENTRY QUALITY BLOCK — score ${entryScore}/5 needed. Need strong confluence: RSI<20 (+2), StochRSI oversold (+2), BB%<0.35 (+1), vol surge (+1), divergence (+3), liquidity sweep (+3), neg funding (+2).`);
+    // Entry quality gate — trend-follow entries need score >= 7 (strong confluence required)
+    if (rulesPass && entryType === "trend-follow" && entryScore < 7 && !vwapBounceMode) {
+      console.log(`🚫 ENTRY QUALITY BLOCK — score ${entryScore}/7 needed. Need: RSI<20 (+2), StochRSI oversold (+2), BB%<0.35 (+1), vol surge (+1), divergence (+3), liquidity sweep (+3), neg funding (+2).`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Entry quality ${entryScore}/5 — need stronger confluence (RSI extreme + StochRSI + vol surge)`);
+      pushSignal(symbol, "BLOCKED", `Entry quality ${entryScore}/7 — need stronger confluence`);
       return;
     }
     // Snapback quality gate — counter-trend entries need strong confirmation
-    if (rulesPass && entryType === "snapback" && entryScore < 4 && !vwapBounceMode) {
-      console.log(`🚫 SNAPBACK QUALITY BLOCK — score ${entryScore}/4 needed. Counter-trend needs multiple signals: StochRSI oversold, BB% near low, RSI<15, divergence, or liquidity sweep.`);
+    if (rulesPass && entryType === "snapback" && entryScore < 6 && !vwapBounceMode) {
+      console.log(`🚫 SNAPBACK QUALITY BLOCK — score ${entryScore}/6 needed. Counter-trend needs: StochRSI oversold (+2), BB% near low (+2), RSI<15 (+2), divergence (+3), or liquidity sweep (+3).`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Snapback quality ${entryScore}/4 — need StochRSI oversold + another signal`);
+      pushSignal(symbol, "BLOCKED", `Snapback quality ${entryScore}/6 — need StochRSI + BB% + more`);
       return;
     }
 
