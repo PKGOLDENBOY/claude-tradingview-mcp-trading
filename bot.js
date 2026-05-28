@@ -1693,10 +1693,10 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
         check(`Failed bounce — down ${pnlPct.toFixed(2)}% with bearish MACD (cut loss early)`, true);
       }
       // Exit when VWAP is meaningfully breached AND MACD confirms bearish momentum
-      // Require >0.2% below VWAP to avoid exiting on a 0.001 tick below VWAP
+      // Require >0.5% below VWAP — 0.2% was too tight, causing immediate exits from normal price noise
       const vwapBreachPct = (vwap - price) / vwap * 100;
       const macdBearish = !macd ? vwapBreachPct > 0.5 : macd.histogram < 0;
-      check(`Trend reversed — ${vwapBreachPct.toFixed(2)}% below VWAP${macd && macdBearish ? " with bearish MACD" : ""}`, price < vwap && macdBearish && vwapBreachPct > 0.2);
+      check(`Trend reversed — ${vwapBreachPct.toFixed(2)}% below VWAP${macd && macdBearish ? " with bearish MACD" : ""}`, price < vwap && macdBearish && vwapBreachPct > 0.5);
     }
     check(`ATR stop hit — $${effectiveStop.toFixed(2)} (${breakEvenActive ? "break-even floor" : `${(trailPct*100).toFixed(1)}% trail`})`, price < effectiveStop);
 
@@ -3055,12 +3055,11 @@ async function run(tvSignal = null, symbol = null) {
     // Only persist actual exits (order placed) — not hold decisions
     if (logEntry.orderPlaced) {
       log.trades.push(logEntry);
-      // Per-coin loss cooldown: skip re-entering a coin for 2h after a loss
-      if (pnlPct < 0) {
-        if (!log.coinCooldowns) log.coinCooldowns = {};
-        log.coinCooldowns[symbol] = { until: Date.now() + 2 * 60 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
-        console.log(`⏳ Cooldown set for ${symbol} — no re-entry for 2h (loss: ${pnlPct.toFixed(2)}%)`);
-      }
+      // Per-coin cooldown: 30min after any exit (prevents immediate re-entry loops), 2h after a loss
+      if (!log.coinCooldowns) log.coinCooldowns = {};
+      const cooldownMs = pnlPct < 0 ? 2 * 60 * 60 * 1000 : 30 * 60 * 1000;
+      log.coinCooldowns[symbol] = { until: Date.now() + cooldownMs, pnlPct: pnlPct.toFixed(2) };
+      console.log(`⏳ Cooldown set for ${symbol} — no re-entry for ${pnlPct < 0 ? "2h (loss)" : "30min (exit)"} (P&L: ${pnlPct.toFixed(2)}%)`);
       saveLog(log);
       console.log(`\nDecision log saved → ${LOG_FILE}`);
       writeTradeCsv(logEntry);
@@ -3264,14 +3263,15 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
 
-    // Upgrade 3: Minimum 10min between any entries (no chasing)
-    const lastEntry = log.trades.filter(t => t.type === "entry" && t.orderPlaced).slice(-1)[0];
-    if (lastEntry) {
-      const minsSinceLast = (Date.now() - new Date(lastEntry.timestamp).getTime()) / 60000;
+    // Per-symbol entry gap — no chasing the same coin twice quickly
+    // (Global cooldown removed: it blocked other coins when one coin exited)
+    const lastSymEntry = log.trades.filter(t => t.type === "entry" && t.orderPlaced && t.symbol === symbol).slice(-1)[0];
+    if (lastSymEntry) {
+      const minsSinceLast = (Date.now() - new Date(lastSymEntry.timestamp).getTime()) / 60000;
       if (minsSinceLast < 15) {
-        console.log(`🚫 ENTRY COOLDOWN — last entry was ${minsSinceLast.toFixed(0)}min ago. Waiting 15min between entries.`);
+        console.log(`🚫 ENTRY COOLDOWN — ${symbol} entered ${minsSinceLast.toFixed(0)}min ago. Need 15min between same-coin entries.`);
         console.log("═══════════════════════════════════════════════════════════\n");
-        pushSignal(symbol, "BLOCKED", `Entry cooldown — ${minsSinceLast.toFixed(0)}min since last trade (need 15min)`);
+        pushSignal(symbol, "BLOCKED", `Entry cooldown — ${minsSinceLast.toFixed(0)}min since last ${symbol} entry (need 15min)`);
         return;
       }
     }
