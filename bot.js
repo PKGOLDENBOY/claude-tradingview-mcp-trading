@@ -6032,6 +6032,15 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     const PERM_EXCLUDE = ["ARBUSDT", "VIRTUALUSDT", "SUIUSDT"];
     if (PERM_EXCLUDE.includes(symbol)) return;
 
+    // Share the symbol mutex with run() and runSwing() — prevents concurrent log writes
+    if (_runningSymbols.has(symbol)) {
+      console.log(`⏳ ${symbol} in use — skipping breakout tick`);
+      return;
+    }
+    _runningSymbols.add(symbol);
+
+    try {
+
     const log = loadLog();
     const bkPos = (log.breakoutPositions || {})[symbol] || null;
 
@@ -6187,6 +6196,10 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     log.trades.push(entryLog);
     saveLog(log);
     writeTradeCsv(entryLog);
+
+    } finally {
+      _runningSymbols.delete(symbol);
+    }
   }
 
 // ─── New Listing Sniper ──────────────────────────────────────────────────────
