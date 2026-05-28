@@ -2900,7 +2900,8 @@ async function run(tvSignal = null, symbol = null) {
 
       if (partialOk) {
         log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + partialPnlUSD;
-        log.positions[symbol] = { ...position, quantity: halfQty.toFixed(6), partialExitDone: true, partialExitPrice: price };
+        // Reload fresh to prevent concurrent writes clobbering other positions
+        try { const _fp = loadLog(); log.positions = { ...(_fp.positions || {}), [symbol]: { ...(_fp.positions?.[symbol] || position), quantity: halfQty.toFixed(6), partialExitDone: true, partialExitPrice: price } }; } catch { log.positions[symbol] = { ...position, quantity: halfQty.toFixed(6), partialExitDone: true, partialExitPrice: price }; }
         position = log.positions[symbol]; // use updated position for the rest of this cycle
         const partialEntry = {
           timestamp: new Date().toISOString(), type: "exit", symbol,
@@ -3500,11 +3501,8 @@ async function run(tvSignal = null, symbol = null) {
           console.log(`📋 PAPER SWING — $${swingSize.toFixed(2)} ${symbol} @ $${price.toFixed(4)} | TP:+${(SWING.takeProfit*100).toFixed(0)}% SL:-${(SWING.stopLoss*100).toFixed(0)}%`);
         }
 
-        log.swingPositions = { ...(log.swingPositions || {}), [symbol]: {
-          open: true, side: "long", entryPrice: price, highWatermark: price,
-          entryTime: new Date().toISOString(), quantity: qty.toFixed(6),
-          orderId, tradeType: "swing", partialExitDone: false,
-        }};
+        // Reload fresh to prevent concurrent writes clobbering other swing positions
+        try { log.swingPositions = { ...(loadLog().swingPositions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId, tradeType: "swing", partialExitDone: false } }; } catch { log.swingPositions = { ...(log.swingPositions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId, tradeType: "swing", partialExitDone: false } }; }
         const swingLog = {
           timestamp: new Date().toISOString(), type: "entry", symbol,
           timeframe: "4H", price, strategy: "swing", swingScore: swingSetup.score,
@@ -3608,14 +3606,11 @@ async function run(tvSignal = null, symbol = null) {
       console.log(`  ⚠️  Backtest failed (${e.message}) — proceeding with caution`);
       btResult = null;
     }
-    if (btResult && btResult.recommendation === "SKIP" && !vwapBounceMode) {
+    if (btResult && btResult.recommendation === "SKIP") {
       console.log(`🚫 BACKTEST BLOCK — ${symbol} has ${btResult.winRate}% win rate over ${btResult.trades} trades (need 65%+). Skipping.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       pushSignal(symbol, "BLOCKED", `Backtest WR ${btResult.winRate}% across ${btResult.trades} trades — need 65%+`);
       return;
-    }
-    if (btResult && btResult.recommendation === "SKIP" && vwapBounceMode) {
-      console.log(`  ⚠️  Backtest SKIP bypassed — VWAP bounce is a different setup not covered by historical RSI backtest`);
     }
 
     // Minimum R:R gate — potential gain must justify the stop loss risk
@@ -3632,9 +3627,8 @@ async function run(tvSignal = null, symbol = null) {
     }
 
     // Use backtest-optimized threshold when available; adaptive mode threshold only as fallback
-    // In VWAP bounce mode, use 65 as threshold (VWAP bounce can fire at mid-RSI)
     const hasBtThreshold = !!BACKTEST[symbol]?.rsiThreshold;
-    const effectiveRsiThreshold = vwapBounceMode ? 65 : (hasBtThreshold ? coinRsiThreshold : Math.min(adaptive.rsiThreshold, coinRsiThreshold));
+    const effectiveRsiThreshold = hasBtThreshold ? coinRsiThreshold : Math.min(adaptive.rsiThreshold, coinRsiThreshold);
     const { results, allPass: rulesPass, entryType, entryScore: baseEntryScore } = runSafetyCheck(price, ema8, vwap, rsi3, rules, effectiveRsiThreshold, vol, ema21, bullTrendConfirmed, adx, stochRsi, divergence, bb, vwapBounceMode);
 
     // OBV bear divergence — smart money distributing into price rise = skip entry
@@ -3832,7 +3826,8 @@ async function run(tvSignal = null, symbol = null) {
           const actualQty = order.confirmedQty ?? (finalTradeSize / price);
           logEntry.orderPlaced = true;
           logEntry.orderId = order.orderId;
-          log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: actualQty.toFixed(6), orderId: order.orderId, entryType, bearMarket: bullTrendWeekly === false, bearSnapBack } };
+          // Reload fresh to prevent concurrent writes from clobbering other positions
+          try { log.positions = { ...(loadLog().positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: actualQty.toFixed(6), orderId: order.orderId, entryType, bearMarket: bullTrendWeekly === false, bearSnapBack } }; } catch { log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: actualQty.toFixed(6), orderId: order.orderId, entryType, bearMarket: bullTrendWeekly === false, bearSnapBack } }; }
           console.log(`✅ ORDER PLACED — ${order.orderId} | qty: ${actualQty.toFixed(6)}`);
           pushSignal(symbol, "ENTRY", `Bought @ $${price.toFixed(4)} — $${finalTradeSize.toFixed(2)}`);
         } catch (err) {
