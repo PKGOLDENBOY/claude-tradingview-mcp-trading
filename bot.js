@@ -233,9 +233,11 @@ const SWING_BACKTEST = {}; // in-memory cache, 24h TTL
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
-const WATCHLIST = (process.env.WATCHLIST || process.env.SYMBOLS || "")
-  .replace(/^SYMBOLS=/i, "")
-  .split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
+const BASE_WATCHLIST = ["ATOMUSDT","GOMININGUSDT","AXSUSDT","KAVAUSDT","SOLUSDT","XLMUSDT"];
+const WATCHLIST = [...new Set([
+  ...BASE_WATCHLIST,
+  ...(process.env.WATCHLIST || "").split(",").map(s => s.trim().toUpperCase()).filter(Boolean),
+])];
 
 const CONFIG = {
   symbols: (process.env.SYMBOLS || process.env.SYMBOL || "KAVAUSDT,ZECUSDT,NEARUSDT,BNBUSDT,LINKUSDT,SOLUSDT,AXSUSDT,ADAUSDT,DOTUSDT,INJUSDT")
