@@ -1400,7 +1400,9 @@ function calcVolume(candles) {
   const recent = candles.slice(-20);
   const avg = recent.reduce((s, c) => s + c.volume, 0) / recent.length;
   const current = candles[candles.length - 1].volume;
-  return { current, avg, aboveAvg: current > avg };
+  // 3-bar average catches single-bar spikes that immediately collapse
+  const vol3 = candles.slice(-3).reduce((s, c) => s + c.volume, 0) / 3;
+  return { current, avg, aboveAvg: current > avg, vol3, vol3Ratio: vol3 / avg };
 }
 
 // ─── Safety Check ───────────────────────────────────────────────────────────
@@ -3595,6 +3597,17 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
     console.log(`  ${volAccel >= 1.0 ? "✅" : "⚠️ "} Volume ${volAccel >= 1.5 ? "surging" : volAccel >= 1.0 ? "holding/rising" : "light"} (${volAccel.toFixed(2)}× prev candle)${vwapBounceMode && volAccel < 1.0 ? " — bypassed (VWAP bounce)" : ""}`);
+
+    // Sustained volume gate — 3-bar average must be ≥ 80% of 20-bar avg.
+    // Prevents entering on a single-bar spike that collapses next bar and triggers "Volume dried up" exit.
+    // Applies to ALL entry modes including VWAP bounce (thin-volume coins still churn).
+    if (vol && vol.vol3Ratio < 0.80) {
+      console.log(`🚫 VOLUME GATE — 3-bar avg volume only ${(vol.vol3Ratio * 100).toFixed(0)}% of 20-bar avg (need 80%+). Volume not sustained — likely to dry up immediately after entry.`);
+      console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `Thin volume — 3-bar avg ${(vol.vol3Ratio * 100).toFixed(0)}% of avg (need 80%)`);
+      return;
+    }
+    if (vol) console.log(`  ✅ Volume sustained — 3-bar avg ${(vol.vol3Ratio * 100).toFixed(0)}% of 20-bar avg`);
 
     // Live backtest gate — run fresh 1000-candle backtest before every buy
     console.log(`\n── Live Backtest Gate ───────────────────────────────────\n`);
