@@ -3066,6 +3066,11 @@ async function run(tvSignal = null, symbol = null) {
       writeTradeCsv(logEntry);
       const changed = learnFromTrades(log);
       if (changed) saveLog(log);
+      // Sync real USDT balance after every exit so position sizing stays accurate
+      if (!CONFIG.paperTrading) {
+        await syncPortfolioBalance(log).catch(e => console.log(`⚠️ Post-exit balance sync failed: ${e.message}`));
+        saveLog(log);
+      }
     } else {
       saveLog(log); // still save watermark/position updates
     }
@@ -6594,6 +6599,20 @@ async function monitorSniperPositions() {
       _lastScanCount = CONFIG.symbols.length;
     })();
   });
+
+  // Reconcile positions every 30 minutes — catches untracked holdings after Railway restarts
+  if (!CONFIG.paperTrading) {
+    setInterval(async () => {
+      try {
+        const rLog = loadLog();
+        await reconcilePositions(rLog);
+        await syncPortfolioBalance(rLog);
+        saveLog(rLog);
+      } catch (e) {
+        console.log(`⚠️ Periodic reconcile failed: ${e.message}`);
+      }
+    }, 30 * 60 * 1000);
+  }
 
   // Swap to fresh top movers every 4 hours (restarts price stream with new symbols)
   setInterval(async () => {
