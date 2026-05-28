@@ -2063,12 +2063,16 @@ async function reconcilePositions(log) {
       if (recentlySold) continue;
 
       if (!log.positions[symbol]?.open) {
-        console.log(`🔄 Reconcile: ${qty.toFixed(6)} ${asset.coin} ($${usdValue.toFixed(2)}) not in log — tracking as open position`);
+        // Use original entry price from trade history if available — avoids wrong P&L and stop-loss on reconciled positions
+        const originalEntry = (log.trades || []).filter(t => t.type === "entry" && t.symbol === symbol && t.orderPlaced).slice(-1)[0];
+        const entryPrice = originalEntry?.price ?? price;
+        const entryTime  = originalEntry?.timestamp ?? new Date().toISOString();
+        console.log(`🔄 Reconcile: ${qty.toFixed(6)} ${asset.coin} ($${usdValue.toFixed(2)}) not in log — tracking @ $${entryPrice.toFixed(4)} entry${originalEntry ? " (from history)" : " (current price — no history)"}`);
         log.positions[symbol] = {
           open: true, side: "long",
-          entryPrice: price,
-          highWatermark: price,
-          entryTime: new Date().toISOString(),
+          entryPrice,
+          highWatermark: Math.max(price, entryPrice),
+          entryTime,
           quantity: qty.toFixed(6),
           orderId: "reconciled",
           entryType: "reconciled",
@@ -3097,13 +3101,22 @@ async function run(tvSignal = null, symbol = null) {
 
     // Trading 24/7 — no time block
 
-    // Per-coin cooldown — skip re-entry for 2h after a loss on this coin
+    // Prune expired coinCooldowns to keep the log compact
+    if (log.coinCooldowns) {
+      const now = Date.now();
+      for (const s of Object.keys(log.coinCooldowns)) {
+        if ((log.coinCooldowns[s]?.until ?? 0) < now) delete log.coinCooldowns[s];
+      }
+    }
+
+    // Per-coin cooldown — skip re-entry for 30min after any exit, 2h after a loss
     const cooldown = (log.coinCooldowns || {})[symbol];
     if (cooldown && Date.now() < cooldown.until) {
       const minsLeft = Math.ceil((cooldown.until - Date.now()) / 60000);
-      console.log(`⏳ COOLDOWN — ${symbol} blocked for ${minsLeft} more min (last loss: ${cooldown.pnlPct}%)`);
+      const pnl = parseFloat(cooldown.pnlPct);
+      console.log(`⏳ COOLDOWN — ${symbol} blocked for ${minsLeft} more min (last exit P&L: ${pnl >= 0 ? "+" : ""}${cooldown.pnlPct}%)`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Coin cooldown — ${minsLeft}min left after loss`);
+      pushSignal(symbol, "BLOCKED", `Coin cooldown — ${minsLeft}min left`);
       return;
     }
 
@@ -5775,6 +5788,15 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     const PERM_EXCLUDE = ["ARBUSDT", "VIRTUALUSDT", "SUIUSDT"];
     if (PERM_EXCLUDE.includes(symbol)) return;
 
+    // Share the symbol mutex with run() — prevents swing exit and scalp entry racing on the same log
+    if (_runningSymbols.has(symbol)) {
+      console.log(`⏳ ${symbol} in use by scalp cycle — skipping swing tick`);
+      return;
+    }
+    _runningSymbols.add(symbol);
+
+    try {
+
     const log = loadLog();
     const swingPos = (log.swingPositions || {})[symbol] || null;
     const openSwingCount = Object.values(log.swingPositions || {}).filter(p => p && p.open).length;
@@ -5995,6 +6017,10 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     log.trades.push(entryLog);
     saveLog(log);
     writeTradeCsv(entryLog);
+
+    } finally {
+      _runningSymbols.delete(symbol);
+    }
   }
 
   // ─── Breakout Strategy (1H) ──────────────────────────────────────────────────
