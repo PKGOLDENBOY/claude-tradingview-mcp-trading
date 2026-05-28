@@ -3378,6 +3378,11 @@ async function run(tvSignal = null, symbol = null) {
     // Detect new listing — if < 168H of candle history, use momentum mode
     const isNewCoin = candles.length < 168;
     if (isNewCoin) {
+      if (position && position.open) {
+        console.log(`🚫 NEW COIN — already holding ${symbol}. Skipping re-entry.`);
+        console.log("═══════════════════════════════════════════════════════════\n");
+        return;
+      }
       console.log(`\n🆕 NEW LISTING DETECTED — ${symbol} has only ${candles.length}H of history. Switching to momentum mode.`);
       console.log(`\n── Momentum Entry Check ─────────────────────────────────\n`);
       const { results: momResults, allPass: momPass } = checkMomentumEntry(price, ema8, candles, vol, rsi3, stochRsi);
@@ -6573,12 +6578,10 @@ async function monitorSniperPositions() {
              <p><b>Mode:</b> LIVE TRADING</p>`
           );
         }
-        console.log(`\n👛 Account ${account.id} — initial scan (3 coins at a time)`);
+        console.log(`\n👛 Account ${account.id} — initial scan (sequential)`);
         const startSyms = [...CONFIG.symbols];
-        for (let i = 0; i < startSyms.length; i += 3) {
-          await Promise.all(startSyms.slice(i, i + 3).map(sym =>
-            run(null, sym).catch((err) => { console.error(`Startup ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); })
-          ));
+        for (const sym of startSyms) {
+          await run(null, sym).catch((err) => { console.error(`Startup ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); });
         }
         if (SWING_ENABLED) {
           for (const sym of CONFIG.symbols) {
@@ -6746,15 +6749,13 @@ async function monitorSniperPositions() {
     await monitorSniperPositions().catch(e => console.error("monitorSniperPositions failed:", e.message));
   }, 15 * 1000);
 
-  // Check all symbols every 5 minutes (scalp entry scan + exit check) — 3 coins at a time
+  // Check all symbols every 5 minutes (scalp entry scan + exit check) — sequential to prevent log clobber
   setInterval(async () => {
     for (const account of ACCOUNTS) {
       _currentAccount = account;
       const pollSyms = [...CONFIG.symbols];
-      for (let i = 0; i < pollSyms.length; i += 3) {
-        await Promise.all(pollSyms.slice(i, i + 3).map(sym =>
-          run(null, sym).catch((err) => { console.error(`Poll ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); })
-        ));
+      for (const sym of pollSyms) {
+        await run(null, sym).catch((err) => { console.error(`Poll ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); });
       }
     }
     _currentAccount = ACCOUNTS[0];
