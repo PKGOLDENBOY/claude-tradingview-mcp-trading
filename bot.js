@@ -127,8 +127,8 @@ const _processingEntries = new Set(); // guard against duplicate concurrent entr
 let _claudeCallsToday = 0;
 let _claudeDate = "";
 let _lastClaudeCallMs = 0;
-const CLAUDE_DAILY_CAP = 12;         // max calls per day (entries + exits combined)
-const CLAUDE_GLOBAL_COOLDOWN_MS = 15 * 60 * 1000; // 15 min between any two calls
+const CLAUDE_DAILY_CAP = 3;          // max calls per day (entries + exits combined)
+const CLAUDE_GLOBAL_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4h between any two calls
 
 function claudeAvailable() {
   const today = new Date().toISOString().slice(0, 10);
@@ -4615,20 +4615,31 @@ if (process.argv.includes("--tax-summary")) {
       const pnlUSD = pos.entryPrice ? qty * (price - pos.entryPrice) : 0;
       openPositions.push({ coin: baseCoin, sym, qty, usdVal, price, entryPrice: pos.entryPrice, pnlPct, pnlUSD, slPct, tpPct, trailStop, breakEvenActive, minsOpen, entryType: pos.entryType || "scalp" });
     }
+    // Build a price fallback from _topGainers for coins not in coinSnapshots (e.g. LT positions)
+    const tickerPrices = Object.fromEntries((_topGainers || []).map(t => [t.symbol, t.price]));
     // Add live BitGet coin holdings not yet tracked in log
     for (const asset of liveAssets) {
-      if (asset.coin === "USDT" || asset.coin === "BGB") continue;
+      if (asset.coin === "USDT" || asset.coin === "BGB" || asset.coin === "USDC") continue;
       const qty = parseFloat(asset.available) + parseFloat(asset.frozen || 0);
       if (qty < 0.000001) continue;
       const sym = asset.coin + "USDT";
       if (seenSyms.has(sym)) continue;
       const snap = coinSnapshots[sym];
-      const price = snap?.price ?? 0;
+      const price = snap?.price ?? tickerPrices[sym] ?? 0;
       if (price < 0.000001) continue;
       const usdVal = qty * price;
-      if (usdVal < 5) continue;
+      if (usdVal < 1) continue;
       openPositionValue += usdVal;
-      openPositions.push({ coin: asset.coin, sym, qty, usdVal, price, entryPrice: null, pnlPct: null, pnlUSD: null, entryType: "untracked" });
+      // Check if this is an LT or swing position
+      const ltPos = (log.ltPositions || {})[sym];
+      const swingPos = (log.swingPositions || {})[sym];
+      const trackedPos = ltPos?.open ? ltPos : swingPos?.open ? swingPos : null;
+      const entryPrice = trackedPos?.entryPrice ?? trackedPos?.avgEntry ?? null;
+      const pnlPct = entryPrice ? ((price - entryPrice) / entryPrice) * 100 : null;
+      const pnlUSD = entryPrice ? qty * (price - entryPrice) : null;
+      const entryType = ltPos?.open ? "lt" : swingPos?.open ? "swing" : "untracked";
+      seenSyms.add(sym);
+      openPositions.push({ coin: asset.coin, sym, qty, usdVal, price, entryPrice, pnlPct, pnlUSD, entryType });
     }
     // Add open sniper positions
     for (const [sym, pos] of Object.entries(log.sniperPositions || {})) {
@@ -4756,9 +4767,9 @@ if (process.argv.includes("--tax-summary")) {
           const range = hasEntry ? (tpPct + slPct) : 100;
           const progress = hasEntry && p.pnlPct != null ? Math.min(100, Math.max(0, ((p.pnlPct + slPct) / range) * 100)) : 50;
           const timeStr = p.minsOpen != null ? (p.minsOpen >= 60 ? `${Math.floor(p.minsOpen/60)}h ${p.minsOpen%60}m` : `${p.minsOpen}m`) : "—";
-          const typeLabel = p.entryType === "sniper" ? "SNIPER" : p.entryType === "momentum" ? "MOMENTUM" : p.entryType === "snapback" ? "SNAP-BACK" : p.entryType === "untracked" ? "LIVE" : "SCALP";
-          const typeBg = p.entryType === "sniper" ? "rgba(247,181,0,.12)" : p.entryType === "momentum" ? "rgba(47,126,255,.12)" : "rgba(38,217,164,.12)";
-          const typeClr = p.entryType === "sniper" ? "#F7B500" : p.entryType === "momentum" ? "#2F7EFF" : "#26D9A4";
+          const typeLabel = p.entryType === "sniper" ? "SNIPER" : p.entryType === "momentum" ? "MOMENTUM" : p.entryType === "snapback" ? "SNAP-BACK" : p.entryType === "lt" ? "LONG-TERM" : p.entryType === "swing" ? "SWING" : p.entryType === "untracked" ? "LIVE" : "SCALP";
+          const typeBg = p.entryType === "sniper" ? "rgba(247,181,0,.12)" : p.entryType === "momentum" ? "rgba(47,126,255,.12)" : p.entryType === "lt" ? "rgba(167,139,250,.12)" : p.entryType === "swing" ? "rgba(255,184,0,.12)" : "rgba(38,217,164,.12)";
+          const typeClr = p.entryType === "sniper" ? "#F7B500" : p.entryType === "momentum" ? "#2F7EFF" : p.entryType === "lt" ? "#a78bfa" : p.entryType === "swing" ? "#FFB800" : "#26D9A4";
           const stopLabel = p.entryType === "sniper"
             ? (p.trailActive ? `Trail $${p.trailStop?.toFixed(4) ?? "—"}` : `Trail activates +${(SNIPER.trailActivatePct*100).toFixed(0)}%`)
             : p.breakEvenActive ? `BE stop $${p.trailStop?.toFixed(4) ?? "—"}` : hasEntry ? `SL $${slPrice}` : "—";
