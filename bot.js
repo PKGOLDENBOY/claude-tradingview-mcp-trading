@@ -2786,7 +2786,9 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
   } else if (CONFIG.tradeMode === "spot" && side === "sell") {
     const baseCoin = symbol.replace("USDT", "");
     const available = await getSpotBalance(baseCoin);
-    if (available <= 0) throw new Error(`No ${baseCoin} balance to sell`);
+    if (available <= 0) throw new Error(`DUST:No ${baseCoin} balance to sell`);
+    const valueUSD = available * (price || 1);
+    if (valueUSD < 1.0) throw new Error(`DUST:Position too small — $${valueUSD.toFixed(4)} remaining (below $1 minimum)`);
     const precision = await getQuantityPrecision(symbol);
     const floored = floorToDecimals(available, precision);
     orderSize = floored.toFixed(precision);
@@ -3628,8 +3630,19 @@ async function run(tvSignal = null, symbol = null) {
           console.log(`💰 Portfolio updated: $${log.portfolioValue.toFixed(4)} (${pnlUSD >= 0 ? "+" : ""}$${pnlUSD.toFixed(4)})`);
           pushSignal(symbol, pnlPct >= 0 ? "EXIT_WIN" : "EXIT_LOSS", `Sold @ $${price.toFixed(4)} | P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% ($${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(2)})`);
         } catch (err) {
+          const isDust = err.message.startsWith("DUST:") || err.message.includes("Parameter verification exception size");
           console.log(`❌ SELL ORDER FAILED — ${err.message}`);
           logEntry.error = err.message;
+          if (isDust) {
+            const baseCoin = symbol.replace("USDT", "");
+            const remaining = await getSpotBalance(baseCoin).catch(() => 0);
+            const remainingUSD = remaining * price;
+            console.log(`🗑️  Dust cleanup — ${symbol} balance $${remainingUSD.toFixed(4)} is unsellable, removing position from log`);
+            delete (log.positions || {})[symbol];
+            log.positions = { ...(log.positions || {}) };
+            logEntry.orderPlaced = true; // mark placed so cooldown is set and we don't retry
+            logEntry.orderId = "DUST-CLEANUP";
+          }
         }
       }
     }
