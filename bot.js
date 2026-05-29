@@ -127,8 +127,8 @@ const _processingEntries = new Set(); // guard against duplicate concurrent entr
 let _claudeCallsToday = 0;
 let _claudeDate = "";
 let _lastClaudeCallMs = 0;
-const CLAUDE_DAILY_CAP = 5;          // max calls per day (entries + exits combined)
-const CLAUDE_GLOBAL_COOLDOWN_MS = 30 * 60 * 1000; // 30 min between any two calls
+const CLAUDE_DAILY_CAP = 12;         // max calls per day (entries + exits combined)
+const CLAUDE_GLOBAL_COOLDOWN_MS = 15 * 60 * 1000; // 15 min between any two calls
 
 function claudeAvailable() {
   const today = new Date().toISOString().slice(0, 10);
