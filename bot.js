@@ -2582,10 +2582,7 @@ async function runLongTermPortfolio() {
 
   const t1Size    = LT_TRADE_SIZE * 0.5;
   const available = usdtBalance - LT_RESERVE;
-  const openLtCount = Object.values(log.ltPositions).filter(p => p?.open).length;
-  if (openLtCount >= 5) {
-    console.log(`  💎 LT: max 5 positions already open (${openLtCount}/5) — not buying`);
-  } else if (available < t1Size) {
+  if (available < t1Size) {
     console.log(`  ⚠️ LT: USDT too low ($${usdtBalance.toFixed(2)}) — need $${(t1Size + LT_RESERVE).toFixed(2)} for first tranche`);
   } else {
     const missing = LT_COINS.filter(sym =>
