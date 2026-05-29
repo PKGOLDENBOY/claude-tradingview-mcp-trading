@@ -1819,7 +1819,7 @@ Avoid:
 
 Risk rules (non-negotiable):
 - Spot only — no shorting, no leverage
-- Max position $2 USD | Max 20 trades/day | Portfolio ~$12 USD
+- Max position ~$40 USD (20% Kelly) | Max 40 trades/day | Portfolio ~$190 USD
 
 Learn from history: if similar setups triggered losses, raise the bar. If they worked, trust the signals.
 
@@ -1883,14 +1883,21 @@ ${hasPosition ? "EXIT or HOLD?" : "BUY or HOLD?"}`;
 
   const response = await anthropic.messages.create({
     model: "claude-haiku-4-5-20251001",
-    max_tokens: 150,
+    max_tokens: 400,
     system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
     messages: [{ role: "user", content: userMessage }],
   });
 
   const raw = response.content[0].text.trim();
   const text = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-  return JSON.parse(text);
+  // Robust JSON extraction — find the outermost { } block in case of extra text
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) return JSON.parse(match[0]);
+    throw new Error(`Claude returned non-JSON: ${text.slice(0, 80)}`);
+  }
 }
 
 // ─── Trade Limits ────────────────────────────────────────────────────────────
