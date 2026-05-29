@@ -2594,8 +2594,13 @@ async function runLongTermPortfolio() {
 
     console.log(`  💎 Scanning ${missing.length} unacquired coin(s) for entry signal...`);
 
+    const missingFiltered = missing.filter(sym => {
+      const cd = (log.coinCooldowns || {})[sym];
+      return !(cd && Date.now() < cd.until);
+    });
+
     const results = [];
-    for (const sym of missing) {
+    for (const sym of missingFiltered) {
       const r = await checkLtEntry(sym).catch(e => ({ pass: false, sym, passed: 0, total: 11, reason: e.message }));
       results.push(r);
       await new Promise(r => setTimeout(r, 150));
@@ -6535,6 +6540,9 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         log.swingPositions[symbol] = { ...swingPos, open: false };
         log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
         log.trades.push(exitEntry);
+        if (!log.coinCooldowns) log.coinCooldowns = {};
+        const swingCooldownMs = pnlPct < 0 ? 2 * 60 * 60 * 1000 : 30 * 60 * 1000;
+        log.coinCooldowns[symbol] = { until: Date.now() + swingCooldownMs, pnlPct: pnlPct.toFixed(2) };
         saveLog(log);
         writeTradeCsv(exitEntry);
       }
@@ -6547,6 +6555,14 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     // Cross-strategy dedup — don't swing if scalp or breakout already open on same coin
     if ((log.positions || {})[symbol]?.open) return;
     if ((log.breakoutPositions || {})[symbol]?.open) return;
+
+    // Cooldown — respect same cross-strategy cooldown set by scalp/breakout exits
+    const swingEntryCooldown = (log.coinCooldowns || {})[symbol];
+    if (swingEntryCooldown && Date.now() < swingEntryCooldown.until) {
+      const minsLeft = Math.ceil((swingEntryCooldown.until - Date.now()) / 60000);
+      console.log(`⏳ SWING COOLDOWN — ${symbol} blocked ${minsLeft}min (last P&L: ${swingEntryCooldown.pnlPct}%)`);
+      return;
+    }
 
     // Off-hours block
     const utcH = new Date().getUTCHours();
@@ -6716,6 +6732,9 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         log.breakoutPositions[symbol] = { ...bkPos, open: false };
         log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
         log.trades.push(exitEntry);
+        if (!log.coinCooldowns) log.coinCooldowns = {};
+        const bkCooldownMs = pnlPct < 0 ? 2 * 60 * 60 * 1000 : 30 * 60 * 1000;
+        log.coinCooldowns[symbol] = { until: Date.now() + bkCooldownMs, pnlPct: pnlPct.toFixed(2) };
         saveLog(log);
         writeTradeCsv(exitEntry);
       }
@@ -6729,6 +6748,14 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     // Cross-strategy dedup — don't break out if scalp or swing already open on same coin
     if ((log.positions || {})[symbol]?.open) return;
     if ((log.swingPositions || {})[symbol]?.open) return;
+
+    // Cooldown — respect cross-strategy cooldown set by scalp/swing exits
+    const bkEntryCooldown = (log.coinCooldowns || {})[symbol];
+    if (bkEntryCooldown && Date.now() < bkEntryCooldown.until) {
+      const minsLeft = Math.ceil((bkEntryCooldown.until - Date.now()) / 60000);
+      console.log(`⏳ BREAKOUT COOLDOWN — ${symbol} blocked ${minsLeft}min (last P&L: ${bkEntryCooldown.pnlPct}%)`);
+      return;
+    }
 
     // Off-hours and bear market block
     const utcH = new Date().getUTCHours();
