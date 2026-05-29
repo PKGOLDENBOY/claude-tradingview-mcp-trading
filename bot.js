@@ -2241,22 +2241,32 @@ async function checkLtEntry(sym) {
   const dMacd  = calcMACD(dCloses);
   const dVol   = calcVolume(daily);
 
-  // ── 8 Conditions ──────────────────────────────────────────────────────────
+  // HODLNATOR additions: Bollinger Bands, Ichimoku, golden cross (SMA50)
+  const dBB     = calcBollingerBands(dCloses, 20, 2);
+  const dIchi   = calcIchimoku(daily);
+  const dSma50  = dCloses.slice(-50).reduce((a, b) => a + b, 0) / 50;
+
+  // ── 11 Conditions ─────────────────────────────────────────────────────────
   // Weekly (macro): confirms we're in a bull structure — don't buy into freefall
-  const c1 = wPrice > wEma10;                                   // price above 10W EMA (uptrend)
-  const c2 = wEma10 > wEma20;                                   // EMA stack bullish (10W > 20W)
-  const c3 = wRsi >= 40 && wRsi <= 75;                          // weekly RSI healthy, not overbought
+  const c1 = wPrice > wEma10;                                    // price above 10W EMA (uptrend)
+  const c2 = wEma10 > wEma20;                                    // EMA stack bullish (10W > 20W)
+  const c3 = wRsi >= 40 && wRsi <= 75;                           // weekly RSI healthy, not overbought
   const c4 = wMacd.histogram > 0 || wMacd.macdLine > wMacd.signal * 0.97; // weekly MACD bullish/recovering
 
   // Daily (entry timing): buy the pullback, not the top
-  const c5 = dRsi >= 30 && dRsi <= 65;                          // RSI pulled back — not extended
-  const c6 = dPrice > dEma50 || dPrice > dEma21;               // above medium-term support
-  const c7 = dMacd.histogram > 0;                              // daily momentum positive
-  const c8 = dVol.vol3Ratio >= 0.65;                           // volume not dead
+  const c5 = dRsi >= 30 && dRsi <= 65;                           // RSI pulled back — not extended
+  const c6 = dPrice > dEma50 || dPrice > dEma21;                // above medium-term support
+  const c7 = dMacd.histogram > 0;                               // daily momentum positive
+  const c8 = dVol.vol3Ratio >= 0.65;                            // volume not dead
 
-  const checks = { c1, c2, c3, c4, c5, c6, c7, c8 };
+  // HODLNATOR (Bollinger Bands + Ichimoku + golden cross)
+  const c9  = dEma21 > dSma50;                                   // golden cross — EMA21 above SMA50
+  const c10 = dBB.pct <= 0.65;                                   // BB position — not at upper extension
+  const c11 = dIchi ? (dIchi.aboveCloud || dIchi.bullishCross) : false; // Ichimoku bullish
+
+  const checks = { c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11 };
   const labels = [
-    `W price>${wEma10 > 0 ? "EMA10" : "—"} ${c1 ? "✓" : "✗"}`,
+    `W price>EMA10 ${c1 ? "✓" : "✗"}`,
     `W EMA10>EMA20 ${c2 ? "✓" : "✗"}`,
     `W RSI ${wRsi.toFixed(0)} ${c3 ? "✓" : "✗"}`,
     `W MACD ${c4 ? "✓" : "✗"}`,
@@ -2264,15 +2274,18 @@ async function checkLtEntry(sym) {
     `D>EMA ${c6 ? "✓" : "✗"}`,
     `D MACD ${c7 ? "✓" : "✗"}`,
     `D vol ${(dVol.vol3Ratio * 100).toFixed(0)}% ${c8 ? "✓" : "✗"}`,
+    `D golden cross ${c9 ? "✓" : "✗"}`,
+    `D BB pos ${(dBB.pct * 100).toFixed(0)}% ${c10 ? "✓" : "✗"}`,
+    `D Ichimoku ${c11 ? "✓" : "✗"}`,
   ];
 
   const passed = Object.values(checks).filter(Boolean).length;
-  const total  = 8;
+  const total  = 11;
 
   // Hard gates: catch extreme overextension on either timeframe
   const hardPass  = wRsi < 80 && dRsi < 72;
-  // Score gate: 5 of 8 conditions — flexible for long-term timing
-  const scorePass = passed >= 5;
+  // Score gate: 7 of 11 conditions (~63%) — same ratio as original 5/8
+  const scorePass = passed >= 7;
   const pass      = hardPass && scorePass;
 
   return { pass, sym, passed, total, checks, labels, wRsi, dRsi, dPrice, dEma50, wEma10 };
