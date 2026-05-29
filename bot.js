@@ -337,7 +337,7 @@ const SWING = {
   partialQty: 0.30,
   maxHoldH: 120,          // 5 days max
   sizePct: 0.20,          // 20% of portfolio per swing
-  maxOpen: 2,             // max concurrent swing positions
+  maxOpen: 5,             // max concurrent swing positions
   entryBlockH: [22, 6],   // no entries 22:00–06:00 UTC
 };
 
@@ -2582,7 +2582,10 @@ async function runLongTermPortfolio() {
 
   const t1Size    = LT_TRADE_SIZE * 0.5;
   const available = usdtBalance - LT_RESERVE;
-  if (available < t1Size) {
+  const openLtCount = Object.values(log.ltPositions).filter(p => p?.open).length;
+  if (openLtCount >= 5) {
+    console.log(`  💎 LT: max 5 positions already open (${openLtCount}/5) — not buying`);
+  } else if (available < t1Size) {
     console.log(`  ⚠️ LT: USDT too low ($${usdtBalance.toFixed(2)}) — need $${(t1Size + LT_RESERVE).toFixed(2)} for first tranche`);
   } else {
     const missing = LT_COINS.filter(sym =>
@@ -3892,13 +3895,13 @@ async function run(tvSignal = null, symbol = null) {
       else console.log(`  ✅ Support ok — $${sr.nearestSupport.toFixed(4)} (${sr.distToSupport?.toFixed(2)}% below price, ${sr.supportConf} TF confluences)`);
     }
 
-    // Max 4 concurrent scalp positions — 4×20% = 80% deployed, 20% buffer for new opportunities
+    // Max 5 concurrent scalp positions
     const openPositions = Object.entries(log.positions || {}).filter(([,p]) => p && p.open);
     const openCount = openPositions.length;
-    if (openCount >= 4) {
+    if (openCount >= 5) {
       const held = openPositions.map(([s]) => s).join(", ");
-      console.log(`🚫 MAX POSITIONS — already holding ${held}. Max 4 positions at a time.`);
-      pushSignal(symbol, "BLOCKED", `Max positions (4/4) reached`);
+      console.log(`🚫 MAX POSITIONS — already holding ${held}. Max 5 positions at a time.`);
+      pushSignal(symbol, "BLOCKED", `Max positions (5/5) reached`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
@@ -6724,7 +6727,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
     // ── Entry check ─────────────────────────────────────────────────────────
     const openBreakouts = Object.values(log.breakoutPositions || {}).filter(p => p?.open).length;
-    if (openBreakouts >= 2) return;
+    if (openBreakouts >= 5) return;
 
     // Cross-strategy dedup — don't break out if scalp or swing already open on same coin
     if ((log.positions || {})[symbol]?.open) return;
