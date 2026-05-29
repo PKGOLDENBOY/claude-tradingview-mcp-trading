@@ -12,7 +12,7 @@
 import "dotenv/config";
 import Anthropic from "@anthropic-ai/sdk";
 import http from "http";
-import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, appendFileSync, renameSync } from "fs";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import WebSocket from "ws";
@@ -327,26 +327,35 @@ const SWING = {
 // ─── Logging ────────────────────────────────────────────────────────────────
 
 function loadLog() {
-  if (!existsSync(acct().logFile)) return { trades: [], portfolioValue: acct().portfolioValue, dayStartValue: acct().portfolioValue, dayStartDate: new Date().toISOString().slice(0, 10), _needsPortfolioSync: true };
-  let raw = readFileSync(acct().logFile);
-  if (raw[0] === 0xEF && raw[1] === 0xBB && raw[2] === 0xBF) raw = raw.slice(3);
-  const log = JSON.parse(raw.toString("utf8"));
-  // Reset day start value each new day
-  const today = new Date().toISOString().slice(0, 10);
-  if (!log.portfolioValue) log.portfolioValue = acct().portfolioValue;
-  if (log.dayStartDate !== today) {
-    log.dayStartDate = today;
-    // Fix 5: Auto-sync portfolio to real BitGet USDT balance at day start
-    // (async fetch done in run() — flag it here so run() knows to sync)
-    log._needsPortfolioSync = true;
-    log.dayStartValue = log.portfolioValue;
+  const fresh = () => ({ trades: [], portfolioValue: acct().portfolioValue, dayStartValue: acct().portfolioValue, dayStartDate: new Date().toISOString().slice(0, 10), _needsPortfolioSync: true });
+  if (!existsSync(acct().logFile)) return fresh();
+  let raw;
+  try {
+    raw = readFileSync(acct().logFile);
+    if (raw[0] === 0xEF && raw[1] === 0xBB && raw[2] === 0xBF) raw = raw.slice(3);
+    const log = JSON.parse(raw.toString("utf8"));
+    const today = new Date().toISOString().slice(0, 10);
+    if (!log.portfolioValue) log.portfolioValue = acct().portfolioValue;
+    if (log.dayStartDate !== today) {
+      log.dayStartDate = today;
+      log._needsPortfolioSync = true;
+      log.dayStartValue = log.portfolioValue;
+    }
+    if (!log.dayStartValue) log.dayStartValue = log.portfolioValue;
+    return log;
+  } catch (e) {
+    // Corrupted log (e.g. process killed mid-write) — back it up and start fresh
+    console.error(`⚠️ loadLog: JSON parse failed (${e.message}) — backing up corrupted file and starting fresh`);
+    try { renameSync(acct().logFile, acct().logFile + ".bak." + Date.now()); } catch {}
+    return fresh();
   }
-  if (!log.dayStartValue) log.dayStartValue = log.portfolioValue;
-  return log;
 }
 
 function saveLog(log) {
-  writeFileSync(acct().logFile, JSON.stringify(log, null, 2));
+  // Atomic write: write to temp file then rename so a mid-write kill never corrupts the log
+  const tmp = acct().logFile + ".tmp";
+  writeFileSync(tmp, JSON.stringify(log, null, 2));
+  renameSync(tmp, acct().logFile);
 }
 
 function countTodaysTrades(log) {
@@ -3162,13 +3171,14 @@ async function run(tvSignal = null, symbol = null) {
         };
         if (CONFIG.paperTrading) {
           momEntry.orderPlaced = true; momEntry.orderId = `PAPER-${Date.now()}`;
-          log.positions[symbol] = { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (momSize / price).toFixed(6), orderId: momEntry.orderId, entryType: "momentum" };
+          try { log.positions = { ...(loadLog().positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (momSize / price).toFixed(6), orderId: momEntry.orderId, entryType: "momentum" } }; } catch { log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (momSize / price).toFixed(6), orderId: momEntry.orderId, entryType: "momentum" } }; }
         } else {
           try {
             const order = await placeOrder(symbol, "buy", momSize, price);
             const qty = order.confirmedQty ?? (momSize / price);
             momEntry.orderPlaced = true; momEntry.orderId = order.orderId;
-            log.positions[symbol] = { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId: order.orderId, entryType: "momentum" };
+            // Reload fresh before writing position — prevents stale log overwriting concurrent writes
+            try { log.positions = { ...(loadLog().positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId: order.orderId, entryType: "momentum" } }; } catch { log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId: order.orderId, entryType: "momentum" } }; }
             await emailEntry({ symbol, price, tradeSize: momSize, orderId: order.orderId });
           } catch(err) {
             console.error(`\n❌ Momentum order failed: ${err.message}`);
