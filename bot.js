@@ -2595,7 +2595,7 @@ async function runLongTermPortfolio() {
     console.log(`  💎 Scanning ${missing.length} unacquired coin(s) for entry signal...`);
 
     const missingFiltered = missing.filter(sym => {
-      const cd = (log.coinCooldowns || {})[sym];
+      const cd = (log.coinCooldowns || {})[sym]?.lt;
       return !(cd && Date.now() < cd.until);
     });
 
@@ -3634,11 +3634,12 @@ async function run(tvSignal = null, symbol = null) {
     // Only persist actual exits (order placed) — not hold decisions
     if (logEntry.orderPlaced) {
       log.trades.push(logEntry);
-      // Per-coin cooldown: 30min after any exit (prevents immediate re-entry loops), 2h after a loss
+      // Per-coin per-strategy cooldown: only blocks scalp re-entry, not swing/LT
       if (!log.coinCooldowns) log.coinCooldowns = {};
+      if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
       const cooldownMs = pnlPct < 0 ? 2 * 60 * 60 * 1000 : 30 * 60 * 1000;
-      log.coinCooldowns[symbol] = { until: Date.now() + cooldownMs, pnlPct: pnlPct.toFixed(2) };
-      console.log(`⏳ Cooldown set for ${symbol} — no re-entry for ${pnlPct < 0 ? "2h (loss)" : "30min (exit)"} (P&L: ${pnlPct.toFixed(2)}%)`);
+      log.coinCooldowns[symbol].scalp = { until: Date.now() + cooldownMs, pnlPct: pnlPct.toFixed(2) };
+      console.log(`⏳ Scalp cooldown set for ${symbol} — no scalp re-entry for ${pnlPct < 0 ? "2h (loss)" : "30min (exit)"} (P&L: ${pnlPct.toFixed(2)}%)`);
       saveLog(log);
       console.log(`\nDecision log saved → ${LOG_FILE}`);
       writeTradeCsv(logEntry);
@@ -3682,14 +3683,14 @@ async function run(tvSignal = null, symbol = null) {
       }
     }
 
-    // Per-coin cooldown — skip re-entry for 30min after any exit, 2h after a loss
-    const cooldown = (log.coinCooldowns || {})[symbol];
+    // Per-coin scalp cooldown — only blocks scalp re-entry, not swing/LT
+    const cooldown = (log.coinCooldowns || {})[symbol]?.scalp;
     if (cooldown && Date.now() < cooldown.until) {
       const minsLeft = Math.ceil((cooldown.until - Date.now()) / 60000);
       const pnl = parseFloat(cooldown.pnlPct);
-      console.log(`⏳ COOLDOWN — ${symbol} blocked for ${minsLeft} more min (last exit P&L: ${pnl >= 0 ? "+" : ""}${cooldown.pnlPct}%)`);
+      console.log(`⏳ SCALP COOLDOWN — ${symbol} blocked for ${minsLeft} more min (last P&L: ${pnl >= 0 ? "+" : ""}${cooldown.pnlPct}%)`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Coin cooldown — ${minsLeft}min left`);
+      pushSignal(symbol, "BLOCKED", `Scalp cooldown — ${minsLeft}min left`);
       return;
     }
 
@@ -6541,8 +6542,9 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
         log.trades.push(exitEntry);
         if (!log.coinCooldowns) log.coinCooldowns = {};
+        if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
         const swingCooldownMs = pnlPct < 0 ? 2 * 60 * 60 * 1000 : 30 * 60 * 1000;
-        log.coinCooldowns[symbol] = { until: Date.now() + swingCooldownMs, pnlPct: pnlPct.toFixed(2) };
+        log.coinCooldowns[symbol].swing = { until: Date.now() + swingCooldownMs, pnlPct: pnlPct.toFixed(2) };
         saveLog(log);
         writeTradeCsv(exitEntry);
       }
@@ -6557,7 +6559,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     if ((log.breakoutPositions || {})[symbol]?.open) return;
 
     // Cooldown — respect same cross-strategy cooldown set by scalp/breakout exits
-    const swingEntryCooldown = (log.coinCooldowns || {})[symbol];
+    const swingEntryCooldown = (log.coinCooldowns || {})[symbol]?.swing;
     if (swingEntryCooldown && Date.now() < swingEntryCooldown.until) {
       const minsLeft = Math.ceil((swingEntryCooldown.until - Date.now()) / 60000);
       console.log(`⏳ SWING COOLDOWN — ${symbol} blocked ${minsLeft}min (last P&L: ${swingEntryCooldown.pnlPct}%)`);
@@ -6733,8 +6735,9 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
         log.trades.push(exitEntry);
         if (!log.coinCooldowns) log.coinCooldowns = {};
+        if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
         const bkCooldownMs = pnlPct < 0 ? 2 * 60 * 60 * 1000 : 30 * 60 * 1000;
-        log.coinCooldowns[symbol] = { until: Date.now() + bkCooldownMs, pnlPct: pnlPct.toFixed(2) };
+        log.coinCooldowns[symbol].breakout = { until: Date.now() + bkCooldownMs, pnlPct: pnlPct.toFixed(2) };
         saveLog(log);
         writeTradeCsv(exitEntry);
       }
@@ -6750,7 +6753,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     if ((log.swingPositions || {})[symbol]?.open) return;
 
     // Cooldown — respect cross-strategy cooldown set by scalp/swing exits
-    const bkEntryCooldown = (log.coinCooldowns || {})[symbol];
+    const bkEntryCooldown = (log.coinCooldowns || {})[symbol]?.breakout;
     if (bkEntryCooldown && Date.now() < bkEntryCooldown.until) {
       const minsLeft = Math.ceil((bkEntryCooldown.until - Date.now()) / 60000);
       console.log(`⏳ BREAKOUT COOLDOWN — ${symbol} blocked ${minsLeft}min (last P&L: ${bkEntryCooldown.pnlPct}%)`);
