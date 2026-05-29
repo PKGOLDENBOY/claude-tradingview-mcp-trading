@@ -233,6 +233,23 @@ const SWING_BACKTEST = {}; // in-memory cache, 24h TTL
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
+// ─── Long-Term Portfolio Config ───────────────────────────────────────────────
+// Based on BitcoinTAF $25K portfolio strategy: buy a diversified basket and
+// hold until the profit target is reached. Runs independently of scalp/swing.
+const LT_ENABLED    = process.env.LT_ENABLED !== "false";                       // disable via env if needed
+const LT_TRADE_SIZE = parseFloat(process.env.LT_TRADE_SIZE_USD  || "3");        // $ invested per coin
+const LT_TARGET_PCT = parseFloat(process.env.LT_TARGET_PCT      || "100");      // exit at +100% (2×)
+const LT_RESERVE    = parseFloat(process.env.LT_USDT_RESERVE    || "20");       // keep this much free for scalp
+const LT_COINS = [
+  // From the BitcoinTAF portfolio — filtered to BitGet USDT pairs
+  "ADAUSDT","AVAXUSDT","AXSUSDT","DOGEUSDT","ETCUSDT","FETUSDT","FILUSDT",
+  "GALAUSDT","HBARUSDT","ICPUSDT","LINKUSDT","LTCUSDT","MANAUSDT","PEPEUSDT",
+  "SEIUSDT","SUIUSDT","THETAUSDT","VIRTUALUSDT","XRPUSDT","INJUSDT","DOTUSDT",
+  "JASMYUSDT","RUNEUSDT","ALGOUSDT","ALICEUSDT","NEOUSDT","XLMUSDT","COMPUSDT",
+  "FLOWUSDT","KAVAUSDT","ZILUSDT","SLPUSDT","EGLDUSDT","LUNCUSDT","IOTAUSDT",
+  "1INCHUSDT","COTIUSDT","CHRUSDT","STRKUSDT","ARKMUSDT","VRAUSDT",
+];
+
 const BASE_WATCHLIST = ["ATOMUSDT","GOMININGUSDT","AXSUSDT","KAVAUSDT","SOLUSDT","XLMUSDT"];
 const WATCHLIST = [...new Set([
   ...BASE_WATCHLIST,
@@ -2097,6 +2114,94 @@ async function reconcilePositions(log) {
   }
 }
 
+// ─── Long-Term Portfolio ──────────────────────────────────────────────────────
+// Buy a diversified basket of altcoins and hold until the profit target is hit.
+// Runs on startup and every 6 hours. One new coin purchased per run to avoid
+// dumping all capital at once. Scalp/swing bot skips coins held here.
+async function runLongTermPortfolio() {
+  if (!LT_ENABLED || CONFIG.paperTrading) return;
+  console.log(`\n💎 ── Long-Term Portfolio ──────────────────────────────────`);
+
+  // Fetch all prices in one call
+  let prices = {};
+  try {
+    const res  = await fetch("https://api.bitget.com/api/v2/spot/market/tickers");
+    const data = await res.json();
+    prices = Object.fromEntries((data.data || []).map(t => [t.symbol, parseFloat(t.lastPr)]));
+  } catch (e) {
+    console.log(`⚠️ LT: price fetch failed — ${e.message}`); return;
+  }
+
+  const log = loadLog();
+  if (!log.ltPositions) log.ltPositions = {};
+  let changed = false;
+
+  // ── Check exits on held positions ─────────────────────────────────────────
+  for (const [sym, pos] of Object.entries(log.ltPositions)) {
+    if (!pos?.open) continue;
+    const price = prices[sym];
+    if (!price) continue;
+    const pnlPct = (price - pos.entryPrice) / pos.entryPrice * 100;
+    const holdDays = (Date.now() - new Date(pos.entryTime).getTime()) / 86400000;
+    console.log(`  💎 ${sym.replace("USDT","").padEnd(8)} entry $${pos.entryPrice.toFixed(6)} | now $${price.toFixed(6)} | ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% | ${holdDays.toFixed(0)}d held`);
+
+    const target = pos.targetPct ?? LT_TARGET_PCT;
+    if (pnlPct >= target) {
+      console.log(`  🎯 TARGET HIT — selling ${sym} at +${pnlPct.toFixed(2)}%`);
+      try {
+        await placeOrder(sym, "sell", null, price, pos.quantity);
+        const pnlUSD = (price - pos.entryPrice) * parseFloat(pos.quantity);
+        log.ltPositions[sym] = { ...pos, open: false, exitPrice: price, exitTime: new Date().toISOString(), pnlPct, pnlUSD };
+        log.portfolioValue = (log.portfolioValue || 0) + pnlUSD;
+        writeTradeCsv({ timestamp: new Date().toISOString(), type: "exit", symbol: sym, price, pnlPct, pnlUSD, orderPlaced: true, tradeType: "longterm", notes: `LT target +${pnlPct.toFixed(1)}%` });
+        changed = true;
+        console.log(`  ✅ LT SOLD — ${sym} +${pnlPct.toFixed(2)}% ($+${pnlUSD.toFixed(2)})`);
+      } catch (e) { console.log(`  ❌ LT sell failed ${sym}: ${e.message}`); }
+    }
+  }
+
+  // ── Buy the next missing coin ──────────────────────────────────────────────
+  let usdtBalance = 0;
+  try { usdtBalance = await getBalance("USDT"); } catch (e) {
+    console.log(`⚠️ LT: balance fetch failed — ${e.message}`);
+    if (changed) saveLog(log); return;
+  }
+
+  const available = usdtBalance - LT_RESERVE;
+  if (available < LT_TRADE_SIZE) {
+    console.log(`  ⚠️ LT: USDT too low ($${usdtBalance.toFixed(2)}) — need $${(LT_TRADE_SIZE + LT_RESERVE).toFixed(2)} to buy`);
+  } else {
+    for (const sym of LT_COINS) {
+      if (log.ltPositions[sym]?.open) continue;
+      if ((log.positions || {})[sym]?.open) continue;
+      if ((log.swingPositions || {})[sym]?.open) continue;
+      const price = prices[sym];
+      if (!price || price <= 0) { console.log(`  ⚠️ LT skip ${sym} — no price data`); continue; }
+
+      try {
+        console.log(`  💎 LT BUY — ${sym} $${LT_TRADE_SIZE} @ $${price.toFixed(6)}`);
+        const order = await placeOrder(sym, "buy", LT_TRADE_SIZE, price);
+        const qty   = order.confirmedQty ?? (LT_TRADE_SIZE / price);
+        log.ltPositions[sym] = {
+          open: true, symbol: sym, entryPrice: price, quantity: String(qty),
+          entryTime: new Date().toISOString(), orderId: order.orderId,
+          targetPct: LT_TARGET_PCT, tradeType: "longterm",
+        };
+        writeTradeCsv({ timestamp: new Date().toISOString(), type: "entry", symbol: sym, price, tradeSize: LT_TRADE_SIZE, orderPlaced: true, tradeType: "longterm", orderId: order.orderId, notes: `LT hold — target +${LT_TARGET_PCT}%` });
+        changed = true;
+        console.log(`  ✅ LT BOUGHT — ${sym} qty:${qty}`);
+      } catch (e) { console.log(`  ❌ LT buy failed ${sym}: ${e.message}`); continue; }
+      break; // one coin per run — spread capital acquisition over multiple runs
+    }
+  }
+
+  if (changed) saveLog(log);
+  const openCount = Object.values(log.ltPositions).filter(p => p?.open).length;
+  const remaining = LT_COINS.filter(s => !log.ltPositions[s]?.open).length;
+  console.log(`  💎 Portfolio: ${openCount}/${LT_COINS.length} held | ${remaining} coins still to acquire`);
+  console.log(`═══════════════════════════════════════════════════════════\n`);
+}
+
 async function sweepDust(log) {
   if (CONFIG.paperTrading || acct().exchange !== "bitget") return;
   try {
@@ -3139,6 +3244,13 @@ async function run(tvSignal = null, symbol = null) {
     if (todayLosses >= 2) {
       console.log(`🚫 DAILY BLOCK — ${symbol} has lost ${todayLosses}x today. Skipping for rest of day.`);
       pushSignal(symbol, "BLOCKED", `Daily block — lost ${todayLosses}x today`);;
+      console.log("═══════════════════════════════════════════════════════════\n");
+      return;
+    }
+
+    // Skip scalp entries for coins held in long-term portfolio
+    if (LT_ENABLED && (log.ltPositions || {})[symbol]?.open) {
+      console.log(`💎 LT HOLD — ${symbol} is in long-term portfolio. Skipping scalp entry.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
@@ -6633,6 +6745,7 @@ async function monitorSniperPositions() {
           await sweepDust(startLog).catch(e => console.error("sweepDust failed:", e.message));
           saveLog(startLog);
           await initSniperSymbols().catch(e => console.error("initSniperSymbols failed:", e.message));
+          await runLongTermPortfolio().catch(e => console.error("LT portfolio startup failed:", e.message));
           sendEmail(
             "🤖 Bot Online — Trading Started",
             `<h2>🤖 Bot is now live</h2>
@@ -6674,6 +6787,13 @@ async function monitorSniperPositions() {
         console.log(`⚠️ Periodic reconcile failed: ${e.message}`);
       }
     }, 30 * 60 * 1000);
+  }
+
+  // Run long-term portfolio check every 6 hours
+  if (!CONFIG.paperTrading && LT_ENABLED) {
+    setInterval(async () => {
+      await runLongTermPortfolio().catch(e => console.log(`⚠️ LT portfolio run failed: ${e.message}`));
+    }, 6 * 60 * 60 * 1000);
   }
 
   // Swap to fresh top movers every 4 hours (restarts price stream with new symbols)
