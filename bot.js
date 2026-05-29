@@ -2118,6 +2118,94 @@ async function reconcilePositions(log) {
 // Buy a diversified basket of altcoins and hold until the profit target is hit.
 // Runs on startup and every 6 hours. One new coin purchased per run to avoid
 // dumping all capital at once. Scalp/swing bot skips coins held here.
+async function ltWebhookBuy(sym, source) {
+  if (!LT_ENABLED || CONFIG.paperTrading) return;
+  const log = loadLog();
+  if (!log.ltPositions) log.ltPositions = {};
+
+  if (log.ltPositions[sym]?.open) {
+    console.log(`  💎 LT already holding ${sym} — ignoring BUY signal`); return;
+  }
+  if ((log.positions || {})[sym]?.open || (log.swingPositions || {})[sym]?.open) {
+    console.log(`  💎 LT skip ${sym} — already in scalp/swing position`); return;
+  }
+
+  // Check USDT balance
+  let usdtBalance = 0;
+  try { usdtBalance = await getBalance("USDT"); } catch (e) {
+    console.log(`⚠️ LT webhook: balance fetch failed — ${e.message}`); return;
+  }
+  if (usdtBalance - LT_RESERVE < LT_TRADE_SIZE) {
+    console.log(`  ⚠️ LT webhook: USDT too low ($${usdtBalance.toFixed(2)}) — skipping ${sym}`); return;
+  }
+
+  // Fetch current price
+  let price = 0;
+  try {
+    const res  = await fetch(`https://api.bitget.com/api/v2/spot/market/tickers?symbol=${sym}`);
+    const data = await res.json();
+    price = parseFloat(data.data?.[0]?.lastPr ?? 0);
+  } catch (e) { console.log(`⚠️ LT webhook: price fetch failed ${sym} — ${e.message}`); return; }
+  if (!price) { console.log(`⚠️ LT webhook: no price for ${sym}`); return; }
+
+  try {
+    console.log(`  💎 LT WEBHOOK BUY — ${sym} $${LT_TRADE_SIZE} @ $${price.toFixed(6)} [${source}]`);
+    const order = await placeOrder(sym, "buy", LT_TRADE_SIZE, price);
+    const qty   = order.confirmedQty ?? (LT_TRADE_SIZE / price);
+    const freshLog = loadLog();
+    if (!freshLog.ltPositions) freshLog.ltPositions = {};
+    freshLog.ltPositions[sym] = {
+      open: true, symbol: sym, entryPrice: price, quantity: String(qty),
+      entryTime: new Date().toISOString(), orderId: order.orderId,
+      targetPct: LT_TARGET_PCT, tradeType: "longterm", source,
+    };
+    writeTradeCsv({ timestamp: new Date().toISOString(), type: "entry", symbol: sym, price, tradeSize: LT_TRADE_SIZE, orderPlaced: true, tradeType: "longterm", orderId: order.orderId, notes: `LT signal [${source}] — target +${LT_TARGET_PCT}%` });
+    saveLog(freshLog);
+    console.log(`  ✅ LT BOUGHT — ${sym} qty:${qty}`);
+    sendEmail(`💎 LT BUY — ${sym.replace("USDT","")} @ $${price.toFixed(6)}`,
+      `<h2>💎 Long-Term Buy</h2><table style="font-size:16px;line-height:1.8">
+       <tr><td><b>Symbol</b></td><td>${sym}</td></tr>
+       <tr><td><b>Price</b></td><td>$${price.toFixed(6)}</td></tr>
+       <tr><td><b>Size</b></td><td>$${LT_TRADE_SIZE}</td></tr>
+       <tr><td><b>Signal</b></td><td>${source}</td></tr>
+       <tr><td><b>Target</b></td><td>+${LT_TARGET_PCT}%</td></tr></table>`);
+  } catch (e) { console.log(`  ❌ LT webhook buy failed ${sym}: ${e.message}`); }
+}
+
+async function ltWebhookSell(sym, source) {
+  if (!LT_ENABLED || CONFIG.paperTrading) return;
+  const log = loadLog();
+  const pos = log.ltPositions?.[sym];
+  if (!pos?.open) {
+    console.log(`  💎 LT not holding ${sym} — ignoring SELL signal`); return;
+  }
+
+  let price = 0;
+  try {
+    const res  = await fetch(`https://api.bitget.com/api/v2/spot/market/tickers?symbol=${sym}`);
+    const data = await res.json();
+    price = parseFloat(data.data?.[0]?.lastPr ?? 0);
+  } catch (e) { console.log(`⚠️ LT webhook: price fetch failed ${sym} — ${e.message}`); return; }
+  if (!price) return;
+
+  const pnlPct = (price - pos.entryPrice) / pos.entryPrice * 100;
+  try {
+    console.log(`  💎 LT WEBHOOK SELL — ${sym} ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% [${source}]`);
+    await placeOrder(sym, "sell", null, price, pos.quantity);
+    const pnlUSD = (price - pos.entryPrice) * parseFloat(pos.quantity);
+    const freshLog = loadLog();
+    if (freshLog.ltPositions?.[sym]) freshLog.ltPositions[sym] = { ...pos, open: false, exitPrice: price, exitTime: new Date().toISOString(), pnlPct, pnlUSD };
+    writeTradeCsv({ timestamp: new Date().toISOString(), type: "exit", symbol: sym, price, pnlPct, pnlUSD, orderPlaced: true, tradeType: "longterm", notes: `LT signal sell [${source}]` });
+    saveLog(freshLog);
+    console.log(`  ✅ LT SOLD — ${sym} ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% ($${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(2)})`);
+    sendEmail(`${pnlUSD >= 0 ? "💰" : "🔴"} LT SELL — ${sym.replace("USDT","")} ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`,
+      `<h2>${pnlUSD >= 0 ? "💰 LT Profit" : "🔴 LT Exit"}</h2><table style="font-size:16px;line-height:1.8">
+       <tr><td><b>Symbol</b></td><td>${sym}</td></tr>
+       <tr><td><b>P&L</b></td><td>${pnlUSD >= 0 ? "+" : ""}$${pnlUSD.toFixed(2)} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)</td></tr>
+       <tr><td><b>Signal</b></td><td>${source}</td></tr></table>`);
+  } catch (e) { console.log(`  ❌ LT webhook sell failed ${sym}: ${e.message}`); }
+}
+
 async function runLongTermPortfolio() {
   if (!LT_ENABLED || CONFIG.paperTrading) return;
   console.log(`\n💎 ── Long-Term Portfolio ──────────────────────────────────`);
@@ -5890,6 +5978,43 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           res.end(JSON.stringify({ received: true, action, symbol: sym }));
           console.log(`\n📡 TradingView webhook: ${action} ${sym}`);
           run(action, sym).catch((err) => console.error("Webhook run error:", err));
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON body" }));
+        }
+      });
+      return;
+    }
+
+    // LT portfolio webhook — receives buy/sell signals from NeonGreenHF / DETONATOR A/B/C
+    if (req.method === "POST" && path === "/lt-webhook") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk.toString()));
+      req.on("end", async () => {
+        try {
+          const payload = JSON.parse(body);
+          const action  = (payload.action || "").toUpperCase();
+          const sym     = (payload.symbol || "").toUpperCase().replace(/[^A-Z]/g, "");
+          const source  = payload.source || "indicator";
+
+          if (!["BUY", "SELL"].includes(action)) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "action must be BUY or SELL" })); return;
+          }
+          if (!LT_COINS.includes(sym)) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: `${sym} not in LT coin list` })); return;
+          }
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ received: true, action, symbol: sym, source }));
+          console.log(`\n📡 LT webhook: ${action} ${sym} [${source}]`);
+
+          if (action === "BUY") {
+            ltWebhookBuy(sym, source).catch(e => console.error(`LT webhook buy error ${sym}:`, e.message));
+          } else {
+            ltWebhookSell(sym, source).catch(e => console.error(`LT webhook sell error ${sym}:`, e.message));
+          }
         } catch {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Invalid JSON body" }));

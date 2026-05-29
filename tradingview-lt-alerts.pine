@@ -1,0 +1,37 @@
+//@version=5
+indicator("BitcoinTAF LT Signals → Bot", overlay=true)
+
+// ─── INSTRUCTIONS ─────────────────────────────────────────────────────────────
+// 1. Add this script to your chart alongside NeonGreenHF + DETONATOR A/B/C
+// 2. Click the gear ⚙ on this indicator → set each source input to the
+//    corresponding indicator's BUY signal plot (the green triangle/dot/label)
+// 3. For SELL: point sell sources to the red signal plot of each indicator
+// 4. Create ONE alert on this indicator:
+//    Condition: "LT BUY Signal" or "LT SELL Signal"
+//    Webhook URL: https://YOUR-RAILWAY-URL.railway.app/lt-webhook
+//    Message: (auto-filled below — do NOT change it)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Source inputs — point each to the indicator's signal plot ────────────────
+neonBuy  = input.source(close, "NeonGreenHF   — BUY plot")
+detA_buy = input.source(close, "DETONATOR A   — BUY plot")
+detB_buy = input.source(close, "DETONATOR B   — BUY plot")
+detC_buy = input.source(close, "DETONATOR C   — BUY plot")
+
+neonSell  = input.source(close, "NeonGreenHF   — SELL plot")
+detA_sell = input.source(close, "DETONATOR A   — SELL plot")
+detB_sell = input.source(close, "DETONATOR B   — SELL plot")
+detC_sell = input.source(close, "DETONATOR C   — SELL plot")
+
+// ── Signal detection — fires on the bar the plot goes from 0 → positive ─────
+buySignal  = ta.crossover(neonBuy,  0) or ta.crossover(detA_buy,  0) or ta.crossover(detB_buy,  0) or ta.crossover(detC_buy,  0)
+sellSignal = ta.crossover(neonSell, 0) or ta.crossover(detA_sell, 0) or ta.crossover(detB_sell, 0) or ta.crossover(detC_sell, 0)
+
+// ── Visual markers ────────────────────────────────────────────────────────────
+plotshape(buySignal,  title="LT BUY",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0),  size=size.small)
+plotshape(sellSignal, title="LT SELL", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,  0),  size=size.small)
+
+// ── Alert conditions ─────────────────────────────────────────────────────────
+// TradingView fills {{ticker}} with the current symbol (e.g. ADAUSDT)
+alertcondition(buySignal,  title="LT BUY Signal",  message='{"action":"BUY","symbol":"{{ticker}}","source":"BitcoinTAF"}')
+alertcondition(sellSignal, title="LT SELL Signal", message='{"action":"SELL","symbol":"{{ticker}}","source":"BitcoinTAF"}')
