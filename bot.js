@@ -3033,7 +3033,10 @@ function generateTaxSummary() {
 
 // ─── WebSocket real-time price stream ────────────────────────────────────────
 
+let _wsGeneration = 0; // incremented on every intentional restart; stale close handlers bail out
+
 function startPriceStream(symbols) {
+  const generation = ++_wsGeneration;
   if (priceStreamWs) {
     try { priceStreamWs.terminate(); } catch {}
   }
@@ -3058,6 +3061,7 @@ function startPriceStream(symbols) {
   });
 
   ws.on("close", () => {
+    if (generation !== _wsGeneration) return; // intentionally replaced — don't reconnect
     console.log("⚠️  WebSocket disconnected — reconnecting in 5s");
     setTimeout(() => startPriceStream(CONFIG.symbols), 5000);
   });
@@ -7266,9 +7270,9 @@ async function monitorSniperPositions() {
       const regime = await detectMarketRegime().catch(() => ({ regime: "UNKNOWN" }));
       console.log(`\n🌍 Market regime: ${regime.regime} | BTC trend: ${regime.btcTrend} | Volatility: ${regime.volatility}`);
 
-      // Fire refreshTopMovers in background — don't block the startup scan on 80-coin backtests
-      refreshTopMovers().then(() => startPriceStream(CONFIG.symbols)).catch(e => console.error("refreshTopMovers failed:", e.message));
+      // Start price stream immediately, then refresh top movers and restart with updated symbols
       startPriceStream(CONFIG.symbols);
+      refreshTopMovers().then(() => startPriceStream(CONFIG.symbols)).catch(e => console.error("refreshTopMovers failed:", e.message));
 
       for (const account of ACCOUNTS) {
         _currentAccount = account;
