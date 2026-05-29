@@ -237,7 +237,7 @@ const SWING_BACKTEST = {}; // in-memory cache, 24h TTL
 // Based on BitcoinTAF $25K portfolio strategy: buy a diversified basket and
 // hold until the profit target is reached. Runs independently of scalp/swing.
 const LT_ENABLED    = process.env.LT_ENABLED !== "false";                       // disable via env if needed
-const LT_TRADE_SIZE = parseFloat(process.env.LT_TRADE_SIZE_USD  || "3");        // $ invested per coin
+const LT_TRADE_SIZE = parseFloat(process.env.LT_TRADE_SIZE_USD  || "5");        // $ invested per coin
 const LT_TARGET_PCT = parseFloat(process.env.LT_TARGET_PCT      || "100");      // exit at +100% (2×)
 const LT_RESERVE    = parseFloat(process.env.LT_USDT_RESERVE    || "20");       // keep this much free for scalp
 const LT_COINS = [
