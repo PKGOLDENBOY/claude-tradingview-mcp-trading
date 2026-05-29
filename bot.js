@@ -2040,10 +2040,32 @@ async function placeOrder(symbol, side, sizeUSD, price, quantityOverride = null)
 async function syncPortfolioBalance(log) {
   if (CONFIG.paperTrading) return;
   try {
-    const balance = await getBalance("USDT");
-    if (balance > 0) {
-      log.portfolioValue = balance;
-      console.log(`🔄 Portfolio synced from ${acct().exchange}: $${balance.toFixed(4)} USDT`);
+    const ts = Date.now().toString();
+    const path = "/api/v2/spot/account/assets";
+    const sign = signBitGet(ts, "GET", path);
+    const res = await fetch(`${acct().baseUrl}${path}`, {
+      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
+    });
+    const data = await res.json();
+    if (!data.data) throw new Error("No asset data");
+
+    const priceRes = await fetch("https://api.bitget.com/api/v2/spot/market/tickers");
+    const prices = Object.fromEntries(((await priceRes.json()).data || []).map(t => [t.symbol, parseFloat(t.lastPr)]));
+
+    const SKIP = ["USDT", "BGB", "USDC"];
+    let total = 0;
+    for (const asset of data.data) {
+      const qty = parseFloat(asset.available) + parseFloat(asset.frozen || 0);
+      if (qty <= 0) continue;
+      if (asset.coin === "USDT") { total += qty; continue; }
+      if (SKIP.includes(asset.coin)) continue;
+      const price = prices[asset.coin + "USDT"] ?? 0;
+      total += qty * price;
+    }
+
+    if (total > 0) {
+      log.portfolioValue = total;
+      console.log(`🔄 Portfolio synced: $${total.toFixed(2)} total (USDT + held coins)`);
     }
   } catch (e) {
     console.log(`⚠️ Balance sync failed: ${e.message}`);
