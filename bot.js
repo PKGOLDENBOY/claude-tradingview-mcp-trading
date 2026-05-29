@@ -2129,7 +2129,7 @@ function makeLtLadder(price, qty, orderId) {
       { n: 1, holdPct: 25, targetPct: 30,  sold: false },         // take 25% at +30%
       { n: 2, holdPct: 25, targetPct: 60,  sold: false },         // take 25% at +60%
       { n: 3, holdPct: 25, targetPct: 100, sold: false },         // take 25% at +100%
-      { n: 4, holdPct: 25, trailing: true, trailActivatePct: 100, trailPct: 20, peak: null, sold: false },
+      { n: 4, holdPct: 25, trailing: true, trailActivatePct: 100, trailPct: 10, peak: null, sold: false },
     ],
   };
 }
