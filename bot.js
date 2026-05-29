@@ -2118,6 +2118,22 @@ async function reconcilePositions(log) {
 // Buy a diversified basket of altcoins and hold until the profit target is hit.
 // Runs on startup and every 6 hours. One new coin purchased per run to avoid
 // dumping all capital at once. Scalp/swing bot skips coins held here.
+// Shared helper — builds the ladder object attached to every new LT position
+function makeLtLadder(price, qty, orderId) {
+  return {
+    entry: [
+      { n: 1, sizePct: 50, filled: true,  price, qty: String(qty), orderId },
+      { n: 2, sizePct: 50, filled: false, triggerDropPct: 8 },  // buy T2 if price dips 8%
+    ],
+    exit: [
+      { n: 1, holdPct: 25, targetPct: 30,  sold: false },         // take 25% at +30%
+      { n: 2, holdPct: 25, targetPct: 60,  sold: false },         // take 25% at +60%
+      { n: 3, holdPct: 25, targetPct: 100, sold: false },         // take 25% at +100%
+      { n: 4, holdPct: 25, trailing: true, trailActivatePct: 100, trailPct: 20, peak: null, sold: false },
+    ],
+  };
+}
+
 async function ltWebhookBuy(sym, source) {
   if (!LT_ENABLED || CONFIG.paperTrading) return;
   const log = loadLog();
@@ -2130,16 +2146,15 @@ async function ltWebhookBuy(sym, source) {
     console.log(`  💎 LT skip ${sym} — already in scalp/swing position`); return;
   }
 
-  // Check USDT balance
   let usdtBalance = 0;
   try { usdtBalance = await getBalance("USDT"); } catch (e) {
     console.log(`⚠️ LT webhook: balance fetch failed — ${e.message}`); return;
   }
-  if (usdtBalance - LT_RESERVE < LT_TRADE_SIZE) {
+  const t1Size = LT_TRADE_SIZE * 0.5;
+  if (usdtBalance - LT_RESERVE < t1Size) {
     console.log(`  ⚠️ LT webhook: USDT too low ($${usdtBalance.toFixed(2)}) — skipping ${sym}`); return;
   }
 
-  // Fetch current price
   let price = 0;
   try {
     const res  = await fetch(`https://api.bitget.com/api/v2/spot/market/tickers?symbol=${sym}`);
@@ -2149,26 +2164,28 @@ async function ltWebhookBuy(sym, source) {
   if (!price) { console.log(`⚠️ LT webhook: no price for ${sym}`); return; }
 
   try {
-    console.log(`  💎 LT WEBHOOK BUY — ${sym} $${LT_TRADE_SIZE} @ $${price.toFixed(6)} [${source}]`);
-    const order = await placeOrder(sym, "buy", LT_TRADE_SIZE, price);
-    const qty   = order.confirmedQty ?? (LT_TRADE_SIZE / price);
+    console.log(`  💎 LT WEBHOOK BUY T1 — ${sym} $${t1Size} @ $${price.toFixed(6)} [${source}]`);
+    const order = await placeOrder(sym, "buy", t1Size, price);
+    const qty   = order.confirmedQty ?? (t1Size / price);
     const freshLog = loadLog();
     if (!freshLog.ltPositions) freshLog.ltPositions = {};
     freshLog.ltPositions[sym] = {
-      open: true, symbol: sym, entryPrice: price, quantity: String(qty),
-      entryTime: new Date().toISOString(), orderId: order.orderId,
-      targetPct: LT_TARGET_PCT, tradeType: "longterm", source,
+      open: true, symbol: sym, avgEntryPrice: price,
+      quantity: String(qty), remainingQty: String(qty),
+      entryTime: new Date().toISOString(), targetPct: LT_TARGET_PCT,
+      tradeType: "longterm", source,
+      ladder: makeLtLadder(price, qty, order.orderId),
     };
-    writeTradeCsv({ timestamp: new Date().toISOString(), type: "entry", symbol: sym, price, tradeSize: LT_TRADE_SIZE, orderPlaced: true, tradeType: "longterm", orderId: order.orderId, notes: `LT signal [${source}] — target +${LT_TARGET_PCT}%` });
+    writeTradeCsv({ timestamp: new Date().toISOString(), type: "entry", symbol: sym, price, tradeSize: t1Size, orderPlaced: true, tradeType: "longterm", orderId: order.orderId, notes: `LT signal T1 [${source}] — ladder exits: +30/60/100/trail` });
     saveLog(freshLog);
-    console.log(`  ✅ LT BOUGHT — ${sym} qty:${qty}`);
-    sendEmail(`💎 LT BUY — ${sym.replace("USDT","")} @ $${price.toFixed(6)}`,
-      `<h2>💎 Long-Term Buy</h2><table style="font-size:16px;line-height:1.8">
+    console.log(`  ✅ LT BOUGHT T1 — ${sym} qty:${qty} | T2 triggers at $${(price * 0.92).toFixed(6)} (-8%)`);
+    sendEmail(`💎 LT BUY — ${sym.replace("USDT","")} T1 @ $${price.toFixed(6)}`,
+      `<h2>💎 Long-Term Buy — Tranche 1 of 2</h2><table style="font-size:16px;line-height:1.8">
        <tr><td><b>Symbol</b></td><td>${sym}</td></tr>
        <tr><td><b>Price</b></td><td>$${price.toFixed(6)}</td></tr>
-       <tr><td><b>Size</b></td><td>$${LT_TRADE_SIZE}</td></tr>
+       <tr><td><b>Size</b></td><td>$${t1Size} (T1) — T2 buys if price drops 8%</td></tr>
        <tr><td><b>Signal</b></td><td>${source}</td></tr>
-       <tr><td><b>Target</b></td><td>+${LT_TARGET_PCT}%</td></tr></table>`);
+       <tr><td><b>Exit ladder</b></td><td>25% @ +30% | 25% @ +60% | 25% @ +100% | 25% trailing</td></tr></table>`);
   } catch (e) { console.log(`  ❌ LT webhook buy failed ${sym}: ${e.message}`); }
 }
 
@@ -2291,7 +2308,7 @@ async function checkLtEntry(sym) {
   return { pass, sym, passed, total, checks, labels, wRsi, dRsi, dPrice, dEma50, wEma10 };
 }
 
-async function runLongTermPortfolio() {
+async function _runLtPortfolioLegacy() {
   if (!LT_ENABLED || CONFIG.paperTrading) return;
   console.log(`\n💎 ── Long-Term Portfolio ──────────────────────────────────`);
 
@@ -2413,6 +2430,228 @@ async function runLongTermPortfolio() {
   if (changed) saveLog(log);
   const openCount  = Object.values(log.ltPositions).filter(p => p?.open).length;
   const remaining  = LT_COINS.filter(s => !log.ltPositions[s]?.open).length;
+  console.log(`  💎 Portfolio: ${openCount}/${LT_COINS.length} held | ${remaining} still to acquire`);
+  console.log(`═══════════════════════════════════════════════════════════\n`);
+}
+
+async function runLongTermPortfolio() {
+  if (!LT_ENABLED || CONFIG.paperTrading) return;
+  console.log(`\n💎 ── Long-Term Portfolio ──────────────────────────────────`);
+
+  let prices = {};
+  try {
+    const res  = await fetch("https://api.bitget.com/api/v2/spot/market/tickers");
+    const data = await res.json();
+    prices = Object.fromEntries((data.data || []).map(t => [t.symbol, parseFloat(t.lastPr)]));
+  } catch (e) {
+    console.log(`⚠️ LT: price fetch failed — ${e.message}`); return;
+  }
+
+  const log = loadLog();
+  if (!log.ltPositions) log.ltPositions = {};
+  let changed = false;
+
+  // ── Manage held positions ──────────────────────────────────────────────────
+  for (const [sym, pos] of Object.entries(log.ltPositions)) {
+    if (!pos?.open) continue;
+    const price = prices[sym];
+    if (!price) continue;
+
+    const avgEntry = pos.avgEntryPrice ?? pos.entryPrice;
+    const pnlPct   = (price - avgEntry) / avgEntry * 100;
+    const holdDays = (Date.now() - new Date(pos.entryTime).getTime()) / 86400000;
+    const remQty   = parseFloat(pos.remainingQty ?? pos.quantity);
+    console.log(`  💎 ${sym.replace("USDT","").padEnd(8)} avg $${avgEntry.toFixed(6)} | $${price.toFixed(6)} | ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% | ${holdDays.toFixed(0)}d | rem:${remQty.toFixed(4)}`);
+
+    // ── Legacy position (no ladder): single exit ───────────────────────────
+    if (!pos.ladder) {
+      if (pnlPct >= (pos.targetPct ?? LT_TARGET_PCT)) {
+        try {
+          await placeOrder(sym, "sell", null, price, pos.quantity);
+          const pnlUSD = (price - avgEntry) * parseFloat(pos.quantity);
+          log.ltPositions[sym] = { ...pos, open: false, exitPrice: price, exitTime: new Date().toISOString(), pnlPct, pnlUSD };
+          writeTradeCsv({ timestamp: new Date().toISOString(), type: "exit", symbol: sym, price, pnlPct, pnlUSD, orderPlaced: true, tradeType: "longterm", notes: `LT legacy exit +${pnlPct.toFixed(1)}%` });
+          changed = true;
+          console.log(`  ✅ LT SOLD (legacy) — ${sym} +${pnlPct.toFixed(2)}%`);
+        } catch (e) { console.log(`  ❌ LT sell failed ${sym}: ${e.message}`); }
+      }
+      continue;
+    }
+
+    const totalQty = parseFloat(pos.quantity);
+    let remQtyMut  = remQty;
+
+    // ── Entry tranche 2 — DCA in if price dipped 8% from first entry ───────
+    const e2 = pos.ladder.entry?.[1];
+    if (e2 && !e2.filled) {
+      const t1Price = pos.ladder.entry[0].price;
+      const dropPct = (t1Price - price) / t1Price * 100;
+      if (dropPct >= (e2.triggerDropPct ?? 8)) {
+        const t2Size  = LT_TRADE_SIZE * 0.5;
+        const usdtBal = await getBalance("USDT").catch(() => 0);
+        if (usdtBal - LT_RESERVE >= t2Size) {
+          try {
+            console.log(`  💎 LT DCA — ${sym} T2 @ $${price.toFixed(6)} (dipped ${dropPct.toFixed(1)}% from T1)`);
+            const ord2   = await placeOrder(sym, "buy", t2Size, price);
+            const qty2   = ord2.confirmedQty ?? (t2Size / price);
+            const qty1   = parseFloat(pos.ladder.entry[0].qty);
+            const newQty = qty1 + qty2;
+            const newAvg = (qty1 * t1Price + qty2 * price) / newQty;
+            pos.avgEntryPrice   = newAvg;
+            pos.quantity        = String(newQty);
+            pos.remainingQty    = String(remQtyMut + qty2);
+            pos.ladder.entry[1] = { ...e2, filled: true, price, qty: String(qty2), orderId: ord2.orderId };
+            remQtyMut          += qty2;
+            writeTradeCsv({ timestamp: new Date().toISOString(), type: "entry", symbol: sym, price, tradeSize: t2Size, orderPlaced: true, tradeType: "longterm", orderId: ord2.orderId, notes: `LT DCA T2 — avg entry now $${newAvg.toFixed(6)}` });
+            changed = true;
+            console.log(`  ✅ LT DCA T2 — ${sym} qty:${qty2} | new avg:$${newAvg.toFixed(6)}`);
+          } catch (e) { console.log(`  ❌ LT DCA failed ${sym}: ${e.message}`); }
+        }
+      }
+    }
+
+    // ── Exit tranches ──────────────────────────────────────────────────────
+    let allDone = true;
+    for (const t of pos.ladder.exit) {
+      if (t.sold) continue;
+      allDone = false;
+
+      if (t.trailing) {
+        // Update high watermark whenever price rises
+        if (!t.peak || price > t.peak) { t.peak = price; changed = true; }
+        const activated    = pnlPct >= (t.trailActivatePct ?? 100);
+        const drawFromPeak = t.peak ? (t.peak - price) / t.peak * 100 : 0;
+        if (activated && drawFromPeak >= (t.trailPct ?? 20)) {
+          try {
+            console.log(`  🎯 LT TRAIL T${t.n} — ${sym} sell ${remQtyMut.toFixed(6)} | peaked $${t.peak.toFixed(6)}, drew ${drawFromPeak.toFixed(1)}%`);
+            await placeOrder(sym, "sell", null, price, String(remQtyMut));
+            const pnlUSD = (price - avgEntry) * remQtyMut;
+            t.sold = true; t.soldAt = price; t.soldPnl = pnlPct;
+            pos.remainingQty = "0";
+            writeTradeCsv({ timestamp: new Date().toISOString(), type: "exit", symbol: sym, price, pnlPct, pnlUSD, orderPlaced: true, tradeType: "longterm", notes: `LT trail stop T${t.n} — peak $${t.peak.toFixed(6)} drew ${drawFromPeak.toFixed(1)}%` });
+            changed = true;
+            console.log(`  ✅ LT TRAIL SOLD T${t.n} — ${sym} +${pnlPct.toFixed(2)}% ($+${pnlUSD.toFixed(2)})`);
+            sendEmail(`💰 LT TRAIL EXIT — ${sym.replace("USDT","")} +${pnlPct.toFixed(1)}%`,
+              `<h2>💰 LT Trailing Stop Exit</h2><table style="font-size:16px;line-height:1.8">
+               <tr><td><b>Symbol</b></td><td>${sym}</td></tr>
+               <tr><td><b>P&L</b></td><td>+$${pnlUSD.toFixed(2)} (+${pnlPct.toFixed(2)}%)</td></tr>
+               <tr><td><b>Peak</b></td><td>$${t.peak.toFixed(6)}</td></tr>
+               <tr><td><b>Drawdown from peak</b></td><td>${drawFromPeak.toFixed(1)}%</td></tr></table>`);
+          } catch (e) { console.log(`  ❌ LT trail sell failed ${sym}: ${e.message}`); }
+        }
+        continue;
+      }
+
+      // Fixed-target tranche
+      if (pnlPct >= t.targetPct) {
+        const sellQty = Math.min(parseFloat((totalQty * t.holdPct / 100).toFixed(8)), remQtyMut);
+        if (sellQty <= 0) { t.sold = true; changed = true; continue; }
+        try {
+          console.log(`  🎯 LT LADDER T${t.n} — ${sym} sell ${sellQty.toFixed(6)} @ +${pnlPct.toFixed(1)}% (target +${t.targetPct}%)`);
+          await placeOrder(sym, "sell", null, price, String(sellQty));
+          const pnlUSD = (price - avgEntry) * sellQty;
+          t.sold = true; t.soldAt = price; t.soldPnl = pnlPct;
+          remQtyMut        -= sellQty;
+          pos.remainingQty  = String(Math.max(0, remQtyMut));
+          writeTradeCsv({ timestamp: new Date().toISOString(), type: "exit", symbol: sym, price, pnlPct, pnlUSD, orderPlaced: true, tradeType: "longterm", notes: `LT ladder T${t.n} — target +${t.targetPct}%` });
+          changed = true;
+          console.log(`  ✅ LT LADDER T${t.n} — ${sym} +${pnlPct.toFixed(2)}% ($+${pnlUSD.toFixed(2)}) | rem:${remQtyMut.toFixed(4)}`);
+          sendEmail(`💰 LT LADDER T${t.n} — ${sym.replace("USDT","")} +${pnlPct.toFixed(1)}%`,
+            `<h2>💰 LT Ladder Exit — Tranche ${t.n}</h2><table style="font-size:16px;line-height:1.8">
+             <tr><td><b>Symbol</b></td><td>${sym}</td></tr>
+             <tr><td><b>P&L this tranche</b></td><td>+$${pnlUSD.toFixed(2)} (+${pnlPct.toFixed(2)}%)</td></tr>
+             <tr><td><b>Sold</b></td><td>${t.holdPct}% of position at +${t.targetPct}% target</td></tr>
+             <tr><td><b>Remaining</b></td><td>${remQtyMut.toFixed(6)} ${sym.replace("USDT","")}</td></tr></table>`);
+        } catch (e) { console.log(`  ❌ LT ladder sell failed ${sym} T${t.n}: ${e.message}`); }
+      }
+    }
+
+    if (allDone || parseFloat(pos.remainingQty ?? 1) <= 0) {
+      pos.open = false; pos.exitTime = new Date().toISOString();
+      changed = true;
+      console.log(`  ✅ LT POSITION CLOSED — ${sym} all tranches exited`);
+    }
+  }
+
+  // ── Scan and buy best qualifying coin ─────────────────────────────────────
+  let usdtBalance = 0;
+  try { usdtBalance = await getBalance("USDT"); } catch (e) {
+    console.log(`⚠️ LT: balance fetch failed — ${e.message}`);
+    if (changed) saveLog(log); return;
+  }
+
+  const t1Size    = LT_TRADE_SIZE * 0.5;
+  const available = usdtBalance - LT_RESERVE;
+  if (available < t1Size) {
+    console.log(`  ⚠️ LT: USDT too low ($${usdtBalance.toFixed(2)}) — need $${(t1Size + LT_RESERVE).toFixed(2)} for first tranche`);
+  } else {
+    const missing = LT_COINS.filter(sym =>
+      !log.ltPositions[sym]?.open &&
+      !(log.positions || {})[sym]?.open &&
+      !(log.swingPositions || {})[sym]?.open &&
+      prices[sym] > 0
+    );
+
+    console.log(`  💎 Scanning ${missing.length} unacquired coin(s) for entry signal...`);
+
+    const results = [];
+    for (const sym of missing) {
+      const r = await checkLtEntry(sym).catch(e => ({ pass: false, sym, passed: 0, total: 11, reason: e.message }));
+      results.push(r);
+      await new Promise(r => setTimeout(r, 150));
+    }
+
+    const qualified = results.filter(r => r.pass).sort((a, b) => b.passed - a.passed);
+    const notReady  = results.filter(r => !r.pass).sort((a, b) => b.passed - a.passed);
+
+    if (qualified.length > 0) {
+      console.log(`  ✅ ${qualified.length} coin(s) ready for entry:`);
+      for (const r of qualified) console.log(`     ${r.sym.padEnd(14)} ${r.passed}/${r.total} — ${r.labels?.join(" | ")}`);
+    }
+    if (notReady.length > 0) {
+      const top5 = notReady.slice(0, 5);
+      console.log(`  ⏳ Not ready (top ${top5.length}): ${top5.map(r => `${r.sym.replace("USDT","")} ${r.passed}/${r.total}`).join(", ")}`);
+    }
+
+    const best = qualified[0];
+    if (best) {
+      const price = prices[best.sym];
+      try {
+        console.log(`  💎 LT BUY T1 — ${best.sym} $${t1Size} @ $${price.toFixed(6)} [${best.passed}/${best.total}]`);
+        const order = await placeOrder(best.sym, "buy", t1Size, price);
+        const qty   = order.confirmedQty ?? (t1Size / price);
+        const freshLog = loadLog();
+        if (!freshLog.ltPositions) freshLog.ltPositions = {};
+        freshLog.ltPositions[best.sym] = {
+          open: true, symbol: best.sym, avgEntryPrice: price,
+          quantity: String(qty), remainingQty: String(qty),
+          entryTime: new Date().toISOString(), targetPct: LT_TARGET_PCT,
+          tradeType: "longterm", entryScore: `${best.passed}/${best.total}`,
+          ladder: makeLtLadder(price, qty, order.orderId),
+        };
+        writeTradeCsv({ timestamp: new Date().toISOString(), type: "entry", symbol: best.sym, price, tradeSize: t1Size, orderPlaced: true, tradeType: "longterm", orderId: order.orderId, notes: `LT T1 score ${best.passed}/${best.total} — exits: +30/60/100/trail` });
+        saveLog(freshLog);
+        changed = false;
+        console.log(`  ✅ LT BOUGHT T1 — ${best.sym} qty:${qty} | T2 if drops 8% ($${(price * 0.92).toFixed(6)})`);
+        sendEmail(
+          `💎 LT BUY — ${best.sym.replace("USDT","")} T1 @ $${price.toFixed(6)}`,
+          `<h2>💎 Long-Term Buy — Tranche 1 of 2</h2><table style="font-size:16px;line-height:1.8">
+           <tr><td><b>Symbol</b></td><td>${best.sym}</td></tr>
+           <tr><td><b>Price</b></td><td>$${price.toFixed(6)}</td></tr>
+           <tr><td><b>Size</b></td><td>$${t1Size} (T1) — T2 buys $${t1Size} more if -8%</td></tr>
+           <tr><td><b>Score</b></td><td>${best.passed}/${best.total} conditions</td></tr>
+           <tr><td><b>Conditions</b></td><td>${best.labels?.join("<br>")}</td></tr>
+           <tr><td><b>Exit ladder</b></td><td>25% @ +30% | 25% @ +60% | 25% @ +100% | 25% trailing (-20% from peak)</td></tr></table>`
+        );
+      } catch (e) { console.log(`  ❌ LT buy failed ${best.sym}: ${e.message}`); }
+    } else {
+      console.log(`  ⏳ No coins meet entry criteria this run — next check in 6h`);
+    }
+  }
+
+  if (changed) saveLog(log);
+  const openCount = Object.values(log.ltPositions).filter(p => p?.open).length;
+  const remaining = LT_COINS.filter(s => !log.ltPositions[s]?.open).length;
   console.log(`  💎 Portfolio: ${openCount}/${LT_COINS.length} held | ${remaining} still to acquire`);
   console.log(`═══════════════════════════════════════════════════════════\n`);
 }
