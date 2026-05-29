@@ -1724,7 +1724,7 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
       // Require >0.5% below VWAP — 0.2% was too tight, causing immediate exits from normal price noise
       const vwapBreachPct = (vwap - price) / vwap * 100;
       const macdBearish = !macd ? vwapBreachPct > 0.5 : macd.histogram < 0;
-      check(`Trend reversed — ${vwapBreachPct.toFixed(2)}% below VWAP${macd && macdBearish ? " with bearish MACD" : ""}`, price < vwap && macdBearish && vwapBreachPct > 0.5);
+      check(`Trend reversed — ${vwapBreachPct.toFixed(2)}% below VWAP${macd && macdBearish ? " with bearish MACD" : ""}`, price < vwap && macdBearish && vwapBreachPct > 1.0 && pnlPct < -0.5);
     }
     check(`ATR stop hit — $${effectiveStop.toFixed(2)} (${breakEvenActive ? "break-even floor" : `${(trailPct*100).toFixed(1)}% trail`})`, price < effectiveStop);
 
@@ -1733,10 +1733,8 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
       const hoursOpen = (Date.now() - new Date(position.entryTime).getTime()) / (1000 * 60 * 60);
       if (hoursOpen > 6.0) {
         check(`Max hold exceeded — open ${hoursOpen.toFixed(1)}h (limit 6h)`, true);
-      } else if (hoursOpen > 0.75 && pnlPct < -1.5) {
-        check(`Stale trade — ${(hoursOpen * 60).toFixed(0)}min, down ${pnlPct.toFixed(2)}% (cut early)`, true);
-      } else if (hoursOpen > 2.0 && pnlPct < -1.5) {
-        check(`Stale trade — ${hoursOpen.toFixed(1)}h, P&L ${pnlPct.toFixed(2)}% (cutting loss)`, true);
+      } else if (hoursOpen > 2.0 && pnlPct < -2.0) {
+        check(`Stale trade — ${hoursOpen.toFixed(1)}h, down ${pnlPct.toFixed(2)}% (cutting loss)`, true);
       }
     }
   }
@@ -3679,7 +3677,16 @@ async function run(tvSignal = null, symbol = null) {
     if (log.coinCooldowns) {
       const now = Date.now();
       for (const s of Object.keys(log.coinCooldowns)) {
-        if ((log.coinCooldowns[s]?.until ?? 0) < now) delete log.coinCooldowns[s];
+        const entry = log.coinCooldowns[s];
+        if (entry && typeof entry === "object" && !("until" in entry)) {
+          // Per-strategy format: { scalp: { until }, swing: { until }, ... }
+          for (const strat of Object.keys(entry)) {
+            if ((entry[strat]?.until ?? 0) < now) delete entry[strat];
+          }
+          if (Object.keys(entry).length === 0) delete log.coinCooldowns[s];
+        } else if ((entry?.until ?? 0) < now) {
+          delete log.coinCooldowns[s];
+        }
       }
     }
 
