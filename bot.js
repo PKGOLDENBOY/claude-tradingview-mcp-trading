@@ -2206,6 +2206,78 @@ async function ltWebhookSell(sym, source) {
   } catch (e) { console.log(`  ❌ LT webhook sell failed ${sym}: ${e.message}`); }
 }
 
+// Runs 8 multi-timeframe indicator conditions on a coin — mirrors HODLFIRE/DETONATOR logic
+// Weekly: macro trend structure | Daily: entry timing + volume
+async function checkLtEntry(sym) {
+  let weekly, daily;
+  try {
+    [weekly, daily] = await Promise.all([
+      fetchCandles(sym, "1W", 52),
+      fetchCandles(sym, "1D", 200),
+    ]);
+  } catch (e) {
+    return { pass: false, sym, passed: 0, total: 8, reason: e.message };
+  }
+
+  if (!weekly || weekly.length < 15 || !daily || daily.length < 55) {
+    return { pass: false, sym, passed: 0, total: 8, reason: "insufficient candle data" };
+  }
+
+  const wCloses = weekly.map(c => c.close);
+  const dCloses = daily.map(c => c.close);
+  const wPrice  = wCloses[wCloses.length - 1];
+  const dPrice  = dCloses[dCloses.length - 1];
+
+  // Weekly indicators — macro picture
+  const wEma10 = calcEMA(wCloses, 10);
+  const wEma20 = calcEMA(wCloses, 20);
+  const wRsi   = calcRSI(wCloses, 14);
+  const wMacd  = calcMACD(wCloses);
+
+  // Daily indicators — entry timing
+  const dEma21 = calcEMA(dCloses, 21);
+  const dEma50 = calcEMA(dCloses, 50);
+  const dRsi   = calcRSI(dCloses, 14);
+  const dMacd  = calcMACD(dCloses);
+  const dVol   = calcVolume(daily);
+
+  // ── 8 Conditions ──────────────────────────────────────────────────────────
+  // Weekly (macro): confirms we're in a bull structure — don't buy into freefall
+  const c1 = wPrice > wEma10;                                   // price above 10W EMA (uptrend)
+  const c2 = wEma10 > wEma20;                                   // EMA stack bullish (10W > 20W)
+  const c3 = wRsi >= 40 && wRsi <= 75;                          // weekly RSI healthy, not overbought
+  const c4 = wMacd.histogram > 0 || wMacd.macdLine > wMacd.signal * 0.97; // weekly MACD bullish/recovering
+
+  // Daily (entry timing): buy the pullback, not the top
+  const c5 = dRsi >= 30 && dRsi <= 65;                          // RSI pulled back — not extended
+  const c6 = dPrice > dEma50 || dPrice > dEma21;               // above medium-term support
+  const c7 = dMacd.histogram > 0;                              // daily momentum positive
+  const c8 = dVol.vol3Ratio >= 0.65;                           // volume not dead
+
+  const checks = { c1, c2, c3, c4, c5, c6, c7, c8 };
+  const labels = [
+    `W price>${wEma10 > 0 ? "EMA10" : "—"} ${c1 ? "✓" : "✗"}`,
+    `W EMA10>EMA20 ${c2 ? "✓" : "✗"}`,
+    `W RSI ${wRsi.toFixed(0)} ${c3 ? "✓" : "✗"}`,
+    `W MACD ${c4 ? "✓" : "✗"}`,
+    `D RSI ${dRsi.toFixed(0)} ${c5 ? "✓" : "✗"}`,
+    `D>EMA ${c6 ? "✓" : "✗"}`,
+    `D MACD ${c7 ? "✓" : "✗"}`,
+    `D vol ${(dVol.vol3Ratio * 100).toFixed(0)}% ${c8 ? "✓" : "✗"}`,
+  ];
+
+  const passed = Object.values(checks).filter(Boolean).length;
+  const total  = 8;
+
+  // Hard gates: catch extreme overextension on either timeframe
+  const hardPass  = wRsi < 80 && dRsi < 72;
+  // Score gate: 5 of 8 conditions — flexible for long-term timing
+  const scorePass = passed >= 5;
+  const pass      = hardPass && scorePass;
+
+  return { pass, sym, passed, total, checks, labels, wRsi, dRsi, dPrice, dEma50, wEma10 };
+}
+
 async function runLongTermPortfolio() {
   if (!LT_ENABLED || CONFIG.paperTrading) return;
   console.log(`\n💎 ── Long-Term Portfolio ──────────────────────────────────`);
@@ -2229,7 +2301,7 @@ async function runLongTermPortfolio() {
     if (!pos?.open) continue;
     const price = prices[sym];
     if (!price) continue;
-    const pnlPct = (price - pos.entryPrice) / pos.entryPrice * 100;
+    const pnlPct  = (price - pos.entryPrice) / pos.entryPrice * 100;
     const holdDays = (Date.now() - new Date(pos.entryTime).getTime()) / 86400000;
     console.log(`  💎 ${sym.replace("USDT","").padEnd(8)} entry $${pos.entryPrice.toFixed(6)} | now $${price.toFixed(6)} | ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% | ${holdDays.toFixed(0)}d held`);
 
@@ -2248,7 +2320,7 @@ async function runLongTermPortfolio() {
     }
   }
 
-  // ── Buy the next missing coin ──────────────────────────────────────────────
+  // ── Scan missing coins with indicator check ────────────────────────────────
   let usdtBalance = 0;
   try { usdtBalance = await getBalance("USDT"); } catch (e) {
     console.log(`⚠️ LT: balance fetch failed — ${e.message}`);
@@ -2259,34 +2331,76 @@ async function runLongTermPortfolio() {
   if (available < LT_TRADE_SIZE) {
     console.log(`  ⚠️ LT: USDT too low ($${usdtBalance.toFixed(2)}) — need $${(LT_TRADE_SIZE + LT_RESERVE).toFixed(2)} to buy`);
   } else {
-    for (const sym of LT_COINS) {
-      if (log.ltPositions[sym]?.open) continue;
-      if ((log.positions || {})[sym]?.open) continue;
-      if ((log.swingPositions || {})[sym]?.open) continue;
-      const price = prices[sym];
-      if (!price || price <= 0) { console.log(`  ⚠️ LT skip ${sym} — no price data`); continue; }
+    const missing = LT_COINS.filter(sym =>
+      !log.ltPositions[sym]?.open &&
+      !(log.positions || {})[sym]?.open &&
+      !(log.swingPositions || {})[sym]?.open &&
+      prices[sym] > 0
+    );
 
+    console.log(`  💎 Scanning ${missing.length} unacquired coin(s) for entry signal...`);
+
+    // Check each missing coin — stagger requests to avoid hammering the API
+    const results = [];
+    for (const sym of missing) {
+      const r = await checkLtEntry(sym).catch(e => ({ pass: false, sym, passed: 0, total: 8, reason: e.message }));
+      results.push(r);
+      await new Promise(res => setTimeout(res, 150));
+    }
+
+    const qualified = results.filter(r => r.pass).sort((a, b) => b.passed - a.passed);
+    const notReady  = results.filter(r => !r.pass).sort((a, b) => b.passed - a.passed);
+
+    if (qualified.length > 0) {
+      console.log(`  ✅ ${qualified.length} coin(s) ready for entry:`);
+      for (const r of qualified) {
+        console.log(`     ${r.sym.padEnd(14)} ${r.passed}/${r.total} — ${r.labels?.join(" | ")}`);
+      }
+    }
+    if (notReady.length > 0) {
+      const top5 = notReady.slice(0, 5);
+      console.log(`  ⏳ Not yet ready (top ${top5.length}): ${top5.map(r => `${r.sym.replace("USDT","")} ${r.passed}/${r.total}`).join(", ")}`);
+    }
+
+    const best = qualified[0];
+    if (best) {
+      const price = prices[best.sym];
       try {
-        console.log(`  💎 LT BUY — ${sym} $${LT_TRADE_SIZE} @ $${price.toFixed(6)}`);
-        const order = await placeOrder(sym, "buy", LT_TRADE_SIZE, price);
+        console.log(`  💎 LT BUY — ${best.sym} $${LT_TRADE_SIZE} @ $${price.toFixed(6)} [score ${best.passed}/${best.total}]`);
+        const order = await placeOrder(best.sym, "buy", LT_TRADE_SIZE, price);
         const qty   = order.confirmedQty ?? (LT_TRADE_SIZE / price);
-        log.ltPositions[sym] = {
-          open: true, symbol: sym, entryPrice: price, quantity: String(qty),
+        const freshLog = loadLog();
+        if (!freshLog.ltPositions) freshLog.ltPositions = {};
+        freshLog.ltPositions[best.sym] = {
+          open: true, symbol: best.sym, entryPrice: price, quantity: String(qty),
           entryTime: new Date().toISOString(), orderId: order.orderId,
           targetPct: LT_TARGET_PCT, tradeType: "longterm",
+          entryScore: `${best.passed}/${best.total}`,
         };
-        writeTradeCsv({ timestamp: new Date().toISOString(), type: "entry", symbol: sym, price, tradeSize: LT_TRADE_SIZE, orderPlaced: true, tradeType: "longterm", orderId: order.orderId, notes: `LT hold — target +${LT_TARGET_PCT}%` });
-        changed = true;
-        console.log(`  ✅ LT BOUGHT — ${sym} qty:${qty}`);
-      } catch (e) { console.log(`  ❌ LT buy failed ${sym}: ${e.message}`); continue; }
-      break; // one coin per run — spread capital acquisition over multiple runs
+        writeTradeCsv({ timestamp: new Date().toISOString(), type: "entry", symbol: best.sym, price, tradeSize: LT_TRADE_SIZE, orderPlaced: true, tradeType: "longterm", orderId: order.orderId, notes: `LT hold — target +${LT_TARGET_PCT}% | score ${best.passed}/${best.total}` });
+        saveLog(freshLog);
+        changed = false; // already saved above
+        console.log(`  ✅ LT BOUGHT — ${best.sym} qty:${qty}`);
+        sendEmail(
+          `💎 LT BUY — ${best.sym.replace("USDT","")} @ $${price.toFixed(6)}`,
+          `<h2>💎 Long-Term Buy</h2><table style="font-size:16px;line-height:1.8">
+           <tr><td><b>Symbol</b></td><td>${best.sym}</td></tr>
+           <tr><td><b>Price</b></td><td>$${price.toFixed(6)}</td></tr>
+           <tr><td><b>Size</b></td><td>$${LT_TRADE_SIZE}</td></tr>
+           <tr><td><b>Score</b></td><td>${best.passed}/${best.total} conditions</td></tr>
+           <tr><td><b>Conditions</b></td><td>${best.labels?.join("<br>")}</td></tr>
+           <tr><td><b>Target</b></td><td>+${LT_TARGET_PCT}%</td></tr></table>`
+        );
+      } catch (e) { console.log(`  ❌ LT buy failed ${best.sym}: ${e.message}`); }
+    } else {
+      console.log(`  ⏳ No coins meet entry criteria this run — next check in 6h`);
     }
   }
 
   if (changed) saveLog(log);
-  const openCount = Object.values(log.ltPositions).filter(p => p?.open).length;
-  const remaining = LT_COINS.filter(s => !log.ltPositions[s]?.open).length;
-  console.log(`  💎 Portfolio: ${openCount}/${LT_COINS.length} held | ${remaining} coins still to acquire`);
+  const openCount  = Object.values(log.ltPositions).filter(p => p?.open).length;
+  const remaining  = LT_COINS.filter(s => !log.ltPositions[s]?.open).length;
+  console.log(`  💎 Portfolio: ${openCount}/${LT_COINS.length} held | ${remaining} still to acquire`);
   console.log(`═══════════════════════════════════════════════════════════\n`);
 }
 
