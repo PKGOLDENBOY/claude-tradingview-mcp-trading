@@ -3873,8 +3873,8 @@ async function run(tvSignal = null, symbol = null) {
     const lastSymEntry = log.trades.filter(t => t.type === "entry" && t.orderPlaced && t.symbol === symbol).slice(-1)[0];
     if (lastSymEntry) {
       const minsSinceLast = (Date.now() - new Date(lastSymEntry.timestamp).getTime()) / 60000;
-      if (minsSinceLast < 15) {
-        console.log(`🚫 ENTRY COOLDOWN — ${symbol} entered ${minsSinceLast.toFixed(0)}min ago. Need 15min between same-coin entries.`);
+      if (minsSinceLast < 20) {
+        console.log(`🚫 ENTRY COOLDOWN — ${symbol} entered ${minsSinceLast.toFixed(0)}min ago. Need 20min between same-coin entries.`);
         console.log("═══════════════════════════════════════════════════════════\n");
         pushSignal(symbol, "BLOCKED", `Entry cooldown — ${minsSinceLast.toFixed(0)}min since last ${symbol} entry (need 15min)`);
         return;
@@ -4466,6 +4466,13 @@ async function run(tvSignal = null, symbol = null) {
       const placed = log.trades.filter(t => t.orderPlaced);
       const unplaced = log.trades.filter(t => !t.orderPlaced).slice(-200);
       log.trades = [...placed, ...unplaced].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      // Hold-period cooldown — blocks re-entry for 6h even if position is lost from log
+      // due to a concurrent write race. Exit code overwrites this with its own cooldown.
+      if (logEntry.orderPlaced && logEntry.type === "entry") {
+        if (!log.coinCooldowns) log.coinCooldowns = {};
+        if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
+        log.coinCooldowns[symbol].scalp = { until: Date.now() + 6 * 60 * 60 * 1000, pnlPct: "0.00", justBought: true };
+      }
       saveLog(log);
       if (logEntry.orderPlaced) {
         console.log(`\nDecision log saved → ${LOG_FILE}`);
