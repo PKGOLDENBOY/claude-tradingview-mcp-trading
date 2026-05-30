@@ -1964,6 +1964,22 @@ async function getSpotBalance(coin) {
   return parseFloat(asset?.available ?? "0");
 }
 
+async function getSpotBalanceTotal(coin) {
+  const timestamp = Date.now().toString();
+  const path = "/api/v2/spot/account/assets";
+  const sign = signBitGet(timestamp, "GET", path);
+  const res = await fetch(`${acct().baseUrl}${path}`, {
+    headers: {
+      "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign,
+      "ACCESS-TIMESTAMP": timestamp, "ACCESS-PASSPHRASE": acct().passphrase,
+      "locale": "en-US",
+    },
+  });
+  const data = await res.json();
+  const asset = data.data?.find(a => a.coin === coin);
+  return parseFloat(asset?.available ?? "0") + parseFloat(asset?.frozen ?? "0");
+}
+
 // ─── BitMart Exchange ─────────────────────────────────────────────────────────
 
 // BitMart symbols use underscores: BTCUSDT → BTC_USDT
@@ -3659,18 +3675,23 @@ async function run(tvSignal = null, symbol = null) {
           console.log(`💰 Portfolio updated: $${log.portfolioValue.toFixed(4)} (${pnlUSD >= 0 ? "+" : ""}$${pnlUSD.toFixed(4)})`);
           pushSignal(symbol, pnlPct >= 0 ? "EXIT_WIN" : "EXIT_LOSS", `Sold @ $${price.toFixed(4)} | P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% ($${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(2)})`);
         } catch (err) {
-          const isDust = err.message.startsWith("DUST:") || err.message.includes("Parameter verification exception size");
+          const isSizeError = err.message.startsWith("DUST:") || err.message.includes("Parameter verification exception size");
           console.log(`❌ SELL ORDER FAILED — ${err.message}`);
           logEntry.error = err.message;
-          if (isDust) {
+          if (isSizeError) {
             const baseCoin = symbol.replace("USDT", "");
-            const remaining = await getSpotBalance(baseCoin).catch(() => 0);
-            const remainingUSD = remaining * price;
-            console.log(`🗑️  Dust cleanup — ${symbol} balance $${remainingUSD.toFixed(4)} is unsellable, removing position from log`);
-            delete (log.positions || {})[symbol];
-            log.positions = { ...(log.positions || {}) };
-            logEntry.orderPlaced = true; // mark placed so cooldown is set and we don't retry
-            logEntry.orderId = "DUST-CLEANUP";
+            const totalBal = await getSpotBalanceTotal(baseCoin).catch(() => 0);
+            const totalUSD = totalBal * price;
+            if (totalUSD >= 2.0) {
+              // Real position — coins may be frozen in a pending order; don't wipe from log
+              console.log(`⚠️  Sell failed but $${totalUSD.toFixed(2)} of ${baseCoin} still held (may be frozen) — keeping position, will retry`);
+            } else {
+              console.log(`🗑️  Dust cleanup — ${symbol} total balance $${totalUSD.toFixed(4)} is unsellable, removing from log`);
+              delete (log.positions || {})[symbol];
+              log.positions = { ...(log.positions || {}) };
+              logEntry.orderPlaced = true;
+              logEntry.orderId = "DUST-CLEANUP";
+            }
           }
         }
       }
