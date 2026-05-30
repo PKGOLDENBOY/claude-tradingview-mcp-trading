@@ -281,7 +281,7 @@ const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   : null;
 
-const LOG_FILE = "safety-check-log.json";
+const LOG_FILE = process.env.STATE_FILE || "safety-check-log.json";
 
 // ─── Multi-account support ────────────────────────────────────────────────────
 const ACCOUNTS = [
@@ -3861,13 +3861,15 @@ async function run(tvSignal = null, symbol = null) {
     if (gainerInfo && gainerInfo.change24h >= 3 && !(position && position.open)) {
       console.log(`\n🚀 BIG MOVER — ${symbol} +${gainerInfo.change24h.toFixed(1)}% today`);
       const volRatio = vol.current / vol.avg;
-      const rsiOk    = rsi3 >= 45 && rsi3 <= 85;           // momentum zone, wider range
-      const stochOk  = !stochRsi || stochRsi.k < 88;       // not fully exhausted
+      // Fast pumps (40%+ on the day) already look overbought on RSI(3) — allow slightly more headroom
+      const rsiCeil  = gainerInfo.change24h >= 40 ? 90 : 85;
+      const rsiOk    = rsi3 >= 45 && rsi3 <= rsiCeil;
+      const stochOk  = !stochRsi || stochRsi.k < 92;       // slightly looser for fast movers
       const priceOk  = price > ema8;                        // price above fast EMA
-      const volOk    = volRatio >= 1.5;                     // real crowd buying
-      const notTooHot = gainerInfo.change24h <= 40;         // cap at 40% — beyond that is exit liquidity
+      const volOk    = volRatio >= 1.2;                     // lowered from 1.5 — early moves build volume gradually
+      const notTooHot = gainerInfo.change24h <= 75;         // raised from 40% — still skip the 100%+ blowoffs
 
-      console.log(`  Vol: ${volRatio.toFixed(1)}x avg | RSI(3): ${rsi3?.toFixed(1)} | StochRSI K: ${stochRsi?.k?.toFixed(1) ?? "—"} | Above EMA8: ${price > ema8 ? "yes" : "no"}`);
+      console.log(`  Vol: ${volRatio.toFixed(1)}x avg | RSI(3): ${rsi3?.toFixed(1)} (ceil ${rsiCeil}) | StochRSI K: ${stochRsi?.k?.toFixed(1) ?? "—"} | Above EMA8: ${price > ema8 ? "yes" : "no"}`);
 
       if (rsiOk && stochOk && priceOk && volOk && notTooHot) {
         console.log(`\n✅ MOMENTUM ENTRY — big mover conditions met. Position (40% size, 2% SL, trailing stop).`);
@@ -3906,11 +3908,11 @@ async function run(tvSignal = null, symbol = null) {
         console.log(`  📉 Big mover but RSI=${rsi3.toFixed(1)} pulled back to oversold — continuing to mean-reversion path\n`);
       } else {
         const reasons = [];
-        if (!rsiOk)    reasons.push(`RSI ${rsi3?.toFixed(1)} not in 45-85 range`);
-        if (!stochOk)  reasons.push(`StochRSI K=${stochRsi?.k?.toFixed(1)} exhausted (>88)`);
+        if (!rsiOk)    reasons.push(`RSI ${rsi3?.toFixed(1)} not in 45-${rsiCeil} range`);
+        if (!stochOk)  reasons.push(`StochRSI K=${stochRsi?.k?.toFixed(1)} exhausted (>92)`);
         if (!priceOk)  reasons.push(`price below EMA8`);
-        if (!volOk)    reasons.push(`volume only ${volRatio.toFixed(1)}x avg (need 1.5x)`);
-        if (!notTooHot) reasons.push(`up ${gainerInfo.change24h.toFixed(0)}% — too extended`);
+        if (!volOk)    reasons.push(`volume only ${volRatio.toFixed(1)}x avg (need 1.2x)`);
+        if (!notTooHot) reasons.push(`up ${gainerInfo.change24h.toFixed(0)}% — too extended (>75%)`);
         console.log(`🚫 MOMENTUM BLOCK — ${reasons.join(", ")}`);
         pushSignal(symbol, "BLOCKED", `Big mover but: ${reasons[0]}`);
         console.log("═══════════════════════════════════════════════════════════\n");
