@@ -2383,25 +2383,65 @@ async function _runLtPortfolioLegacy() {
     if (!price) continue;
     const pnlPct  = (price - pos.entryPrice) / pos.entryPrice * 100;
     const holdDays = (Date.now() - new Date(pos.entryTime).getTime()) / 86400000;
-    console.log(`  💎 ${sym.replace("USDT","").padEnd(8)} entry $${pos.entryPrice.toFixed(6)} | now $${price.toFixed(6)} | ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% | ${holdDays.toFixed(0)}d held`);
+    const qty     = parseFloat(pos.quantity);
+
+    // Track peak PnL for trailing stop
+    const peakPct = Math.max(pos.peakPct ?? 0, pnlPct);
+    if (peakPct > (pos.peakPct ?? 0)) { pos.peakPct = peakPct; changed = true; }
+
+    const halfTag = pos.halfSold ? " [half remaining]" : "";
+    console.log(`  💎 ${sym.replace("USDT","").padEnd(8)} entry $${pos.entryPrice.toFixed(6)} | now $${price.toFixed(6)} | ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% | peak +${peakPct.toFixed(0)}% | ${holdDays.toFixed(0)}d${halfTag}`);
 
     const target = pos.targetPct ?? LT_TARGET_PCT;
+
     if (pnlPct >= target) {
+      // Full exit — target hit
       console.log(`  🎯 TARGET HIT — selling ${sym} at +${pnlPct.toFixed(2)}%`);
       try {
         await placeOrder(sym, "sell", null, price, pos.quantity);
-        const pnlUSD = (price - pos.entryPrice) * parseFloat(pos.quantity);
+        const pnlUSD = (price - pos.entryPrice) * qty;
         log.ltPositions[sym] = { ...pos, open: false, exitPrice: price, exitTime: new Date().toISOString(), pnlPct, pnlUSD };
         log.portfolioValue = (log.portfolioValue || 0) + pnlUSD;
         writeTradeCsv({ timestamp: new Date().toISOString(), type: "exit", symbol: sym, price, pnlPct, pnlUSD, orderPlaced: true, tradeType: "longterm", notes: `LT target +${pnlPct.toFixed(1)}%` });
         changed = true;
         console.log(`  ✅ LT SOLD — ${sym} +${pnlPct.toFixed(2)}% ($+${pnlUSD.toFixed(2)})`);
       } catch (e) { console.log(`  ❌ LT sell failed ${sym}: ${e.message}`); }
+
+    } else if (pnlPct >= 50 && !pos.halfSold) {
+      // Partial exit — sell half at +50%, let the other half run to target
+      const halfQty = qty / 2;
+      console.log(`  📤 PARTIAL EXIT — selling half of ${sym} at +${pnlPct.toFixed(2)}%`);
+      try {
+        await placeOrder(sym, "sell", null, price, String(halfQty));
+        const pnlUSD = (price - pos.entryPrice) * halfQty;
+        pos.quantity    = String(halfQty);
+        pos.halfSold    = true;
+        pos.halfSoldPct = pnlPct;
+        log.portfolioValue = (log.portfolioValue || 0) + pnlUSD;
+        writeTradeCsv({ timestamp: new Date().toISOString(), type: "exit", symbol: sym, price, pnlPct, pnlUSD, orderPlaced: true, tradeType: "longterm", notes: `LT partial exit at +${pnlPct.toFixed(1)}% — half remains` });
+        changed = true;
+        console.log(`  ✅ LT PARTIAL SOLD — ${sym} half at +${pnlPct.toFixed(2)}% ($+${pnlUSD.toFixed(2)}) — other half runs to +${target}%`);
+      } catch (e) { console.log(`  ❌ LT partial sell failed ${sym}: ${e.message}`); }
+
+    } else if (peakPct >= 30 && pnlPct < 10) {
+      // Trailing stop — was up 30%+, gave back too much
+      console.log(`  🔒 TRAILING STOP — ${sym} peaked +${peakPct.toFixed(1)}%, now +${pnlPct.toFixed(2)}% (below +10% floor)`);
+      try {
+        await placeOrder(sym, "sell", null, price, pos.quantity);
+        const pnlUSD = (price - pos.entryPrice) * qty;
+        log.ltPositions[sym] = { ...pos, open: false, exitPrice: price, exitTime: new Date().toISOString(), pnlPct, pnlUSD };
+        log.portfolioValue = (log.portfolioValue || 0) + pnlUSD;
+        writeTradeCsv({ timestamp: new Date().toISOString(), type: "exit", symbol: sym, price, pnlPct, pnlUSD, orderPlaced: true, tradeType: "longterm", notes: `LT trailing stop — peaked +${peakPct.toFixed(1)}%, exited +${pnlPct.toFixed(1)}%` });
+        changed = true;
+        console.log(`  ✅ LT TRAILING STOP — ${sym} locked in +${pnlPct.toFixed(2)}% ($${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(2)})`);
+      } catch (e) { console.log(`  ❌ LT trailing stop sell failed ${sym}: ${e.message}`); }
+
     } else if (pnlPct <= -40 && holdDays >= 30) {
+      // Hard stop-loss — deep loss after 30 days
       console.log(`  🛑 STOP-LOSS — ${sym} at ${pnlPct.toFixed(2)}% after ${holdDays.toFixed(0)}d`);
       try {
         await placeOrder(sym, "sell", null, price, pos.quantity);
-        const pnlUSD = (price - pos.entryPrice) * parseFloat(pos.quantity);
+        const pnlUSD = (price - pos.entryPrice) * qty;
         log.ltPositions[sym] = { ...pos, open: false, exitPrice: price, exitTime: new Date().toISOString(), pnlPct, pnlUSD };
         log.portfolioValue = (log.portfolioValue || 0) + pnlUSD;
         writeTradeCsv({ timestamp: new Date().toISOString(), type: "exit", symbol: sym, price, pnlPct, pnlUSD, orderPlaced: true, tradeType: "longterm", notes: `LT stop-loss ${pnlPct.toFixed(1)}% after ${holdDays.toFixed(0)}d` });
