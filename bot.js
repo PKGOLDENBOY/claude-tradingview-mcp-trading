@@ -608,7 +608,7 @@ function optimiseCoin(symbol, candles) {
         const aw = wins.length > 0 ? wins.reduce((s, t) => s + t.pct, 0) / wins.length : 0;
         const al = losses.length > 0 ? losses.reduce((s, t) => s + t.pct, 0) / losses.length : 0;
         const exp = wr * aw + (1 - wr) * al;
-        if (wr < 0.60 || exp <= 0) continue;
+        if (wr < 0.70 || exp <= 0) continue;
         const score = wr * exp;
         if (!best || score > best.score) {
           best = { rsiThreshold: rsi, takeProfit: tp, stopLoss: sl, trades: trades.length,
@@ -619,7 +619,7 @@ function optimiseCoin(symbol, candles) {
   }
   const testedAt = new Date().toISOString();
   if (!best) return { symbol, trades: 0, winRate: 0, recommendation: "SKIP", rsiThreshold: 25, takeProfit: 0.05, stopLoss: 0.04, testedAt };
-  return { symbol, ...best, recommendation: best.winRate >= 65 ? "TRADE" : "CAUTION", testedAt };
+  return { symbol, ...best, recommendation: best.winRate >= 75 ? "TRADE" : "CAUTION", testedAt };
 }
 
 async function backtestCoin(symbol) {
