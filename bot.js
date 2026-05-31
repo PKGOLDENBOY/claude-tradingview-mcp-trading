@@ -874,8 +874,8 @@ async function refreshTopMovers() {
       return { symbol: t.symbol, score: volScore * 0.35 + chgScore * 0.65, vol, chg };
     }).sort((a, b) => b.score - a.score);
 
-    // Top 60 candidates — tighter focus than 80; quality over breadth
-    const candidates = scored.slice(0, 60).map(t => t.symbol);
+    // Top 100 candidates — wider net finds more coins that pass the 70% backtest gate
+    const candidates = scored.slice(0, 100).map(t => t.symbol);
     console.log(`\n🌐 Full market scan — ${allCoins.length} liquid coins → top ${candidates.length} candidates (sweet-spot scoring)`);
 
     // Backtest all candidates — 20H cache means most results are instant
@@ -3855,9 +3855,10 @@ async function run(tvSignal = null, symbol = null) {
       const volOk    = volRatio >= 1.2;                     // lowered from 1.5 — early moves build volume gradually
       const notTooHot = gainerInfo.change24h <= 75;         // raised from 40% — still skip the 100%+ blowoffs
 
-      console.log(`  Vol: ${volRatio.toFixed(1)}x avg | RSI(3): ${rsi3?.toFixed(1)} (ceil ${rsiCeil}) | StochRSI K: ${stochRsi?.k?.toFixed(1) ?? "—"} | Above EMA8: ${price > ema8 ? "yes" : "no"}`);
+      const trendOk  = bullTrend1h;                             // 1H uptrend — momentum trades in downtrends fail
+      console.log(`  Vol: ${volRatio.toFixed(1)}x avg | RSI(3): ${rsi3?.toFixed(1)} (ceil ${rsiCeil}) | StochRSI K: ${stochRsi?.k?.toFixed(1) ?? "—"} | Above EMA8: ${price > ema8 ? "yes" : "no"} | 1H trend: ${bullTrend1h ? "✅ up" : "🔴 down"}`);
 
-      if (rsiOk && stochOk && priceOk && volOk && notTooHot) {
+      if (rsiOk && stochOk && priceOk && volOk && notTooHot && trendOk) {
         console.log(`\n✅ MOMENTUM ENTRY — big mover conditions met. Position (40% size, 2% SL, trailing stop).`);
         pushSignal(symbol, "ENTRY", `Big mover +${gainerInfo.change24h.toFixed(1)}% — momentum entry`);
         const momSize = Math.min(currentPortfolio * sizePct * 0.40, CONFIG.maxTradeSizeUSD ?? Infinity);
@@ -3899,6 +3900,7 @@ async function run(tvSignal = null, symbol = null) {
         if (!priceOk)  reasons.push(`price below EMA8`);
         if (!volOk)    reasons.push(`volume only ${volRatio.toFixed(1)}x avg (need 1.2x)`);
         if (!notTooHot) reasons.push(`up ${gainerInfo.change24h.toFixed(0)}% — too extended (>75%)`);
+        if (!trendOk)  reasons.push(`1H downtrend — EMA8 < EMA21 on 1H, momentum in downtrend fails`);
         console.log(`🚫 MOMENTUM BLOCK — ${reasons.join(", ")}`);
         pushSignal(symbol, "BLOCKED", `Big mover but: ${reasons[0]}`);
         console.log("═══════════════════════════════════════════════════════════\n");
