@@ -441,8 +441,8 @@ function checkDailyDrawdown(log) {
 // paused   (< 25%):          stop trading entirely
 function getAdaptiveMode(trades) {
   const wr = calcWinRate(trades, 10);
-  if (!wr) return { mode: "normal", label: "📊 Normal — not enough history yet", rsiThreshold: 30, confidenceMin: 0, sizeMultiplier: 1.0 };
-  if (wr.winRate >= 0.65) return { mode: "normal",    label: `✅ Normal — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample})`,    rsiThreshold: 30, confidenceMin: 70, sizeMultiplier: 1.0 };
+  if (!wr) return { mode: "normal", label: "📊 Normal — not enough history yet", rsiThreshold: 38, confidenceMin: 0, sizeMultiplier: 1.0 };
+  if (wr.winRate >= 0.65) return { mode: "normal",    label: `✅ Normal — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample})`,    rsiThreshold: 38, confidenceMin: 70, sizeMultiplier: 1.0 };
   if (wr.winRate >= 0.45) return { mode: "cautious",  label: `⚠️  Cautious — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample})`,  rsiThreshold: 25, confidenceMin: 80, sizeMultiplier: 0.75 };
   if (wr.winRate >= 0.35) return { mode: "defensive", label: `🔴 Defensive — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample})`, rsiThreshold: 20, confidenceMin: 85, sizeMultiplier: 0.5 };
   return { mode: "paused", label: `🛑 Paused — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample}) too low`, rsiThreshold: 20, confidenceMin: 90, sizeMultiplier: 0.10 };
@@ -608,7 +608,7 @@ function optimiseCoin(symbol, candles) {
         const aw = wins.length > 0 ? wins.reduce((s, t) => s + t.pct, 0) / wins.length : 0;
         const al = losses.length > 0 ? losses.reduce((s, t) => s + t.pct, 0) / losses.length : 0;
         const exp = wr * aw + (1 - wr) * al;
-        if (wr < 0.70 || exp <= 0) continue;
+        if (wr < 0.60 || exp <= 0) continue;
         const score = wr * exp;
         if (!best || score > best.score) {
           best = { rsiThreshold: rsi, takeProfit: tp, stopLoss: sl, trades: trades.length,
@@ -619,7 +619,7 @@ function optimiseCoin(symbol, candles) {
   }
   const testedAt = new Date().toISOString();
   if (!best) return { symbol, trades: 0, winRate: 0, recommendation: "SKIP", rsiThreshold: 25, takeProfit: 0.05, stopLoss: 0.04, testedAt };
-  return { symbol, ...best, recommendation: best.winRate >= 75 ? "TRADE" : "CAUTION", testedAt };
+  return { symbol, ...best, recommendation: best.winRate >= 65 ? "TRADE" : "CAUTION", testedAt };
 }
 
 async function backtestCoin(symbol) {
@@ -907,8 +907,8 @@ async function refreshTopMovers() {
     const newListings = await scanNewListings(json.data || []);
     if (newListings.length === 0) console.log("  None found.");
 
-    // Add top daily gainers (3%+) directly — they get the momentum path in run(), skip backtest gate
-    const bigMovers = _topGainers.filter(t => t.change24h >= 3).map(t => t.symbol);
+    // Add top daily gainers (1.5%+) directly — they get the momentum path in run(), skip backtest gate
+    const bigMovers = _topGainers.filter(t => t.change24h >= 1.5).map(t => t.symbol);
     if (bigMovers.length > 0) console.log(`\n🚀 Big movers today (3%+): ${bigMovers.join(", ")}`);
 
     const combined = [...new Set([...qualified, ...heldSymbols, ...WATCHLIST, ...newListings, ...bigMovers])];
@@ -2352,7 +2352,7 @@ async function checkLtEntry(sym) {
   // Hard gates: catch extreme overextension on either timeframe
   const hardPass  = wRsi < 80 && dRsi < 72;
   // Score gate: 7 of 11 conditions (~63%) — same ratio as original 5/8
-  const scorePass = passed >= 7;
+  const scorePass = passed >= 6;
   const pass      = hardPass && scorePass;
 
   return { pass, sym, passed, total, checks, labels, wRsi, dRsi, dPrice, dEma50, wEma10 };
@@ -3844,8 +3844,8 @@ async function run(tvSignal = null, symbol = null) {
     // If a coin is up 3%+ on the day with real volume, trade the momentum instead
     // of waiting for it to become oversold. Different rules, smaller size, tight stop.
     const gainerInfo = _topGainers.find(t => t.symbol === symbol);
-    if (gainerInfo && gainerInfo.change24h >= 3 && !(position && position.open)) {
-      console.log(`\n🚀 BIG MOVER — ${symbol} +${gainerInfo.change24h.toFixed(1)}% today`);
+    if (gainerInfo && gainerInfo.change24h >= 1.5 && !(position && position.open)) {
+      console.log(`\n🚀 MOVER — ${symbol} +${gainerInfo.change24h.toFixed(1)}% today`);
       const volRatio = vol.current / vol.avg;
       // Fast pumps (40%+ on the day) already look overbought on RSI(3) — allow slightly more headroom
       const rsiCeil  = gainerInfo.change24h >= 40 ? 90 : 85;
