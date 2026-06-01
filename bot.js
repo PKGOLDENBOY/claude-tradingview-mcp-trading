@@ -3694,6 +3694,7 @@ async function run(tvSignal = null, symbol = null) {
       exitReasons: reasons,
       shouldExit: finalExit,
       claudeAnalysis,
+      entryType: position.entryType || "scalp",
       quantity: position.quantity,
       tradeSize,
       orderPlaced: false,
@@ -3883,6 +3884,7 @@ async function run(tvSignal = null, symbol = null) {
           timestamp: new Date().toISOString(), type: "entry", symbol,
           timeframe: CONFIG.timeframe, price, indicators: { ema8, vwap, rsi3 },
           allPass: true, claudeAnalysis: null, tradeSize: momSize, orderPlaced: false, orderId: null,
+          entryType: "momentum", entryConfidence: Math.min(100, Math.round((vol.current / vol.avg) / 5 * 100)),
           paperTrading: CONFIG.paperTrading,
           limits: { maxTradeSizeUSD: CONFIG.maxTradeSizeUSD, maxTradesPerDay: CONFIG.maxTradesPerDay, tradesToday: countTodaysTrades(log) },
         };
@@ -4165,6 +4167,7 @@ async function run(tvSignal = null, symbol = null) {
         timestamp: new Date().toISOString(), type: "entry", symbol,
         timeframe: "1H", price, indicators: { ema8, vwap, rsi3 },
         conditions: momResults, allPass: true, claudeAnalysis: null,
+        entryType: "momentum", entryConfidence: Math.round(momResults.filter(r => r.pass).length / momResults.length * 100),
         tradeSize, orderPlaced: false, orderId: null,
         paperTrading: CONFIG.paperTrading,
         limits: { maxTradeSizeUSD: CONFIG.maxTradeSizeUSD, maxTradesPerDay: CONFIG.maxTradesPerDay, tradesToday: countTodaysTrades(log) },
@@ -4551,6 +4554,7 @@ async function run(tvSignal = null, symbol = null) {
       const confidenceMultiplier = bonusSignals >= 6 ? 1.0 : bonusSignals >= 4 ? 0.90 : bonusSignals >= 2 ? 0.75 : 0.60;
       const finalTradeSize = tradeSize * confidenceMultiplier;
       logEntry.tradeSize = finalTradeSize;
+      logEntry.entryConfidence = claudeAnalysis?.confidence ?? Math.round(confidenceMultiplier * 100);
       console.log(`\n📊 Confidence score: ${bonusSignals}/${maxBonus} bonus signals → ${(confidenceMultiplier * 100).toFixed(0)}% position size ($${finalTradeSize.toFixed(2)})`);
 
       // Watchlist alert — prominent console notice so it shows up in pm2 logs
@@ -4805,19 +4809,20 @@ if (process.argv.includes("--tax-summary")) {
       const avgW = w ? exits.filter(t => t.pnlPct > 0.25).reduce((s,t) => s + t.pnlPct, 0) / w : null;
       const avgL = l ? exits.filter(t => t.pnlPct <= 0.25).reduce((s,t) => s + t.pnlPct, 0) / l : null;
       const exp = exits.length >= 2 ? (wr*(avgW??0) + (1-wr)*(avgL??0)) : null;
-      // Avg Claude confidence from matching entry trades (scalp only — others are rule-based)
-      const confVals = (entries || []).map(e => e.claudeAnalysis?.confidence).filter(c => c != null);
+      // Avg entry confidence — uses entryConfidence field (stored at entry time for all strategies)
+      // or falls back to claudeAnalysis.confidence for older scalp entries
+      const confVals = (entries || []).map(e => e.entryConfidence ?? e.claudeAnalysis?.confidence).filter(c => c != null);
       const avgConf = confVals.length ? Math.round(confVals.reduce((s,c) => s+c, 0) / confVals.length) : null;
       return { wins: w, losses: l, total: exits.length, wrPct: +(wr*100).toFixed(0),
                avgWin: avgW!=null?+avgW.toFixed(2):null, avgLoss: avgL!=null?+avgL.toFixed(2):null,
                expectancy: exp!=null?+exp.toFixed(2):null, avgConf };
     }
     const strats = {
-      scalp:    stratStats(allExits.filter(t => !t.tradeType && (t.entryType==="snapback"||t.entryType==="trend-follow"||!t.entryType)), allEntries.filter(t => !t.tradeType && (t.entryType==="snapback"||t.entryType==="trend-follow"||!t.entryType))),
-      momentum: stratStats(allExits.filter(t => !t.tradeType && t.entryType==="momentum"), []),
-      sniper:   stratStats(allExits.filter(t => t.tradeType==="sniper" || t.entryType==="sniper"), []),
-      swing:    stratStats(allExits.filter(t => t.tradeType==="swing"), []),
-      lt:       stratStats(allExits.filter(t => t.tradeType==="longterm"), []),
+      scalp:    stratStats(allExits.filter(t => !t.tradeType && (t.entryType==="scalp"||t.entryType==="snapback"||t.entryType==="trend-follow"||!t.entryType)), allEntries.filter(t => !t.tradeType && (t.entryType==="scalp"||t.entryType==="snapback"||t.entryType==="trend-follow"||!t.entryType))),
+      momentum: stratStats(allExits.filter(t => t.entryType==="momentum"), allEntries.filter(t => t.entryType==="momentum")),
+      sniper:   stratStats(allExits.filter(t => t.tradeType==="sniper"), allEntries.filter(t => t.tradeType==="sniper")),
+      swing:    stratStats(allExits.filter(t => t.tradeType==="swing"), allEntries.filter(t => t.tradeType==="swing")),
+      lt:       stratStats(allExits.filter(t => t.tradeType==="longterm"), allEntries.filter(t => t.tradeType==="longterm")),
     };
     const btcSnap = coinSnapshots["BTCUSDT"] || null;
     const btcPrice = btcSnap?.price ?? (_topGainers.find(t => t.symbol === "BTCUSDT")?.price ?? null);
@@ -6871,7 +6876,8 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       timestamp: new Date().toISOString(), type: "entry", symbol,
       timeframe: SWING.tf, price, tradeSize: swingSize,
       indicators: { rsi3, rsi14, vwap, ema8, ema21, adx: adx?.adx },
-      score, orderPlaced: true, paperTrading: CONFIG.paperTrading, tradeType: "swing",
+      score, entryConfidence: Math.round(Math.min(score, 9) / 9 * 100),
+      orderPlaced: true, paperTrading: CONFIG.paperTrading, tradeType: "swing",
     };
     log.trades.push(entryLog);
     saveLog(log);
@@ -7332,6 +7338,7 @@ async function sniperBuy(symbol) {
     timestamp: new Date().toISOString(), type: "entry", symbol,
     timeframe: "SNIPER", price, tradeSize: sizeUSD,
     indicators: { pumpedPct: parseFloat((pumpedPct * 100).toFixed(1)) },
+    entryConfidence: Math.min(100, Math.round(pumpedPct * 250)),
     orderPlaced: true, orderId, paperTrading: false, tradeType: "sniper",
   };
   freshLog.trades.push(entryLog);
