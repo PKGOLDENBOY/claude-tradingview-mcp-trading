@@ -3534,7 +3534,7 @@ async function run(tvSignal = null, symbol = null) {
   const kellySizePct = kellyPositionPct(log, symbol, CONFIG.maxTradeSizePct || 0.25);
   const sizePct = kellySizePct;
   // Scale down as daily losses accumulate + volatile regime + bear snap-backs
-  const bearSnapBack  = regime.btcTrend === "bear" && rsi3 !== null && rsi3 < 28 && (stochRsi?.oversold === true || macd.bullish === true);
+  const bearSnapBack  = regime.btcTrend === "bear" && rsi3 !== null && rsi3 < 35 && (stochRsi?.oversold === true || macd.bullish === true);
   const regimeScale   = regime.volatility === "high" ? 0.50 : 1.0;
   const drawdownScale = drawdown.drawdownPct > 7 ? 0.30 : drawdown.drawdownPct > 5 ? 0.50 : drawdown.drawdownPct > 3 ? 0.75 : 1.0;
   const bearScale     = bearSnapBack ? 0.40 : 1.0; // bear snap-back = 40% size only
@@ -6500,6 +6500,19 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       console.log("▶ Trading resumed via dashboard");
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ message: "▶️ Trading resumed" }));
+      return;
+    }
+
+    // Trades CSV download — lets you pull the full Railway trade history locally
+    if (req.method === "GET" && path === "/api/trades") {
+      if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Wrong PIN" })); return; }
+      try {
+        const csv = readFileSync(CSV_FILE, "utf8");
+        res.writeHead(200, { "Content-Type": "text/csv", "Content-Disposition": "attachment; filename=trades.csv" });
+        res.end(csv);
+      } catch (e) {
+        res.writeHead(404); res.end("trades.csv not found");
+      }
       return;
     }
 
