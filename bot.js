@@ -2978,7 +2978,10 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
 
 // ─── Tax CSV Logging ─────────────────────────────────────────────────────────
 
-const CSV_FILE = "trades.csv";
+// Derive CSV path from STATE_FILE so both persist on the same Railway volume (/data/)
+const CSV_FILE = process.env.STATE_FILE
+  ? process.env.STATE_FILE.replace(/[^/\\]+$/, "trades.csv")
+  : "trades.csv";
 
 // Always ensure trades.csv exists with headers — open it in Excel/Sheets any time
 function initCsv() {
