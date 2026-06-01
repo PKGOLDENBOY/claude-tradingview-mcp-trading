@@ -3885,9 +3885,16 @@ async function run(tvSignal = null, symbol = null) {
             momEntry.notes = `Error: ${err.message}`;
           }
         }
-        log.trades.push(momEntry);
-        saveLog(log);
-        writeTradeCsv(momEntry);
+        if (momEntry.orderPlaced) {
+          const freshLog = (() => { try { return loadLog(); } catch { return log; } })();
+          if (log.positions?.[symbol]) freshLog.positions = { ...(freshLog.positions || {}), [symbol]: log.positions[symbol] };
+          if (!freshLog.coinCooldowns) freshLog.coinCooldowns = {};
+          if (!freshLog.coinCooldowns[symbol]) freshLog.coinCooldowns[symbol] = {};
+          freshLog.coinCooldowns[symbol].scalp = { until: Date.now() + 6 * 60 * 60 * 1000, pnlPct: "0.00", justBought: true };
+          freshLog.trades.push(momEntry);
+          saveLog(freshLog);
+          writeTradeCsv(momEntry);
+        }
         console.log("═══════════════════════════════════════════════════════════\n");
         return;
       } else if (rsi3 !== null && rsi3 < 35) {
@@ -4165,8 +4172,13 @@ async function run(tvSignal = null, symbol = null) {
         }
       }
       if (momEntry.orderPlaced) {
-        log.trades.push(momEntry);
-        saveLog(log);
+        const freshLog = (() => { try { return loadLog(); } catch { return log; } })();
+        if (log.positions?.[symbol]) freshLog.positions = { ...(freshLog.positions || {}), [symbol]: log.positions[symbol] };
+        if (!freshLog.coinCooldowns) freshLog.coinCooldowns = {};
+        if (!freshLog.coinCooldowns[symbol]) freshLog.coinCooldowns[symbol] = {};
+        freshLog.coinCooldowns[symbol].scalp = { until: Date.now() + 6 * 60 * 60 * 1000, pnlPct: "0.00", justBought: true };
+        freshLog.trades.push(momEntry);
+        saveLog(freshLog);
         writeTradeCsv(momEntry);
       }
       console.log("═══════════════════════════════════════════════════════════\n");
@@ -4582,19 +4594,26 @@ async function run(tvSignal = null, symbol = null) {
 
     // Only persist meaningful events: real/paper orders or Claude consultations
     if (logEntry.orderPlaced || claudeAnalysis) {
-      log.trades.push(logEntry);
-      // Keep log bounded — retain all orderPlaced entries plus last 200 others
-      const placed = log.trades.filter(t => t.orderPlaced);
-      const unplaced = log.trades.filter(t => !t.orderPlaced).slice(-200);
-      log.trades = [...placed, ...unplaced].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-      // Hold-period cooldown — blocks re-entry for 6h even if position is lost from log
-      // due to a concurrent write race. Exit code overwrites this with its own cooldown.
       if (logEntry.orderPlaced && logEntry.type === "entry") {
-        if (!log.coinCooldowns) log.coinCooldowns = {};
-        if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
-        log.coinCooldowns[symbol].scalp = { until: Date.now() + 6 * 60 * 60 * 1000, pnlPct: "0.00", justBought: true };
+        // Atomic read-modify-write — reload from disk so concurrent symbol saves
+        // don't overwrite each other's positions or cooldowns.
+        const freshLog = (() => { try { return loadLog(); } catch { return log; } })();
+        if (log.positions?.[symbol]) freshLog.positions = { ...(freshLog.positions || {}), [symbol]: log.positions[symbol] };
+        if (!freshLog.coinCooldowns) freshLog.coinCooldowns = {};
+        if (!freshLog.coinCooldowns[symbol]) freshLog.coinCooldowns[symbol] = {};
+        freshLog.coinCooldowns[symbol].scalp = { until: Date.now() + 6 * 60 * 60 * 1000, pnlPct: "0.00", justBought: true };
+        freshLog.trades.push(logEntry);
+        const placed = freshLog.trades.filter(t => t.orderPlaced);
+        const unplaced = freshLog.trades.filter(t => !t.orderPlaced).slice(-200);
+        freshLog.trades = [...placed, ...unplaced].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+        saveLog(freshLog);
+      } else {
+        log.trades.push(logEntry);
+        const placed = log.trades.filter(t => t.orderPlaced);
+        const unplaced = log.trades.filter(t => !t.orderPlaced).slice(-200);
+        log.trades = [...placed, ...unplaced].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+        saveLog(log);
       }
-      saveLog(log);
       if (logEntry.orderPlaced) {
         console.log(`\nDecision log saved → ${LOG_FILE}`);
         writeTradeCsv(logEntry);
