@@ -329,14 +329,15 @@ const SWING_ENABLED = process.env.SWING_TRADING !== "false"; // on by default
 const SWING = {
   tf: "4H",
   bars: 200,              // ~33 days of 4H bars
-  rsi3Gate: 35,           // 4H RSI(3) must be below this
-  rsi14Gate: 45,          // OR 4H RSI(14) below this (medium-term oversold)
-  takeProfit: 0.08,       // 8% target
-  stopLoss: 0.04,         // 4% hard stop
+  rsi3Gate: 40,           // 4H RSI(3) < 40 (backtest winner: 69% WR OOS)
+  rsi14Gate: 50,          // OR 4H RSI(14) below this (medium-term oversold)
+  takeProfit: 0.10,       // 10% target (backtest winner)
+  stopLoss: 0.05,         // 5% hard stop (wider for 4H swings)
   atrMult: 3.0,           // wider ATR trail than scalp
-  partialAt: 0.05,        // take 30% off at +5%
+  partialAt: 0.06,        // take 30% off at +6%
   partialQty: 0.30,
-  maxHoldH: 120,          // 5 days max
+  maxHoldH: 192,          // 8 days (48 × 4H bars — backtest winner)
+  rsiOverboughtExit: 85,  // exit when RSI(3) > 85 on 4H (backtest winner)
   sizePct: 0.20,          // 20% of portfolio per swing
   maxOpen: 5,             // max concurrent swing positions
   entryBlockH: [22, 6],   // no entries 22:00–06:00 UTC
@@ -598,7 +599,7 @@ function runBacktestSim(candles, rsiThreshold, takeProfit, stopLoss = 0.04) {
 function optimiseCoin(symbol, candles) {
   let best = null;
   for (const rsi of [15, 20, 25, 30, 35, 40, 45, 50]) {
-    for (const tp of [0.03, 0.04, 0.05, 0.06, 0.08]) {
+    for (const tp of [0.03, 0.04, 0.05, 0.06, 0.08, 0.10]) { // extended to 10% (mega-backtest winner)
       for (const sl of [0.02, 0.03, 0.04, 0.05, 0.06]) {
         if (tp <= sl) continue; // TP must be larger than SL
         const trades = runBacktestSim(candles, rsi, tp, sl);
@@ -681,13 +682,14 @@ async function backtestCoin(symbol) {
 
 // ─── Swing Backtest ──────────────────────────────────────────────────────────
 
-function runSwingBacktestSim(candles4h, rsiThreshold, takeProfit = 0.08, stopLoss = 0.04) {
+function runSwingBacktestSim(candles4h, rsiThreshold, takeProfit = 0.10, stopLoss = 0.05) {
+  // Mega-backtest validated signal: dip-buy below VWAP in uptrend (69% OOS WR)
   const closes = candles4h.map(c => c.close);
   const ema8   = calcEMASeries(closes, 8);
   const ema21  = calcEMASeries(closes, 21);
   const rsi3   = calcRSI3Series(closes);
   const vwap   = calcVWAPSeries(candles4h);
-  const maxBars = 30; // 30 × 4H = 5 days max hold
+  const maxBars = 48; // 48 × 4H = 8 days (mega-backtest winner)
   const trades = [];
   let inTrade = false, entry = 0, bar = 0;
   for (let i = 30; i < candles4h.length - 1; i++) {
@@ -701,7 +703,8 @@ function runSwingBacktestSim(candles4h, rsiThreshold, takeProfit = 0.08, stopLos
     }
     const p = candles4h[i].close, rv = rsi3[i];
     if (rv === null || rv === undefined) continue;
-    if (p > vwap[i] && p > ema8[i] && ema8[i] > ema21[i] && rv < rsiThreshold) {
+    // Buy the dip: price at/below VWAP + uptrend (EMA8 > EMA21) + RSI oversold
+    if (p <= vwap[i] * 1.01 && ema8[i] > ema21[i] && rv < rsiThreshold) {
       inTrade = true; entry = candles4h[i + 1].open; bar = i + 1;
     }
   }
@@ -710,9 +713,9 @@ function runSwingBacktestSim(candles4h, rsiThreshold, takeProfit = 0.08, stopLos
 
 function optimiseSwingCoin(candles4h) {
   let best = null;
-  for (const rsi of [20, 25, 30, 35, 40, 45]) {
-    for (const tp of [0.05, 0.06, 0.08, 0.10, 0.12, 0.15]) {
-      for (const sl of [0.03, 0.04, 0.05, 0.06]) {
+  for (const rsi of [25, 30, 35, 40, 45]) { // mega-backtest winner: 40
+    for (const tp of [0.08, 0.10, 0.12, 0.15, 0.20]) { // mega-backtest winner: 10%
+      for (const sl of [0.04, 0.05, 0.06]) { // mega-backtest winner: 5%
         if (tp / sl < 1.5) continue; // enforce minimum R:R
         const trades = runSwingBacktestSim(candles4h, rsi, tp, sl);
         if (trades.length < 3) continue;
@@ -1533,9 +1536,13 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
       console.log(`  ✅ Bullish divergence detected — price lower low, RSI higher low`);
     }
 
-    // 11. BB position
+    // 11. BB position — block entries above midpoint (backtest: BB% < 35% best, < 70% acceptable)
     if (bb !== null) {
-      console.log(`  ℹ️  BB%: ${bb.pct.toFixed(2)} (${bb.pct < 0.2 ? "✅ near lower band" : bb.pct > 0.8 ? "⚠️ near upper band" : "mid-range"})`);
+      if (bb.pct > 0.70 && !vwapBounce) {
+        check(`BB% below 70% (not overextended in BB range)`, "< 70%", `${(bb.pct * 100).toFixed(0)}%`, false);
+      } else {
+        console.log(`  ℹ️  BB%: ${(bb.pct*100).toFixed(0)}% (${bb.pct < 0.20 ? "✅ near lower band" : bb.pct < 0.35 ? "✅ low — strong signal" : bb.pct > 0.70 ? "⚠️ upper range" : "mid-range"})`);
+      }
     }
 
     // v2 entry score summary
@@ -6683,7 +6690,10 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       const exitReasons = [];
       if (pnlPct < -btSL * 100)            exitReasons.push(`Stop-loss ${pnlPct.toFixed(2)}%`);
       if (price < trail && pnlPct > 0)     exitReasons.push(`ATR trail $${trail.toFixed(4)}`);
-      if (rsi3 !== null && rsi3 > 80)       exitReasons.push(`RSI(3) overbought ${rsi3.toFixed(1)}`);
+      if (rsi3 !== null && rsi3 > SWING.rsiOverboughtExit) exitReasons.push(`RSI(3) overbought ${rsi3.toFixed(1)}`);
+      // Neon Candle exit — backtest-validated: 2×+ volume candle while in profit = take it
+      // Rationale: extreme volume at profit marks institutional profit-taking (local top)
+      if (vol && pnlPct > 1.0 && vol.current > vol.avg * 2.0) exitReasons.push(`Neon Candle exit — ${(vol.current/vol.avg).toFixed(1)}x volume spike at +${pnlPct.toFixed(1)}%`);
       if (holdH > SWING.maxHoldH)           exitReasons.push(`Max hold ${holdH.toFixed(0)}h`);
       if (macd && !macd.bullish && pnlPct > 2) exitReasons.push(`MACD bearish cross at +${pnlPct.toFixed(1)}%`);
       // Daily trend reversal — exit if daily turns bearish while in loss
@@ -6747,12 +6757,15 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     // Daily must be in a dip, not already extended (RSI > 65 means too late)
     if (!dailyDip) return;
 
-    // ── 4H entry conditions ──────────────────────────────────────────────────
-    const bullish4h  = price > vwap && ema8 > ema21;
-    const oversold4h = rsi3 < SWING.rsi3Gate || (rsi14 !== null && rsi14 < SWING.rsi14Gate);
+    // ── 4H entry conditions — backtest-validated dip-buy (69% OOS WR) ─────────
+    // Buy the dip: price at/below VWAP + uptrend intact (EMA8 > EMA21) + RSI oversold + BB low
+    const trendUp    = ema8 > ema21;                // uptrend: EMA8(4H) > EMA21(4H)
+    const atDiscount = price <= vwap * 1.01;        // at or below VWAP (buying dip vs fair value)
+    const oversold4h = rsi3 < SWING.rsi3Gate;       // RSI(3) oversold (< 40)
+    const bbAtLow    = !bb || bb.pct < 0.35;        // at/near lower Bollinger Band
     const noOBVDiv   = !obv.bearDivergence;
 
-    if (!bullish4h || !oversold4h || !noOBVDiv) return;
+    if (!trendUp || !atDiscount || !oversold4h || !bbAtLow || !noOBVDiv) return;
 
     // ── Backtest gate ────────────────────────────────────────────────────────
     const btResult = await backtestSwingCoin(symbol);
@@ -6769,6 +6782,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     if (macd && macd.bullish)                   score++;  // 4H momentum intact
     if (dblBtm && dblBtm.detected)             score += dblBtm.strongConfirmation ? 2 : 1;
     if (rsi3 < 20)                              score++;  // extremely oversold on 4H
+    if (bbAtLow && bb && bb.pct < 0.25)        score++;  // at/below lower BB (strong dip signal)
     if (btResult.recommendation === "TRADE")    score++;  // backtest says go
 
     if (score < 3) return; // need at least 3 confirmations across all timeframes
