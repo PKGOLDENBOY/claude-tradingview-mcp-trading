@@ -2978,10 +2978,10 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
 
 // ─── Tax CSV Logging ─────────────────────────────────────────────────────────
 
-// Derive CSV path from STATE_FILE so both persist on the same Railway volume (/data/)
+// Use /data/trades.csv when Railway volume is mounted, else local fallback
 const CSV_FILE = process.env.STATE_FILE
   ? process.env.STATE_FILE.replace(/[^/\\]+$/, "trades.csv")
-  : "trades.csv";
+  : (existsSync("/data") ? "/data/trades.csv" : "trades.csv");
 
 // Always ensure trades.csv exists with headers — open it in Excel/Sheets any time
 function initCsv() {
