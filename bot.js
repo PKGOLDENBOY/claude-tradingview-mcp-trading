@@ -282,6 +282,7 @@ const anthropic = process.env.ANTHROPIC_API_KEY
   : null;
 
 const LOG_FILE = process.env.STATE_FILE || "safety-check-log.json";
+const LOG_VERBOSE = process.env.LOG_VERBOSE === "true"; // set to "true" to restore full indicator dumps
 
 // ─── Multi-account support ────────────────────────────────────────────────────
 const ACCOUNTS = [
@@ -1443,12 +1444,14 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
 
   const check = (label, required, actual, pass) => {
     results.push({ label, required, actual, pass });
-    const icon = pass ? "✅" : "🚫";
-    console.log(`  ${icon} ${label}`);
-    console.log(`     Required: ${required} | Actual: ${actual}`);
+    if (LOG_VERBOSE) {
+      const icon = pass ? "✅" : "🚫";
+      console.log(`  ${icon} ${label}`);
+      console.log(`     Required: ${required} | Actual: ${actual}`);
+    }
   };
 
-  console.log("\n── Safety Check ─────────────────────────────────────────\n");
+  if (LOG_VERBOSE) console.log("\n── Safety Check ─────────────────────────────────────────\n");
 
   // Determine bias first
   const distFromVWAP = Math.abs((price - vwap) / vwap) * 100;
@@ -1457,7 +1460,7 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
   const bearishBias = price < vwap && !atVwap && price < ema8;
 
   if (bullishBias) {
-    console.log("  Bias: BULLISH — checking long entry conditions\n");
+    if (LOG_VERBOSE) console.log("  Bias: BULLISH — checking long entry conditions\n");
 
     // 1. Price above VWAP
     check(
@@ -1504,7 +1507,7 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
 
     // 6. Trend alignment — logged for Claude but NOT a hard block
     if (bullTrend4h !== null) {
-      console.log(`  ℹ️  Trend context (not a hard gate): ${bullTrend4h ? "✅ bullish" : "⚠️  bearish — Claude must be 90%+ confident"}`);
+      if (LOG_VERBOSE) console.log(`  ℹ️  Trend context (not a hard gate): ${bullTrend4h ? "✅ bullish" : "⚠️  bearish — Claude must be 90%+ confident"}`);
     }
 
     // 7. Volume — hard gate: don't enter when volume is below average (no crowd participation)
@@ -1528,12 +1531,12 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
 
     // 9. StochRSI — v2 confirmation signal
     if (stochRsi !== null) {
-      console.log(`  ℹ️  StochRSI K=${stochRsi.k.toFixed(1)}: ${stochRsi.oversold ? "✅ oversold (<20)" : stochRsi.overbought ? "⚠️ overbought (>88)" : "neutral"}`);
+      if (LOG_VERBOSE) console.log(`  ℹ️  StochRSI K=${stochRsi.k.toFixed(1)}: ${stochRsi.oversold ? "✅ oversold (<20)" : stochRsi.overbought ? "⚠️ overbought (>88)" : "neutral"}`);
     }
 
     // 10. Bullish divergence
     if (divergence) {
-      console.log(`  ✅ Bullish divergence detected — price lower low, RSI higher low`);
+      if (LOG_VERBOSE) console.log(`  ✅ Bullish divergence detected — price lower low, RSI higher low`);
     }
 
     // 11. BB position — block entries above midpoint (backtest: BB% < 35% best, < 70% acceptable)
@@ -1541,7 +1544,7 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
       if (bb.pct > 0.70 && !vwapBounce) {
         check(`BB% below 70% (not overextended in BB range)`, "< 70%", `${(bb.pct * 100).toFixed(0)}%`, false);
       } else {
-        console.log(`  ℹ️  BB%: ${(bb.pct*100).toFixed(0)}% (${bb.pct < 0.20 ? "✅ near lower band" : bb.pct < 0.35 ? "✅ low — strong signal" : bb.pct > 0.70 ? "⚠️ upper range" : "mid-range"})`);
+        if (LOG_VERBOSE) console.log(`  ℹ️  BB%: ${(bb.pct*100).toFixed(0)}% (${bb.pct < 0.20 ? "✅ near lower band" : bb.pct < 0.35 ? "✅ low — strong signal" : bb.pct > 0.70 ? "⚠️ upper range" : "mid-range"})`);
       }
     }
 
@@ -1557,10 +1560,10 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
     if (vol && vol.current / vol.avg >= 1.5) { score += 1; scoreSignals.push("vol surge"); }
     if (divergence) { score += 3; scoreSignals.push("divergence!"); }
     entryScore = score;
-    console.log(`  ℹ️  v2 Entry Score: ${score}/3+ needed — [${scoreSignals.join(", ") || "none"}]`);
+    if (LOG_VERBOSE) console.log(`  ℹ️  v2 Entry Score: ${score}/3+ needed — [${scoreSignals.join(", ") || "none"}]`);
   } else if (bearishBias && rsi3 !== null && rsi3 < 25) {
     // Oversold in downtrend — snap-back long entry
-    console.log(`  Bias: BEARISH but RSI(3)=${rsi3.toFixed(1)} — oversold snap-back, treating as long entry\n`);
+    if (LOG_VERBOSE) console.log(`  Bias: BEARISH but RSI(3)=${rsi3.toFixed(1)} — oversold snap-back, treating as long entry\n`);
     check("RSI(3) oversold (< 25) — snap-back in downtrend", "< 25", rsi3.toFixed(2), true);
     check("Price within 1.5% of VWAP (not overextended)", "< 1.5%", distFromVWAP.toFixed(2) + "%", distFromVWAP < 1.5);
     // Counter-trend entries need confirmation — calculate quality score
@@ -1570,9 +1573,9 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
     if (stochRsi?.oversold) { entryScore += 2; sbSignals.push("StochRSI oversold"); }
     if (bb && bb.pct < 0.25) { entryScore += 2; sbSignals.push("BB% near low"); }
     if (divergence) { entryScore += 3; sbSignals.push("divergence!"); }
-    console.log(`  ℹ️  Snapback quality score: ${entryScore}/2+ needed — [${sbSignals.join(", ") || "none"}]`);
+    if (LOG_VERBOSE) console.log(`  ℹ️  Snapback quality score: ${entryScore}/2+ needed — [${sbSignals.join(", ") || "none"}]`);
   } else if (bearishBias) {
-    console.log("  Bias: BEARISH — checking short entry conditions\n");
+    if (LOG_VERBOSE) console.log("  Bias: BEARISH — checking short entry conditions\n");
 
     check(
       "Price below VWAP (sellers in control)",
@@ -1604,10 +1607,10 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
   } else {
     // Neutral bias — allow entry if RSI is oversold (uses same threshold as bullish path)
     if (rsi3 !== null && rsi3 < rsiThreshold) {
-      console.log(`  Bias: NEUTRAL but RSI(3)=${rsi3.toFixed(1)} oversold (< ${rsiThreshold}) — snap-back entry\n`);
+      if (LOG_VERBOSE) console.log(`  Bias: NEUTRAL but RSI(3)=${rsi3.toFixed(1)} oversold (< ${rsiThreshold}) — snap-back entry\n`);
       check(`RSI(3) oversold (< ${rsiThreshold}) in neutral market`, `< ${rsiThreshold}`, rsi3.toFixed(2), true);
     } else {
-      console.log(`  Bias: NEUTRAL — RSI(3)=${rsi3?.toFixed(1)} not low enough (need < ${rsiThreshold}). No trade.\n`);
+      if (LOG_VERBOSE) console.log(`  Bias: NEUTRAL — RSI(3)=${rsi3?.toFixed(1)} not low enough (need < ${rsiThreshold}). No trade.\n`);
       results.push({ label: "Market bias", required: `RSI < ${rsiThreshold}`, actual: rsi3?.toFixed(1) ?? "N/A", pass: false });
     }
   }
@@ -1758,7 +1761,7 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     const HARD_STOPS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Failed bounce", "Momentum stop"];
     const hardOnly = reasons.filter(r => HARD_STOPS.some(kw => r.startsWith(kw)));
     if (hardOnly.length < reasons.length) {
-      console.log(`  ℹ️  Fee gate — holding at +${pnlPct.toFixed(2)}% (need +${FEE_MIN_PCT}% to cover fees)`);
+      if (LOG_VERBOSE) console.log(`  ℹ️  Fee gate — holding at +${pnlPct.toFixed(2)}% (need +${FEE_MIN_PCT}% to cover fees)`);
     }
     reasons.splice(0, reasons.length, ...hardOnly);
   }
@@ -3416,7 +3419,7 @@ async function run(tvSignal = null, symbol = null) {
   // In VOLATILE regime: reduce scalp size by 50% (applied in tradeSize calc below)
 
   // Fetch candle data — entry TF + 15min + 1H + 4H + daily + weekly
-  console.log("\n── Fetching market data from BitGet ────────────────────\n");
+  if (LOG_VERBOSE) console.log("\n── Fetching market data from BitGet ────────────────────\n");
   const [candles, candles15m, candles1h, candles4h, candlesDay, candlesWeek] = await Promise.all([
     fetchCandles(symbol, entryTF, entryBars),
     fetchCandles(symbol, "15m", 100),
@@ -3471,23 +3474,27 @@ async function run(tvSignal = null, symbol = null) {
   const obv         = calcOBV(candles);
   const doubleBottom = detectDoubleBottom(candles);
 
-  console.log(`  EMA(8):   $${ema8.toFixed(2)} | EMA(21): $${ema21.toFixed(2)} | ${ema8 > ema21 ? "✅ entry TF uptrend" : "🔴 entry TF downtrend"}`);
-  console.log(`  1H trend: EMA(8) $${ema8_1h.toFixed(2)} vs EMA(21) $${ema21_1h.toFixed(2)} | ${bullTrend1h ? "✅ 1H uptrend" : "🔴 1H downtrend"} | RSI(14): ${rsi14_1h !== null ? rsi14_1h.toFixed(1) : "N/A"}${rsi14_1h !== null && rsi14_1h < 45 ? " ⚠️ bearish zone" : ""}`);
-  console.log(`  4H trend: EMA(8) $${ema8_4h.toFixed(2)} vs EMA(21) $${ema21_4h.toFixed(2)} | ${bullTrend4h ? "✅ 4H uptrend" : "🔴 4H downtrend"}`);
-  if (bullTrendWeekly !== null) console.log(`  Weekly:   EMA(8) $${ema8_week.toFixed(4)} vs EMA(21) $${ema21_week.toFixed(4)} | ${bullTrendWeekly ? "✅ Weekly bull market" : "🔴 Weekly bear market — stricter filters apply"}`);
-  if (rsi15m !== null) console.log(`  RSI(15m): ${rsi15m.toFixed(2)}`);
-  console.log(`  VWAP:     $${vwap ? vwap.toFixed(2) : "N/A"}`);
-  console.log(`  RSI(3):   ${rsi3 !== null && rsi3 !== undefined ? rsi3.toFixed(2) : "N/A"}`);
-  console.log(`  Volume:   ${vol.aboveAvg ? "✅ above avg" : "⚠️  below avg"} (${(vol.current / vol.avg * 100).toFixed(0)}% of avg)`);
-  console.log(`  MACD:     ${macd.bullish ? "✅ bullish" : "🔴 bearish"} | hist ${macd.histogram.toFixed(4)}`);
-  console.log(`  Bollinger: BB% ${(bb.pct * 100).toFixed(1)}% | width ${bb.width.toFixed(2)}% | ${bb.pct < 0.2 ? "⬇️ near lower band" : bb.pct > 0.8 ? "⬆️ near upper band" : "↔️ mid-range"}`);
-  console.log(`  ADX:      ${adx ? `${adx.adx.toFixed(2)} (${adx.trending ? "✅ trending" : "⚠️ choppy"}) | +DI ${adx.plusDI.toFixed(1)} -DI ${adx.minusDI.toFixed(1)}` : "N/A"}`);
-  console.log(`  StochRSI: K=${stochRsi ? stochRsi.k.toFixed(1) : "N/A"} | ${stochRsi?.oversold ? "✅ oversold" : stochRsi?.overbought ? "⚠️ overbought" : "neutral"}`);
-  console.log(`  Divergence: ${divergence ? "✅ Bullish divergence detected!" : "none"}`);
-  console.log(`  OBV:      ${obv.rising ? "✅ rising (buyers in control)" : "⚠️  falling"} | ${obv.bearDivergence ? "🔴 OBV bear divergence — smart money selling into rally" : "no divergence"}`);
-  if (doubleBottom?.detected) console.log(`  Double Bottom: ✅ detected — two lows at $${doubleBottom.low1?.toFixed(2)}/$${doubleBottom.low2?.toFixed(2)}${doubleBottom.strongConfirmation ? " with RSI divergence (STRONG)" : ""}`);
-  console.log(`  Patterns: ${patterns.length ? patterns.join(", ") : "None detected"}`);
-  console.log(`  S/R:      Support $${sr.nearestSupport?.toFixed(2) ?? "?"} (${sr.distToSupport?.toFixed(2) ?? "?"}% below, ${sr.supportConf ?? 0} TF confluences) | Resistance $${sr.nearestResistance?.toFixed(2) ?? "?"} (${sr.distToResistance?.toFixed(2) ?? "?"}% above, ${sr.resistanceConf ?? 0} TF confluences)${sr.nearSupport ? " ✅ near support" : ""}${sr.nearResistance ? " ⚠️ near resistance" : ""}`);
+  // Compact one-liner always shown — full dump only in verbose mode
+  console.log(`  ${symbol} $${price.toFixed(4)} | RSI ${rsi3 !== null ? rsi3.toFixed(1) : "N/A"} | BB% ${(bb.pct*100).toFixed(0)}% | Vol ${(vol.current/vol.avg).toFixed(1)}x | ${bullTrend4h ? "4H↑" : "4H↓"} ${bullTrend1h ? "1H↑" : "1H↓"} | VWAP $${vwap ? vwap.toFixed(4) : "N/A"}`);
+  if (LOG_VERBOSE) {
+    console.log(`  EMA(8):   $${ema8.toFixed(2)} | EMA(21): $${ema21.toFixed(2)} | ${ema8 > ema21 ? "✅ entry TF uptrend" : "🔴 entry TF downtrend"}`);
+    console.log(`  1H trend: EMA(8) $${ema8_1h.toFixed(2)} vs EMA(21) $${ema21_1h.toFixed(2)} | ${bullTrend1h ? "✅ 1H uptrend" : "🔴 1H downtrend"} | RSI(14): ${rsi14_1h !== null ? rsi14_1h.toFixed(1) : "N/A"}${rsi14_1h !== null && rsi14_1h < 45 ? " ⚠️ bearish zone" : ""}`);
+    console.log(`  4H trend: EMA(8) $${ema8_4h.toFixed(2)} vs EMA(21) $${ema21_4h.toFixed(2)} | ${bullTrend4h ? "✅ 4H uptrend" : "🔴 4H downtrend"}`);
+    if (bullTrendWeekly !== null) console.log(`  Weekly:   EMA(8) $${ema8_week.toFixed(4)} vs EMA(21) $${ema21_week.toFixed(4)} | ${bullTrendWeekly ? "✅ Weekly bull market" : "🔴 Weekly bear market — stricter filters apply"}`);
+    if (rsi15m !== null) console.log(`  RSI(15m): ${rsi15m.toFixed(2)}`);
+    console.log(`  VWAP:     $${vwap ? vwap.toFixed(2) : "N/A"}`);
+    console.log(`  RSI(3):   ${rsi3 !== null && rsi3 !== undefined ? rsi3.toFixed(2) : "N/A"}`);
+    console.log(`  Volume:   ${vol.aboveAvg ? "✅ above avg" : "⚠️  below avg"} (${(vol.current / vol.avg * 100).toFixed(0)}% of avg)`);
+    console.log(`  MACD:     ${macd.bullish ? "✅ bullish" : "🔴 bearish"} | hist ${macd.histogram.toFixed(4)}`);
+    console.log(`  Bollinger: BB% ${(bb.pct * 100).toFixed(1)}% | width ${bb.width.toFixed(2)}% | ${bb.pct < 0.2 ? "⬇️ near lower band" : bb.pct > 0.8 ? "⬆️ near upper band" : "↔️ mid-range"}`);
+    console.log(`  ADX:      ${adx ? `${adx.adx.toFixed(2)} (${adx.trending ? "✅ trending" : "⚠️ choppy"}) | +DI ${adx.plusDI.toFixed(1)} -DI ${adx.minusDI.toFixed(1)}` : "N/A"}`);
+    console.log(`  StochRSI: K=${stochRsi ? stochRsi.k.toFixed(1) : "N/A"} | ${stochRsi?.oversold ? "✅ oversold" : stochRsi?.overbought ? "⚠️ overbought" : "neutral"}`);
+    console.log(`  Divergence: ${divergence ? "✅ Bullish divergence detected!" : "none"}`);
+    console.log(`  OBV:      ${obv.rising ? "✅ rising (buyers in control)" : "⚠️  falling"} | ${obv.bearDivergence ? "🔴 OBV bear divergence — smart money selling into rally" : "no divergence"}`);
+    if (doubleBottom?.detected) console.log(`  Double Bottom: ✅ detected — two lows at $${doubleBottom.low1?.toFixed(2)}/$${doubleBottom.low2?.toFixed(2)}${doubleBottom.strongConfirmation ? " with RSI divergence (STRONG)" : ""}`);
+    console.log(`  Patterns: ${patterns.length ? patterns.join(", ") : "None detected"}`);
+    console.log(`  S/R:      Support $${sr.nearestSupport?.toFixed(2) ?? "?"} (${sr.distToSupport?.toFixed(2) ?? "?"}% below, ${sr.supportConf ?? 0} TF confluences) | Resistance $${sr.nearestResistance?.toFixed(2) ?? "?"} (${sr.distToResistance?.toFixed(2) ?? "?"}% above, ${sr.resistanceConf ?? 0} TF confluences)${sr.nearSupport ? " ✅ near support" : ""}${sr.nearResistance ? " ⚠️ near resistance" : ""}`);
+  }
 
   if (vwap === null || rsi3 === null) {
     console.log("\n⚠️  Not enough data to calculate indicators. Exiting.");
