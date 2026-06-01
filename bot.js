@@ -4796,7 +4796,8 @@ if (process.argv.includes("--tax-summary")) {
     const csvStats = allExits.length < 3 ? loadCsvStats() : null;
 
     // Per-strategy stats — classify each closed trade by how it was entered
-    function stratStats(exits) {
+    const allEntries = (log.trades || []).filter(t => t.type === "entry" && t.orderPlaced);
+    function stratStats(exits, entries) {
       if (!exits.length) return null;
       const w = exits.filter(t => t.pnlPct > 0.25).length;
       const l = exits.length - w;
@@ -4804,16 +4805,19 @@ if (process.argv.includes("--tax-summary")) {
       const avgW = w ? exits.filter(t => t.pnlPct > 0.25).reduce((s,t) => s + t.pnlPct, 0) / w : null;
       const avgL = l ? exits.filter(t => t.pnlPct <= 0.25).reduce((s,t) => s + t.pnlPct, 0) / l : null;
       const exp = exits.length >= 2 ? (wr*(avgW??0) + (1-wr)*(avgL??0)) : null;
+      // Avg Claude confidence from matching entry trades (scalp only — others are rule-based)
+      const confVals = (entries || []).map(e => e.claudeAnalysis?.confidence).filter(c => c != null);
+      const avgConf = confVals.length ? Math.round(confVals.reduce((s,c) => s+c, 0) / confVals.length) : null;
       return { wins: w, losses: l, total: exits.length, wrPct: +(wr*100).toFixed(0),
                avgWin: avgW!=null?+avgW.toFixed(2):null, avgLoss: avgL!=null?+avgL.toFixed(2):null,
-               expectancy: exp!=null?+exp.toFixed(2):null };
+               expectancy: exp!=null?+exp.toFixed(2):null, avgConf };
     }
     const strats = {
-      scalp:    stratStats(allExits.filter(t => !t.tradeType && (t.entryType==="snapback"||t.entryType==="trend-follow"||!t.entryType))),
-      momentum: stratStats(allExits.filter(t => !t.tradeType && t.entryType==="momentum")),
-      sniper:   stratStats(allExits.filter(t => t.tradeType==="sniper" || t.entryType==="sniper")),
-      swing:    stratStats(allExits.filter(t => t.tradeType==="swing")),
-      lt:       stratStats(allExits.filter(t => t.tradeType==="longterm")),
+      scalp:    stratStats(allExits.filter(t => !t.tradeType && (t.entryType==="snapback"||t.entryType==="trend-follow"||!t.entryType)), allEntries.filter(t => !t.tradeType && (t.entryType==="snapback"||t.entryType==="trend-follow"||!t.entryType))),
+      momentum: stratStats(allExits.filter(t => !t.tradeType && t.entryType==="momentum"), []),
+      sniper:   stratStats(allExits.filter(t => t.tradeType==="sniper" || t.entryType==="sniper"), []),
+      swing:    stratStats(allExits.filter(t => t.tradeType==="swing"), []),
+      lt:       stratStats(allExits.filter(t => t.tradeType==="longterm"), []),
     };
     const btcSnap = coinSnapshots["BTCUSDT"] || null;
     const btcPrice = btcSnap?.price ?? (_topGainers.find(t => t.symbol === "BTCUSDT")?.price ?? null);
@@ -5434,11 +5438,30 @@ ${[["Scalp","scalp","⚡"],["Momentum","momentum","🚀"],["Sniper","sniper","�
   const s = d.strats?.[key];
   if(!s) return `<div style="background:#151C2D;border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:14px;opacity:.5"><div style="font-size:11px;color:#8B8FA8;margin-bottom:8px">${icon} ${label}</div><div style="font-size:20px;font-weight:700;color:#8B8FA8">—</div><div style="font-size:10px;color:#8B8FA8;margin-top:4px">No trades yet</div></div>`;
   const wrColor = s.wrPct>=60?"#26D9A4":s.wrPct>=45?"#F7B500":"#F04D4D";
+  const confColor = s.avgConf!=null ? (s.avgConf>=75?"#26D9A4":s.avgConf>=60?"#F7B500":"#F04D4D") : "#8B8FA8";
   return `<div style="background:#151C2D;border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:14px">
     <div style="font-size:11px;color:#8B8FA8;margin-bottom:8px">${icon} ${label}</div>
-    <div style="font-size:22px;font-weight:700;color:${wrColor};letter-spacing:-.5px">${s.wrPct}%</div>
-    <div style="background:rgba(255,255,255,0.07);border-radius:99px;height:3px;margin:8px 0">
-      <div style="width:${s.wrPct}%;height:100%;background:${wrColor};border-radius:99px"></div>
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:6px">
+      <div>
+        <div style="font-size:9px;color:#8B8FA8;margin-bottom:2px">WIN RATE</div>
+        <div style="font-size:22px;font-weight:700;color:${wrColor};letter-spacing:-.5px">${s.wrPct}%</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:9px;color:#8B8FA8;margin-bottom:2px">${s.avgConf!=null?"AI CONF":"ENTRY"}</div>
+        <div style="font-size:22px;font-weight:700;color:${confColor};letter-spacing:-.5px">${s.avgConf!=null?s.avgConf+"%":"Rule"}</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:4px;margin-bottom:8px">
+      <div style="flex:1">
+        <div style="background:rgba(255,255,255,0.07);border-radius:99px;height:3px">
+          <div style="width:${s.wrPct}%;height:100%;background:${wrColor};border-radius:99px"></div>
+        </div>
+      </div>
+      <div style="flex:1">
+        <div style="background:rgba(255,255,255,0.07);border-radius:99px;height:3px">
+          <div style="width:${s.avgConf??0}%;height:100%;background:${confColor};border-radius:99px"></div>
+        </div>
+      </div>
     </div>
     <div style="font-size:10px;color:#8B8FA8">${s.wins}W / ${s.losses}L · ${s.total} trades</div>
     ${s.expectancy!=null?`<div style="font-size:10px;margin-top:4px;color:${s.expectancy>=0?"#26D9A4":"#F04D4D"}">Exp ${s.expectancy>=0?"+":""}${s.expectancy}%</div>`:""}
