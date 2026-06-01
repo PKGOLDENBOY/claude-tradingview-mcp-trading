@@ -4813,6 +4813,7 @@ if (process.argv.includes("--tax-summary")) {
       momentum: stratStats(allExits.filter(t => !t.tradeType && t.entryType==="momentum")),
       sniper:   stratStats(allExits.filter(t => t.tradeType==="sniper" || t.entryType==="sniper")),
       swing:    stratStats(allExits.filter(t => t.tradeType==="swing")),
+      lt:       stratStats(allExits.filter(t => t.tradeType==="longterm")),
     };
     const btcSnap = coinSnapshots["BTCUSDT"] || null;
     const btcPrice = btcSnap?.price ?? (_topGainers.find(t => t.symbol === "BTCUSDT")?.price ?? null);
@@ -5429,7 +5430,7 @@ ${d.topGainers&&d.topGainers.length>0?`
 <!-- Strategy breakdown -->
 <div class="sec"><div class="sec-title">Strategy Breakdown</div></div>
 <div style="margin:0 14px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
-${[["Scalp","scalp","⚡"],["Momentum","momentum","🚀"],["Sniper","sniper","🎯"],["Swing","swing","🌊"]].map(([label,key,icon])=>{
+${[["Scalp","scalp","⚡"],["Momentum","momentum","🚀"],["Sniper","sniper","🎯"],["Swing","swing","🌊"],["Long-Term","lt","💎"]].map(([label,key,icon])=>{
   const s = d.strats?.[key];
   if(!s) return `<div style="background:#151C2D;border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:14px;opacity:.5"><div style="font-size:11px;color:#8B8FA8;margin-bottom:8px">${icon} ${label}</div><div style="font-size:20px;font-weight:700;color:#8B8FA8">—</div><div style="font-size:10px;color:#8B8FA8;margin-top:4px">No trades yet</div></div>`;
   const wrColor = s.wrPct>=60?"#26D9A4":s.wrPct>=45?"#F7B500":"#F04D4D";
