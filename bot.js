@@ -6628,6 +6628,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     const vol     = calcVolume(candles);
     const obv     = calcOBV(candles);
     const atr     = calcATR(candles.slice(-20));
+    const bb      = calcBollingerBands(closes);
     const dblBtm  = detectDoubleBottom(candles);
 
     // ── Daily indicators (intermediate trend) ───────────────────────────────
