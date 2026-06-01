@@ -1618,6 +1618,7 @@ function runSafetyCheck(price, ema8, vwap, rsi3, rules, rsiThreshold = 30, vol =
 function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, stochRsi = null, bb = null, sr = null, macd = null) {
   const reasons = [];
   const pnlPct = ((price - position.entryPrice) / position.entryPrice) * 100;
+  const minsOpen = position.entryTime ? (Date.now() - new Date(position.entryTime).getTime()) / 60000 : 999;
 
   // Emergency stop — cap any loss at 8% regardless of other conditions
   if (pnlPct <= -8) {
@@ -1662,13 +1663,14 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     // 25% take profit — let momentum coins run; ATR trail and RSI/volume exits handle early reversals
     check(`Momentum TP hit — +25%`, pnlPct >= 25);
 
-    // RSI dropped below 50 — momentum has faded, exit
-    check(`RSI(3) below 50 — momentum faded`, rsi3 < 50);
+    // RSI dropped below 40 AND held 20+ min — momentum truly dead (RSI(3) is too noisy at 50)
+    check(`RSI(3) below 40 — momentum faded`, minsOpen > 20 && rsi3 < 40);
 
-    // Volume dried up (< 60% of avg) — pump is over
+    // Volume dried up — require 30+ min hold AND severe collapse AND price below VWAP
+    // One quiet candle right after entry is normal; need sustained evidence the pump is over
     if (candles) {
       const vol = calcVolume(candles);
-      check(`Volume dried up (< 60% of avg)`, vol.current < vol.avg * 0.6);
+      check(`Volume dried up (< 40% of avg, 30min+, below VWAP)`, minsOpen > 30 && vol.current < vol.avg * 0.4 && price < vwap);
     }
 
     // ATR trailing stop still applies
@@ -1725,25 +1727,26 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
       // Require >0.5% below VWAP — 0.2% was too tight, causing immediate exits from normal price noise
       const vwapBreachPct = (vwap - price) / vwap * 100;
       const macdBearish = !macd ? vwapBreachPct > 0.5 : macd.histogram < 0;
-      check(`Trend reversed — ${vwapBreachPct.toFixed(2)}% below VWAP${macd && macdBearish ? " with bearish MACD" : ""}`, price < vwap && macdBearish && vwapBreachPct > 1.0 && pnlPct < -0.5);
+      check(`Trend reversed — ${vwapBreachPct.toFixed(2)}% below VWAP${macd && macdBearish ? " with bearish MACD" : ""}`, price < vwap && macdBearish && vwapBreachPct > 1.5 && pnlPct < -0.5);
     }
     check(`ATR stop hit — $${effectiveStop.toFixed(2)} (${breakEvenActive ? "break-even floor" : `${(trailPct*100).toFixed(1)}% trail`})`, price < effectiveStop);
 
-    // Max hold time — give positions time to reach StochRSI target, only cut clear failures
+    // Max hold time — winners get 10h to run, losers cut at 6h, deeply underwater cut at 2h
     if (position.entryTime) {
       const hoursOpen = (Date.now() - new Date(position.entryTime).getTime()) / (1000 * 60 * 60);
-      if (hoursOpen > 6.0) {
-        check(`Max hold exceeded — open ${hoursOpen.toFixed(1)}h (limit 6h)`, true);
+      const maxHold = pnlPct > 0 ? 10.0 : 6.0; // let profitable positions breathe longer
+      if (hoursOpen > maxHold) {
+        check(`Max hold exceeded — open ${hoursOpen.toFixed(1)}h (limit ${maxHold}h)`, true);
       } else if (hoursOpen > 2.0 && pnlPct < -2.0) {
         check(`Stale trade — ${hoursOpen.toFixed(1)}h, down ${pnlPct.toFixed(2)}% (cutting loss)`, true);
       }
     }
   }
 
-  // Fee gate — don't take profit if gain doesn't cover round-trip fee + small buffer.
-  // BitGet: 0.10% × 2 + 0.10 buffer = 0.30% | BitMart: 0.25% × 2 + 0.10 = 0.60%
-  // Hard stops (stop-loss, ATR trail, max hold) always fire regardless
-  const FEE_MIN_PCT = parseFloat((getFeePct() * 2 * 100 + 0.10).toFixed(2));
+  // Fee gate — require meaningful profit before soft exits fire.
+  // Fees are 0.2% round-trip; add 0.5% buffer so every exit has real P&L after costs.
+  // Hard stops (stop-loss, ATR trail, max hold) always fire regardless.
+  const FEE_MIN_PCT = parseFloat((getFeePct() * 2 * 100 + 0.50).toFixed(2));
   if (pnlPct > 0 && pnlPct < FEE_MIN_PCT) {
     const HARD_STOPS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Failed bounce", "Momentum stop"];
     const hardOnly = reasons.filter(r => HARD_STOPS.some(kw => r.startsWith(kw)));
