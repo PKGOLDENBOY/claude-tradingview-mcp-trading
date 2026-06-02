@@ -4399,18 +4399,51 @@ async function run(tvSignal = null, symbol = null) {
       }
     }
 
-    // BTC trend filter — don't enter longs when BTC is crashing (>3% down today)
+    // BTC trend filter — two-layer block so a midnight reset can't unlock a week-long downtrend
     try {
       const btcRes = await fetch("https://api.bitget.com/api/v2/spot/market/tickers");
       const btcJson = await btcRes.json();
       const btcTicker = btcJson.data?.find(t => t.symbol === "BTCUSDT");
       if (btcTicker) {
         const btcChange = parseFloat(btcTicker.change24h) * 100;
-        console.log(`\n₿ BTC 24h: ${btcChange >= 0 ? "+" : ""}${btcChange.toFixed(2)}%`);
+        const btcPrice  = parseFloat(btcTicker.lastPr);
+
+        // Layer 2: 3-day rolling change + 4H EMA — survives the midnight candle reset
+        let btc3dayChange = 0, btc4hBearish = false;
+        try {
+          const [dRes, h4Res] = await Promise.all([
+            fetch("https://api.bitget.com/api/v2/spot/market/candles?symbol=BTCUSDT&granularity=1day&limit=5"),
+            fetch("https://api.bitget.com/api/v2/spot/market/candles?symbol=BTCUSDT&granularity=4h&limit=30"),
+          ]);
+          const dData  = (await dRes.json()).data  || [];
+          const h4Data = (await h4Res.json()).data || [];
+          if (dData.length >= 4) {
+            const open3d   = parseFloat(dData[dData.length - 4][1]); // open 3 days ago
+            btc3dayChange  = (btcPrice - open3d) / open3d * 100;
+          }
+          if (h4Data.length >= 21) {
+            const h4Closes = h4Data.map(c => parseFloat(c[4]));
+            const ema = (arr, p) => { const k=2/(p+1); return arr.reduce((e,c,i) => i===0?c : c*k+e*(1-k)); };
+            btc4hBearish   = ema(h4Closes.slice(-8), 8) < ema(h4Closes.slice(-21), 21);
+          }
+        } catch { /* non-critical */ }
+
+        console.log(`\n₿ BTC 24h: ${btcChange >= 0 ? "+" : ""}${btcChange.toFixed(2)}% | 3-day: ${btc3dayChange >= 0 ? "+" : ""}${btc3dayChange.toFixed(2)}% | 4H EMA: ${btc4hBearish ? "🔴 bear" : "✅ bull"}`);
+
+        // Layer 1: today's crash (same as before)
         if (btcChange <= -3) {
-          console.log(`🛑 BTC TREND BLOCK — BTC is down ${btcChange.toFixed(2)}% today. Skipping new long entries to avoid catching falling knives.`);
+          console.log(`🛑 BTC TREND BLOCK — BTC down ${btcChange.toFixed(2)}% today. Skipping new long entries.`);
           console.log("═══════════════════════════════════════════════════════════\n");
           pushSignal(symbol, "BLOCKED", `BTC down ${btcChange.toFixed(1)}% today — no longs in crash`);
+          return;
+        }
+        // Layer 2: sustained multi-day downtrend — persists through the midnight reset
+        // Fires when BTC is down >6% over 3 rolling days AND 4H structure is bearish.
+        // Prevents the bot from trading into a week-long dump just because a new daily candle opened.
+        if (btc3dayChange <= -6 && btc4hBearish) {
+          console.log(`🛑 MULTI-DAY BEAR BLOCK — BTC down ${btc3dayChange.toFixed(2)}% over 3 days + 4H bearish. Midnight reset doesn't clear a week-long downtrend.`);
+          console.log("═══════════════════════════════════════════════════════════\n");
+          pushSignal(symbol, "BLOCKED", `Multi-day bear — BTC ${btc3dayChange.toFixed(1)}% over 3 days + 4H bearish`);
           return;
         }
       }
