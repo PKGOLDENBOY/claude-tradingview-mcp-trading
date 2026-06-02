@@ -4208,17 +4208,17 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
 
-    // Same-day loss cooldown — block re-entry after 2+ stop-outs on the same coin today
+    // Same-day loss block — any losing exit on this coin today = no re-entry until tomorrow
     const todayDate = new Date().toISOString().slice(0, 10);
     const todayLossesOnSymbol = log.trades.filter(t =>
       t.type === "exit" && t.symbol === symbol && t.orderPlaced === true &&
-      t.pnlPct !== undefined && t.pnlPct < -1 &&
+      t.pnlPct !== undefined && t.pnlPct < 0 &&
       t.timestamp?.startsWith(todayDate)
     ).length;
-    if (todayLossesOnSymbol >= 2) {
-      console.log(`🚫 COOLDOWN — ${symbol} has ${todayLossesOnSymbol} stop-outs today. Skipping until tomorrow.`);
+    if (todayLossesOnSymbol >= 1) {
+      console.log(`🚫 LOSS BLOCK — ${symbol} already lost today. No re-entry until tomorrow.`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `${todayLossesOnSymbol} stop-outs today — skipping until tomorrow`);
+      pushSignal(symbol, "BLOCKED", `Lost on ${symbol} today — skipping until tomorrow`);
       return;
     }
 
