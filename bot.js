@@ -1684,7 +1684,8 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     // One quiet candle right after entry is normal; need sustained evidence the pump is over
     if (candles) {
       const vol = calcVolume(candles);
-      check(`Volume dried up (< 40% of avg, 30min+, below VWAP)`, minsOpen > 30 && vol.current < vol.avg * 0.4 && price < vwap);
+      // Only cut on volume dry-up if losing — green trades hold for the StochRSI target
+      check(`Volume dried up (< 40% of avg, 30min+, below VWAP, losing)`, minsOpen > 30 && vol.current < vol.avg * 0.4 && price < vwap && pnlPct < 0);
     }
 
     // ATR trailing stop still applies
