@@ -3575,6 +3575,11 @@ async function run(tvSignal = null, symbol = null) {
   const fvg          = detectFVG(candles);
   const zScore       = calcZScore(candles);
   const vpoc         = calcVolumeProfilePOC(candles);
+  // Ichimoku on the scalp timeframe — cloud = strongest S/R zone; TK cross = momentum signal
+  // Needs 78+ candles for Senkou B (52-period). Above cloud = bullish bias; kijun = key baseline S/R
+  const ichi         = candles.length >= 78 ? calcIchimoku(candles) : null;
+  // Ichimoku on 4H — higher-timeframe cloud tells you the macro trend direction
+  const ichi4h       = candles4h && candles4h.length >= 78 ? calcIchimoku(candles4h) : null;
 
   // Compact one-liner always shown — full dump only in verbose mode
   console.log(`  ${symbol} $${price.toFixed(4)} | RSI ${rsi3 !== null ? rsi3.toFixed(1) : "N/A"} | BB% ${(bb.pct*100).toFixed(0)}% | Vol ${(vol.current/vol.avg).toFixed(1)}x | ${bullTrend4h ? "4H↑" : "4H↓"} ${bullTrend1h ? "1H↑" : "1H↓"} | VWAP $${vwap ? vwap.toFixed(4) : "N/A"}`);
@@ -4554,6 +4559,20 @@ async function run(tvSignal = null, symbol = null) {
     if (zScore !== null && zScore < -2.0)                { entryScore += 2; advSignals.push(`📉 Z-score ${zScore.toFixed(2)}σ (statistically oversold)`); }
     else if (zScore !== null && zScore < -1.5)           { entryScore += 1; advSignals.push(`📉 Z-score ${zScore.toFixed(2)}σ`); }
     if (vpoc !== null && vpoc.distToPOC < 0.5)          { entryScore += 1; advSignals.push(`🎯 At Volume POC $${vpoc.poc.toFixed(4)}`); }
+    // Ichimoku Cloud signals — scalp TF + 4H confirmation
+    if (ichi) {
+      if (ichi.aboveCloud && ichi.bullishCross)          { entryScore += 3; advSignals.push("☁️  Above cloud + TK cross"); }
+      else if (ichi.aboveCloud)                          { entryScore += 2; advSignals.push("☁️  Above Ichimoku cloud"); }
+      else if (ichi.bullishCross)                        { entryScore += 1; advSignals.push("☁️  TK cross (tenkan > kijun)"); }
+      else if (ichi.belowCloud)                          { entryScore -= 1; advSignals.push("☁️  Below cloud — bearish bias"); }
+      // Kijun as dynamic support — price near kijun is a high-probability bounce zone
+      const distToKijun = Math.abs((price - ichi.kijun) / ichi.kijun * 100);
+      if (distToKijun < 0.5)                            { entryScore += 1; advSignals.push(`☁️  At Kijun support $${ichi.kijun.toFixed(4)}`); }
+    }
+    if (ichi4h) {
+      if (ichi4h.aboveCloud)                            { entryScore += 2; advSignals.push("☁️  4H above cloud (macro bull)"); }
+      else if (ichi4h.belowCloud)                       { entryScore -= 2; advSignals.push("☁️  4H below cloud (macro bear)"); }
+    }
     if (advSignals.length > 0) {
       console.log(`\n  ⚡ Advanced signals: ${advSignals.join(" | ")}`);
       console.log(`  Score: ${baseEntryScore} (base) → ${entryScore} (with advanced signals)`);
@@ -4605,8 +4624,10 @@ async function run(tvSignal = null, symbol = null) {
         const zScoreScore  = zScore !== null ? (zScore < -2.5 ? 15 : zScore < -2.0 ? 10 : zScore < -1.5 ? 5 : 0) : 0;
         const stScore      = supertrend?.bullish ? 5 : 0;
         const fvgScore     = fvg?.inFVG ? 5 : 0;
-        const syntheticConf = rsiScore + volScore + trendScore + macdScore + zScoreScore + stScore + fvgScore;
-        console.log(`\n🧠 SYNTHETIC CONFIDENCE — RSI ${rsiScore} + Vol ${volScore} + Trend ${trendScore} + MACD ${macdScore} + Z-score ${zScoreScore} + Supertrend ${stScore} + FVG ${fvgScore} = ${syntheticConf}/100 (need 65)`);
+        const ichiScore    = ichi ? (ichi.aboveCloud && ichi.bullishCross ? 10 : ichi.aboveCloud ? 7 : ichi.bullishCross ? 4 : ichi.belowCloud ? -5 : 0) : 0;
+        const ichi4hScore  = ichi4h ? (ichi4h.aboveCloud ? 5 : ichi4h.belowCloud ? -5 : 0) : 0;
+        const syntheticConf = rsiScore + volScore + trendScore + macdScore + zScoreScore + stScore + fvgScore + ichiScore + ichi4hScore;
+        console.log(`\n🧠 SYNTHETIC CONFIDENCE — RSI ${rsiScore} + Vol ${volScore} + Trend ${trendScore} + MACD ${macdScore} + Z-score ${zScoreScore} + ST ${stScore} + FVG ${fvgScore} + Ichi ${ichiScore + ichi4hScore} = ${syntheticConf}/100 (need 65)`);
         if (syntheticConf < 65) {
           console.log(`🚫 CONFIDENCE GATE — score ${syntheticConf}/100 too low. Blocking entry (Claude unavailable).`);
           allPass = false;
