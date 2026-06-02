@@ -1517,8 +1517,10 @@ function calcZScore(candles, period = 20) {
   return (candles[candles.length - 1].close - mean) / stdDev;
 }
 
-// Volume Profile POC — price with highest traded volume (magnetic level; returns 60-75% of the time)
-function calcVolumeProfilePOC(candles, bins = 40) {
+// Volume Profile — Full (POC + Value Area High/Low)
+// POC = Point of Control: price bin with highest traded volume — 60-75% magnet rate
+// VAH/VAL = Value Area: where 70% of volume traded. VAL = institutional support, VAH = resistance.
+function calcVolumeProfileFull(candles, bins = 40) {
   if (candles.length < 10) return null;
   const prices = candles.flatMap(c => [c.high, c.low]);
   const minP = Math.min(...prices), maxP = Math.max(...prices);
@@ -1529,10 +1531,123 @@ function calcVolumeProfilePOC(candles, bins = 40) {
     const bin = Math.min(Math.floor((c.close - minP) / binSize), bins - 1);
     volByBin[bin] += c.volume;
   }
-  const pocBin = volByBin.indexOf(Math.max(...volByBin));
-  const poc = minP + pocBin * binSize + binSize / 2;
-  const currentPrice = candles[candles.length - 1].close;
-  return { poc, distToPOC: Math.abs((currentPrice - poc) / poc * 100) };
+  const totalVol  = volByBin.reduce((a, b) => a + b, 0);
+  const pocBin    = volByBin.indexOf(Math.max(...volByBin));
+  const poc       = minP + pocBin * binSize + binSize / 2;
+  let vahBin = pocBin, valBin = pocBin, areaVol = volByBin[pocBin];
+  const target = totalVol * 0.70;
+  while (areaVol < target) {
+    const upVol   = vahBin + 1 < bins ? volByBin[vahBin + 1] : 0;
+    const downVol = valBin - 1 >= 0  ? volByBin[valBin - 1] : 0;
+    if (upVol >= downVol && vahBin + 1 < bins) { vahBin++; areaVol += upVol; }
+    else if (valBin - 1 >= 0)                   { valBin--; areaVol += downVol; }
+    else break;
+  }
+  const vah = minP + vahBin * binSize + binSize / 2;
+  const val = minP + valBin * binSize + binSize / 2;
+  const p   = candles[candles.length - 1].close;
+  return {
+    poc, vah, val,
+    distToPOC:   Math.abs((p - poc) / poc * 100),
+    atPOC:       Math.abs((p - poc) / poc * 100) < 0.5,
+    aboveVAH:    p > vah,
+    belowVAL:    p < val,
+    inValueArea: p >= val && p <= vah,
+    atVAH:       Math.abs((p - vah) / vah * 100) < 0.5,
+    atVAL:       Math.abs((p - val) / val * 100) < 0.5,
+  };
+}
+// Keep alias so any existing callers still work
+const calcVolumeProfilePOC = calcVolumeProfileFull;
+
+// ─── Bearish RSI Divergence ───────────────────────────────────────────────────
+// Price making higher highs, RSI making lower highs = momentum exhausting.
+// Entry filter: don't buy into a rally where momentum is fading (60-65% reversal prob).
+function detectBearishDivergence(candles) {
+  if (candles.length < 15) return false;
+  const recent = candles.slice(-20);
+  const highs  = recent.map(c => c.high);
+  const closes = recent.map(c => c.close);
+  const peaks  = [];
+  for (let i = 1; i < recent.length - 1; i++) {
+    if (highs[i] >= highs[i - 1] && highs[i] >= highs[i + 1]) peaks.push(i);
+  }
+  if (peaks.length < 2) return false;
+  const p1 = peaks[peaks.length - 2], p2 = peaks[peaks.length - 1];
+  if (highs[p2] <= highs[p1] * 1.003) return false; // need clear higher high in price
+  const rsi1 = calcRSI(closes.slice(0, p1 + 1), 3);
+  const rsi2 = calcRSI(closes.slice(0, p2 + 1), 3);
+  return rsi1 !== null && rsi2 !== null && rsi2 < rsi1 * 0.97; // RSI clearly lower = divergence
+}
+
+// ─── Order Block (Smart Money Concept / ICT) ─────────────────────────────────
+// Large bearish institutional candle → followed by a significant rally → becomes a bullish OB.
+// When price returns to this zone, institutions reload positions → 65-70% bounce probability.
+function detectOrderBlock(candles, lookback = 25) {
+  const n = candles.length;
+  if (n < lookback + 3) return null;
+  const window  = candles.slice(-lookback);
+  const avgBody = window.reduce((s, c) => s + Math.abs(c.close - c.open), 0) / window.length;
+  const price   = candles[n - 1].close;
+  for (let i = window.length - 4; i >= 2; i--) {
+    const c    = window[i];
+    const body = c.open - c.close; // bearish: open > close, so body is positive
+    if (body > avgBody * 1.5 && c.close < c.open) {
+      const obHigh = c.open, obLow = c.close;
+      const subsequentHigh = Math.max(...window.slice(i + 1).map(c => c.high));
+      if (subsequentHigh > obHigh * 1.01) { // confirmed by at least 1% move above OB
+        const inOB    = price >= obLow * 0.99 && price <= obHigh * 1.005;
+        const distToOB = price < obLow ? (obLow - price) / obLow * 100 :
+                         price > obHigh ? (price - obHigh) / obHigh * 100 : 0;
+        return { obHigh, obLow, inOB, distToOB, age: window.length - 1 - i };
+      }
+    }
+  }
+  return null;
+}
+
+// ─── Market Structure (BOS / ChoCH) ─────────────────────────────────────────
+// Tracks Higher Highs / Higher Lows for trend identification.
+// Break of Structure (BOS) = new HH = trend continuation signal (+2 score).
+// Change of Character (ChoCH) = lower high after uptrend = early reversal warning (-1).
+function analyzeMarketStructure(candles, lookback = 30) {
+  if (candles.length < lookback) return null;
+  const window     = candles.slice(-lookback);
+  const swingHighs = [], swingLows = [];
+  for (let i = 1; i < window.length - 1; i++) {
+    if (window[i].high > window[i - 1].high && window[i].high > window[i + 1].high)
+      swingHighs.push({ idx: i, price: window[i].high });
+    if (window[i].low < window[i - 1].low && window[i].low < window[i + 1].low)
+      swingLows.push({ idx: i, price: window[i].low });
+  }
+  if (swingHighs.length < 2 || swingLows.length < 2) return { trend: "unclear" };
+  const lastHigh = swingHighs[swingHighs.length - 1];
+  const prevHigh = swingHighs[swingHighs.length - 2];
+  const lastLow  = swingLows[swingLows.length - 1];
+  const prevLow  = swingLows[swingLows.length - 2];
+  const price    = candles[candles.length - 1].close;
+  const higherHigh = lastHigh.price > prevHigh.price * 1.002;
+  const higherLow  = lastLow.price  > prevLow.price  * 1.002;
+  const lowerHigh  = lastHigh.price < prevHigh.price * 0.998;
+  const lowerLow   = lastLow.price  < prevLow.price  * 0.998;
+  const bos   = higherHigh && price > lastHigh.price * 0.999; // bullish BOS = price breaking above last swing high
+  const choch = lowerHigh && higherLow; // was rising, now LH = potential trend flip
+  const trend = (higherHigh && higherLow) ? "uptrend" :
+                (lowerHigh  && lowerLow)  ? "downtrend" : "ranging";
+  return { trend, bos, choch, higherHigh, higherLow, lowerHigh, lowerLow };
+}
+
+// ─── ICT Kill Zones ───────────────────────────────────────────────────────────
+// Institutions operate on schedules. 70%+ of major crypto moves initiate in 3 windows.
+// London Open (07-09 UTC), NY Open (13-15 UTC), NY Close (20-21 UTC).
+// Dead zone (03-07 UTC, 21+ UTC): thin liquidity, high fakeout rate → reduce position.
+function getKillZone() {
+  const t = new Date().getUTCHours() + new Date().getUTCMinutes() / 60;
+  if (t >= 7  && t <= 9)  return { zone: "London Open", score:  2 };
+  if (t >= 13 && t <= 15) return { zone: "NY Open",     score:  2 };
+  if (t >= 20 && t <= 21) return { zone: "NY Close",    score:  1 };
+  if (t >= 0  && t <= 3)  return { zone: "Asia",        score:  0 };
+  return { zone: "Dead Zone", score: -1 }; // 03-07 and 21-24 UTC — institutional desks closed
 }
 
 // ─── Safety Check ───────────────────────────────────────────────────────────
@@ -3598,7 +3713,11 @@ async function run(tvSignal = null, symbol = null) {
   const supertrend   = calcSupertrend(candles);
   const fvg          = detectFVG(candles);
   const zScore       = calcZScore(candles);
-  const vpoc         = calcVolumeProfilePOC(candles);
+  const vpoc         = calcVolumeProfileFull(candles);  // POC + VAH/VAL
+  const bearDiv      = detectBearishDivergence(candles);
+  const orderBlock   = detectOrderBlock(candles);
+  const mktStructure = analyzeMarketStructure(candles);
+  const killZone     = getKillZone();
   // Ichimoku on the scalp timeframe — cloud = strongest S/R zone; TK cross = momentum signal
   // Needs 78+ candles for Senkou B (52-period). Above cloud = bullish bias; kijun = key baseline S/R
   const ichi         = candles.length >= 78 ? calcIchimoku(candles) : null;
@@ -4575,26 +4694,61 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
 
-    // ── Advanced signal augmentation (ICT, funding rate, macro sentiment, patterns) ────
+    // ── Advanced signal augmentation (ICT, SMC, Wyckoff, funding rate, macro sentiment) ────
     const liquiditySweep = detectLiquiditySweep(candles);
     let entryScore = baseEntryScore;
     const advSignals = [];
+
+    // ── Patterns ──
     if (liquiditySweep)                                  { entryScore += 3; advSignals.push("🎯 Liquidity sweep"); }
     if (doubleBottom?.detected && doubleBottom.strongConfirmation) { entryScore += 3; advSignals.push("📐 Double bottom + RSI div"); }
     else if (doubleBottom?.detected)                     { entryScore += 2; advSignals.push("📐 Double bottom"); }
-    if (fundingRate !== null && fundingRate < -0.0003)   { entryScore += 2; advSignals.push(`💰 Funding ${(fundingRate*100).toFixed(4)}%`); }
+    if (bearDiv)                                         { entryScore -= 3; advSignals.push("⚠️  Bearish RSI divergence — momentum exhausting"); }
+
+    // ── Funding + OBV ──
+    if (fundingRate !== null && fundingRate < -0.0003)   { entryScore += 2; advSignals.push(`💰 Funding ${(fundingRate*100).toFixed(4)}% (shorts overloaded)`); }
     if (obv.rising)                                      { entryScore += 1; advSignals.push("📈 OBV rising"); }
+
+    // ── BTC macro sentiment ──
     if (btcDailyRsi !== null && btcDailyRsi < 35)        { entryScore += 1; advSignals.push(`😱 BTC fear RSI ${btcDailyRsi.toFixed(1)}`); }
     if (btcDailyRsi !== null && btcDailyRsi > 70)        { entryScore -= 1; advSignals.push(`🤑 BTC greed RSI ${btcDailyRsi.toFixed(1)}`); }
-    // Research-backed signals: Supertrend (58-62% WR), FVG (70% fill rate), Z-score (±2σ mean reversion), Volume POC (60-75% magnet)
+    // Relative strength vs BTC: coin RSI > BTC RSI = outperforming = alpha signal
+    if (btcDailyRsi !== null && rsi3 > btcDailyRsi + 10) { entryScore += 1; advSignals.push(`💪 Relative strength (RSI ${rsi3.toFixed(0)} vs BTC ${btcDailyRsi.toFixed(0)})`); }
+
+    // ── Research-backed indicators ──
+    // Supertrend 58-62% WR | FVG fills 70% | Z-score ±2σ mean reversion
     if (supertrend?.bullish)                             { entryScore += 2; advSignals.push("📈 Supertrend bullish"); }
     if (!supertrend?.bullish && supertrend !== null)     { entryScore -= 1; advSignals.push("📉 Supertrend bearish"); }
     if (fvg?.inFVG)                                      { entryScore += 3; advSignals.push(`📊 In bullish FVG ($${fvg.fvgLow.toFixed(4)}–$${fvg.fvgHigh.toFixed(4)})`); }
     else if (fvg?.bullish && fvg.age <= 4)               { entryScore += 1; advSignals.push("📊 Recent FVG above"); }
     if (zScore !== null && zScore < -2.0)                { entryScore += 2; advSignals.push(`📉 Z-score ${zScore.toFixed(2)}σ (statistically oversold)`); }
     else if (zScore !== null && zScore < -1.5)           { entryScore += 1; advSignals.push(`📉 Z-score ${zScore.toFixed(2)}σ`); }
-    if (vpoc !== null && vpoc.distToPOC < 0.5)          { entryScore += 1; advSignals.push(`🎯 At Volume POC $${vpoc.poc.toFixed(4)}`); }
-    // Ichimoku Cloud signals — scalp TF + 4H confirmation
+
+    // ── Volume Profile (POC + Value Area) ──
+    if (vpoc !== null) {
+      if (vpoc.atVAL)   { entryScore += 2; advSignals.push(`📊 At Value Area Low $${vpoc.val.toFixed(4)} — institutional support`); }
+      else if (vpoc.belowVAL) { entryScore += 1; advSignals.push(`📊 Below Value Area — deep discount zone`); }
+      if (vpoc.atPOC)   { entryScore += 1; advSignals.push(`🎯 At Volume POC $${vpoc.poc.toFixed(4)}`); }
+      if (vpoc.atVAH)   { entryScore -= 1; advSignals.push(`📊 At Value Area High $${vpoc.vah.toFixed(4)} — resistance zone`); }
+    }
+
+    // ── Order Block (SMC) — institutional buying zone retest ──
+    if (orderBlock?.inOB)                                { entryScore += 3; advSignals.push(`🏦 At Order Block ($${orderBlock.obLow.toFixed(4)}–$${orderBlock.obHigh.toFixed(4)})`); }
+    else if (orderBlock && orderBlock.distToOB < 0.5)   { entryScore += 1; advSignals.push(`🏦 Near Order Block ($${orderBlock.distToOB.toFixed(2)}% away)`); }
+
+    // ── Market Structure (BOS / ChoCH) ──
+    if (mktStructure) {
+      if (mktStructure.trend === "uptrend")              { entryScore += 2; advSignals.push(`📊 Market structure: uptrend (HH+HL)`); }
+      if (mktStructure.trend === "downtrend")            { entryScore -= 2; advSignals.push(`📊 Market structure: downtrend (LH+LL)`); }
+      if (mktStructure.bos)                              { entryScore += 2; advSignals.push(`🔥 Break of Structure (BOS) — trend continuation`); }
+      if (mktStructure.choch)                            { entryScore -= 1; advSignals.push(`⚠️  Change of Character (ChoCH) — trend shift warning`); }
+    }
+
+    // ── ICT Kill Zone ──
+    if (killZone.score > 0)                              { entryScore += killZone.score; advSignals.push(`⏰ ${killZone.zone} kill zone (+${killZone.score})`); }
+    if (killZone.score < 0)                              { entryScore += killZone.score; advSignals.push(`💤 ${killZone.zone} — low institutional liquidity (-1)`); }
+
+    // ── Ichimoku Cloud signals — scalp TF + 4H confirmation ──
     if (ichi) {
       if (ichi.aboveCloud && ichi.bullishCross)          { entryScore += 3; advSignals.push("☁️  Above cloud + TK cross"); }
       else if (ichi.aboveCloud)                          { entryScore += 2; advSignals.push("☁️  Above Ichimoku cloud"); }
@@ -4608,9 +4762,9 @@ async function run(tvSignal = null, symbol = null) {
       if (ichi4h.aboveCloud)                            { entryScore += 2; advSignals.push("☁️  4H above cloud (macro bull)"); }
       else if (ichi4h.belowCloud)                       { entryScore -= 2; advSignals.push("☁️  4H below cloud (macro bear)"); }
     }
-    // Fear & Greed Index — sentiment-based entry quality modifier
-    // Extreme Fear (<20): 90-day median +48.5% return → high conviction long signal
-    // Extreme Greed (>80): preceded major reversals (Nov 2021 ATH, Dec 2024) → entry penalty
+
+    // ── Fear & Greed + Capitulation ──
+    // Extreme Fear (<20): 90-day median +48.5% return | Extreme Greed (>80): high crash risk
     if (fearGreed) {
       const fg = fearGreed.value;
       if (fg <= 20)       { entryScore += 3; advSignals.push(`😱 Extreme Fear F&G=${fg} — contrarian buy (90d median +48%)`); }
@@ -4667,7 +4821,7 @@ async function run(tvSignal = null, symbol = null) {
       // Synthetic confidence gate — prevents weak entries slipping through without AI validation.
       // Scores RSI depth, volume surge, trend alignment, MACD. Requires ≥65/100 to proceed.
       if (rulesPass) {
-        const rsiScore      = rsi3 < 15 ? 35 : rsi3 < 20 ? 25 : rsi3 < 25 ? 15 : rsi3 < 30 ? 5 : 0;
+        const rsiScore     = rsi3 < 15 ? 35 : rsi3 < 20 ? 25 : rsi3 < 25 ? 15 : rsi3 < 30 ? 5 : 0;
         const volRatioNow  = vol ? vol.current / vol.avg : 0;
         const volScore     = volRatioNow >= 2.0 ? 25 : volRatioNow >= 1.5 ? 15 : (vol?.aboveAvg ? 5 : 0);
         const trendScore   = (bullTrendConfirmed ? 15 : 0) + (bullTrend1h ? 10 : 0);
@@ -4677,8 +4831,13 @@ async function run(tvSignal = null, symbol = null) {
         const fvgScore     = fvg?.inFVG ? 5 : 0;
         const ichiScore    = ichi ? (ichi.aboveCloud && ichi.bullishCross ? 10 : ichi.aboveCloud ? 7 : ichi.bullishCross ? 4 : ichi.belowCloud ? -5 : 0) : 0;
         const ichi4hScore  = ichi4h ? (ichi4h.aboveCloud ? 5 : ichi4h.belowCloud ? -5 : 0) : 0;
-        const syntheticConf = rsiScore + volScore + trendScore + macdScore + zScoreScore + stScore + fvgScore + ichiScore + ichi4hScore;
-        console.log(`\n🧠 SYNTHETIC CONFIDENCE — RSI ${rsiScore} + Vol ${volScore} + Trend ${trendScore} + MACD ${macdScore} + Z-score ${zScoreScore} + ST ${stScore} + FVG ${fvgScore} + Ichi ${ichiScore + ichi4hScore} = ${syntheticConf}/100 (need 65)`);
+        const obScore      = orderBlock?.inOB ? 8 : 0;
+        const msScore      = mktStructure ? ((mktStructure.trend === "uptrend" ? 8 : mktStructure.trend === "downtrend" ? -8 : 0) + (mktStructure.bos ? 5 : 0) + (mktStructure.choch ? -3 : 0)) : 0;
+        const kzScore      = (killZone.score || 0) * 3; // London/NY = +6, Dead zone = -3
+        const vaScore      = vpoc ? (vpoc.atVAL ? 5 : vpoc.belowVAL ? 3 : vpoc.atVAH ? -3 : 0) : 0;
+        const bearDivScore = bearDiv ? -10 : 0;
+        const syntheticConf = rsiScore + volScore + trendScore + macdScore + zScoreScore + stScore + fvgScore + ichiScore + ichi4hScore + obScore + msScore + kzScore + vaScore + bearDivScore;
+        console.log(`\n🧠 SYNTHETIC CONFIDENCE — RSI ${rsiScore} + Vol ${volScore} + Trend ${trendScore} + MACD ${macdScore} + Z ${zScoreScore} + ST ${stScore} + FVG ${fvgScore} + Ichi ${ichiScore + ichi4hScore} + OB ${obScore} + MS ${msScore} + KZ ${kzScore} + VA ${vaScore} + BearDiv ${bearDivScore} = ${syntheticConf} (need 65)`);
         if (syntheticConf < 65) {
           console.log(`🚫 CONFIDENCE GATE — score ${syntheticConf}/100 too low. Blocking entry (Claude unavailable).`);
           allPass = false;
