@@ -4476,6 +4476,23 @@ async function run(tvSignal = null, symbol = null) {
     const claudeStatus = claudeAvailable();
     if (claudeStatus !== "ok") {
       console.log(`\n💰 Claude skipped — ${claudeStatus === "daily-cap" ? `daily cap (${_claudeCallsToday}/${CLAUDE_DAILY_CAP})` : `global cooldown (${Math.round((CLAUDE_GLOBAL_COOLDOWN_MS - (Date.now() - _lastClaudeCallMs)) / 60000)}min left)`}`);
+      // Synthetic confidence gate — prevents weak entries slipping through without AI validation.
+      // Scores RSI depth, volume surge, trend alignment, MACD. Requires ≥65/100 to proceed.
+      if (rulesPass) {
+        const rsiScore   = rsi3 < 15 ? 35 : rsi3 < 20 ? 25 : rsi3 < 25 ? 15 : rsi3 < 30 ? 5 : 0;
+        const volRatioNow = vol ? vol.current / vol.avg : 0;
+        const volScore   = volRatioNow >= 2.0 ? 25 : volRatioNow >= 1.5 ? 15 : (vol?.aboveAvg ? 5 : 0);
+        const trendScore = (bullTrendConfirmed ? 15 : 0) + (bullTrend1h ? 10 : 0);
+        const macdScore  = macd.bullish ? 10 : 0;
+        const syntheticConf = rsiScore + volScore + trendScore + macdScore;
+        console.log(`\n🧠 SYNTHETIC CONFIDENCE — RSI ${rsiScore} + Vol ${volScore} + Trend ${trendScore} + MACD ${macdScore} = ${syntheticConf}/100 (need 65)`);
+        if (syntheticConf < 65) {
+          console.log(`🚫 CONFIDENCE GATE — score ${syntheticConf}/100 too low. Blocking entry (Claude unavailable).`);
+          allPass = false;
+        } else {
+          console.log(`✅ CONFIDENCE GATE — score ${syntheticConf}/100 clears threshold. Proceeding without Claude.`);
+        }
+      }
     } else if (!highConviction) {
       console.log(`\n⏩ Claude skipped — setup not high-conviction enough (RSI ${rsi3.toFixed(1)}${vol ? `, vol ${vol.aboveAvg ? "✅" : "⚠️"}` : ""})`);
     }
