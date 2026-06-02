@@ -1673,8 +1673,9 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
     // 25% take profit — let momentum coins run; ATR trail and RSI/volume exits handle early reversals
     check(`Momentum TP hit — +25%`, pnlPct >= 25);
 
-    // RSI dropped below 40 AND held 20+ min — momentum truly dead (RSI(3) is too noisy at 50)
-    check(`RSI(3) below 40 — momentum faded`, minsOpen > 20 && rsi3 < 40);
+    // RSI dropped below 35 AND held 30+ min — momentum truly dead. 20 min was too short; coins
+    // frequently dip below 40 briefly then recover within the same 30-min candle.
+    check(`RSI(3) below 35 — momentum faded`, minsOpen > 30 && rsi3 < 35);
 
     // Volume dried up — require 30+ min hold AND severe collapse AND price below VWAP
     // One quiet candle right after entry is normal; need sustained evidence the pump is over
@@ -1729,15 +1730,15 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
       }
       check(snapLabel, rsi3 > snapRsiExit && pnlPct >= SOFT_MIN && !trendIntact);
     } else {
-      // Failed bounce — entered expecting snap-back but price kept falling with bearish momentum
-      if (pnlPct < -1.5 && macd && !macd.bullish) {
+      // Failed bounce — 20 min minimum so normal entry volatility doesn't trigger this.
+      // The first 20 min of a trade often dips before recovering — cutting at minute 5 is noise, not signal.
+      if (minsOpen > 20 && pnlPct < -1.5 && macd && !macd.bullish) {
         check(`Failed bounce — down ${pnlPct.toFixed(2)}% with bearish MACD (cut loss early)`, true);
       }
-      // Exit when VWAP is meaningfully breached AND MACD confirms bearish momentum
-      // Require >0.5% below VWAP — 0.2% was too tight, causing immediate exits from normal price noise
+      // Trend reversed — 20 min minimum for the same reason. VWAP can breach briefly on entry noise.
       const vwapBreachPct = (vwap - price) / vwap * 100;
       const macdBearish = !macd ? vwapBreachPct > 0.5 : macd.histogram < 0;
-      check(`Trend reversed — ${vwapBreachPct.toFixed(2)}% below VWAP${macd && macdBearish ? " with bearish MACD" : ""}`, price < vwap && macdBearish && vwapBreachPct > 1.5 && pnlPct < -0.5);
+      check(`Trend reversed — ${vwapBreachPct.toFixed(2)}% below VWAP${macd && macdBearish ? " with bearish MACD" : ""}`, minsOpen > 20 && price < vwap && macdBearish && vwapBreachPct > 1.5 && pnlPct < -0.5);
     }
     check(`ATR stop hit — $${effectiveStop.toFixed(2)} (${breakEvenActive ? "break-even floor" : `${(trailPct*100).toFixed(1)}% trail`})`, price < effectiveStop);
 
@@ -3632,7 +3633,10 @@ async function run(tvSignal = null, symbol = null) {
     let claudeAnalysis = null;
 
     // Hard stops are non-negotiable — Claude cannot override these
-    const HARD_EXIT_KEYWORDS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Failed bounce", "Momentum stop", "Trend reversed"];
+    // Hard exits: Claude cannot override these — capital protection is non-negotiable.
+    // "Failed bounce" and "Trend reversed" are intentionally excluded: they now have 20-min
+    // minimums and Claude should be able to override if the bigger picture is bullish.
+    const HARD_EXIT_KEYWORDS = ["Stop-loss", "ATR stop", "Emergency", "Max hold", "Stale trade", "Momentum stop"];
     const hasHardExit = reasons.some(r => HARD_EXIT_KEYWORDS.some(kw => r.startsWith(kw)));
 
     // Pre-compute for gate checks
