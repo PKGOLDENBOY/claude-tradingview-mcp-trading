@@ -1360,6 +1360,27 @@ function calcIchimoku(candles, tenkanP = 9, kijunP = 26, senkouBP = 52) {
   };
 }
 
+// ─── Fear & Greed Index ──────────────────────────────────────────────────────
+// Free API from alternative.me — composite sentiment gauge (0=Extreme Fear, 100=Extreme Greed)
+// Components: Volatility 25%, Momentum/Volume 25%, Social 15%, BTC Dominance 10%, Google Trends 10%, Surveys 15%
+// Edge: F&G <20 → 90-day median +48.5% return; F&G >80 → reduces position size (Nov 2021 = 84 → 65% crash)
+const _fearGreedCache = { value: null, ts: 0 };
+async function fetchFearGreed() {
+  if (_fearGreedCache.value && Date.now() - _fearGreedCache.ts < 60 * 60 * 1000) return _fearGreedCache.value;
+  try {
+    const res = await fetch("https://api.alternative.me/fng/?limit=1");
+    if (!res.ok) return null;
+    const data = await res.json();
+    const d = data?.data?.[0];
+    if (!d) return null;
+    const value = parseInt(d.value);
+    const label = d.value_classification;
+    _fearGreedCache.value = { value, label };
+    _fearGreedCache.ts = Date.now();
+    return _fearGreedCache.value;
+  } catch { return null; }
+}
+
 // ─── Market Regime Detection ─────────────────────────────────────────────────
 // Detects whether the broader market is trending, ranging, or in high volatility.
 // Different regimes favour different strategies — routing trades accordingly
@@ -3496,10 +3517,13 @@ async function run(tvSignal = null, symbol = null) {
   const adaptive = getAdaptiveMode(log.trades);
   console.log(`\n🧠 Strategy mode: ${adaptive.label}`);
 
-  // Market regime + portfolio heat — logged once per scan cycle
-  const regime = await detectMarketRegime().catch(() => ({ regime: "UNKNOWN", btcTrend: "neutral", volatility: "normal" }));
-  const heat = calcPortfolioHeat(log, _livePortfolioValue);
-  console.log(`🌍 Regime: ${regime.regime} (BTC:${regime.btcTrend} Vol:${regime.volatility}) | Portfolio heat: ${heat.heatPct}%/${heat.isOverheated ? "🔴 OVERHEATED" : "8% max"}`);
+  // Market regime + portfolio heat + Fear & Greed sentiment
+  const regime   = await detectMarketRegime().catch(() => ({ regime: "UNKNOWN", btcTrend: "neutral", volatility: "normal" }));
+  const heat     = calcPortfolioHeat(log, _livePortfolioValue);
+  const fearGreed = await fetchFearGreed().catch(() => null);
+  const fgLabel   = fearGreed ? `F&G:${fearGreed.value}(${fearGreed.label})` : "F&G:n/a";
+  const fgEmoji   = fearGreed ? (fearGreed.value <= 20 ? "😱" : fearGreed.value <= 40 ? "😟" : fearGreed.value <= 60 ? "😐" : fearGreed.value <= 80 ? "😏" : "🤑") : "";
+  console.log(`🌍 Regime: ${regime.regime} (BTC:${regime.btcTrend} Vol:${regime.volatility}) | ${fgEmoji} ${fgLabel} | Portfolio heat: ${heat.heatPct}%/${heat.isOverheated ? "🔴 OVERHEATED" : "8% max"}`);
 
   // Block new entries when portfolio is overheated — skip candle fetch entirely to save API calls
   // Existing open positions for this symbol are still allowed through for exit management
@@ -3653,11 +3677,22 @@ async function run(tvSignal = null, symbol = null) {
   const atrRatio  = avgATRpct > 0 ? curATRpct / avgATRpct : 1;
   const atrScale  = atrRatio > 2.0 ? 0.50 : atrRatio > 1.5 ? 0.75 : 1.0;
   if (atrScale < 1.0) console.log(`⚡ ATR volatility scale: ${(atrScale*100).toFixed(0)}% position size (ATR ${atrRatio.toFixed(1)}x above avg — inverse sizing)`);
+  // Greed scale — Extreme Greed (>80) means market is euphoric; smaller bets, tighter stops
+  // Research: F&G >80 preceded major reversals (Nov 2021 ATH → 65% crash, Dec 2024 peak)
+  const fgValue  = fearGreed?.value ?? 50;
+  const greedScale = fgValue > 80 ? 0.50 : fgValue > 70 ? 0.75 : 1.0;
+  if (greedScale < 1.0) console.log(`🤑 Greed scale: ${(greedScale*100).toFixed(0)}% position size (F&G=${fgValue} — market euphoric, risk reduced)`);
+  // Overconfidence guard — after 3+ consecutive wins, humans (and bots) get cocky and overtrade
+  // Psychology: λ=2 loss aversion means wins create false confidence → reduce size to stay disciplined
+  const recentResults = (log.trades || []).filter(t => t.type === "exit" && t.orderPlaced && t.pnlPct !== undefined).slice(-5);
+  const consecutiveWins = recentResults.length >= 3 && recentResults.slice(-3).every(t => t.pnlPct > 0) ? 3 : 0;
+  const overconfidenceScale = consecutiveWins >= 3 ? 0.80 : 1.0;
+  if (overconfidenceScale < 1.0) console.log(`🎯 Overconfidence guard: ${(overconfidenceScale*100).toFixed(0)}% size after ${consecutiveWins} consecutive wins — staying disciplined`);
   // Profit-lock scale — protect daily gains by reducing new bets as the day goes well
   const todayPnlPct = log.dayStartValue > 0 ? (currentPortfolio - log.dayStartValue) / log.dayStartValue * 100 : 0;
   const profitLockScale = todayPnlPct > 5 ? 0.40 : todayPnlPct > 3 ? 0.60 : todayPnlPct > 1.5 ? 0.80 : 1.0;
   if (profitLockScale < 1.0) console.log(`🔒 Profit lock: ${(profitLockScale*100).toFixed(0)}% position size (up ${todayPnlPct.toFixed(1)}% today — protecting gains)`);
-  const rawSize = currentPortfolio * sizePct * adaptive.sizeMultiplier * drawdownScale * regimeScale * bearScale * atrScale * profitLockScale;
+  const rawSize = currentPortfolio * sizePct * adaptive.sizeMultiplier * drawdownScale * regimeScale * bearScale * atrScale * greedScale * overconfidenceScale * profitLockScale;
   const tradeSize = CONFIG.maxTradeSizeUSD ? Math.min(rawSize, CONFIG.maxTradeSizeUSD) : rawSize;
   if (drawdownScale < 1.0) console.log(`\n⚠️  Drawdown scaling: ${(drawdownScale * 100).toFixed(0)}% position size (down ${drawdown.drawdownPct.toFixed(1)}% today)`);
   if (regimeScale < 1.0)   console.log(`⚠️  Volatile regime: 50% position size`);
@@ -4572,6 +4607,22 @@ async function run(tvSignal = null, symbol = null) {
     if (ichi4h) {
       if (ichi4h.aboveCloud)                            { entryScore += 2; advSignals.push("☁️  4H above cloud (macro bull)"); }
       else if (ichi4h.belowCloud)                       { entryScore -= 2; advSignals.push("☁️  4H below cloud (macro bear)"); }
+    }
+    // Fear & Greed Index — sentiment-based entry quality modifier
+    // Extreme Fear (<20): 90-day median +48.5% return → high conviction long signal
+    // Extreme Greed (>80): preceded major reversals (Nov 2021 ATH, Dec 2024) → entry penalty
+    if (fearGreed) {
+      const fg = fearGreed.value;
+      if (fg <= 20)       { entryScore += 3; advSignals.push(`😱 Extreme Fear F&G=${fg} — contrarian buy (90d median +48%)`); }
+      else if (fg <= 35)  { entryScore += 2; advSignals.push(`😟 Fear F&G=${fg} — market pessimistic, good entry zone`); }
+      else if (fg >= 80)  { entryScore -= 3; advSignals.push(`🤑 Extreme Greed F&G=${fg} — euphoria, high reversal risk`); }
+      else if (fg >= 65)  { entryScore -= 1; advSignals.push(`😏 Greed F&G=${fg} — cautious`); }
+      // Capitulation setup: Extreme Fear + RSI extreme + volume spike = high-probability bottom
+      const volRatioNow = vol ? vol.current / vol.avg : 0;
+      if (fg <= 20 && rsi3 < 20 && volRatioNow >= 2.0) {
+        entryScore += 3;
+        advSignals.push(`🎰 CAPITULATION SIGNAL — F&G=${fg} + RSI=${rsi3.toFixed(1)} + Vol=${volRatioNow.toFixed(1)}x (panic bottom setup)`);
+      }
     }
     if (advSignals.length > 0) {
       console.log(`\n  ⚡ Advanced signals: ${advSignals.join(" | ")}`);
