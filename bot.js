@@ -4059,10 +4059,10 @@ async function run(tvSignal = null, symbol = null) {
     // Max 5 concurrent scalp positions
     const openPositions = Object.entries(log.positions || {}).filter(([,p]) => p && p.open);
     const openCount = openPositions.length;
-    if (openCount >= 5) {
+    if (openCount >= 10) {
       const held = openPositions.map(([s]) => s).join(", ");
-      console.log(`🚫 MAX POSITIONS — already holding ${held}. Max 5 positions at a time.`);
-      pushSignal(symbol, "BLOCKED", `Max positions (5/5) reached`);
+      console.log(`🚫 MAX POSITIONS — already holding ${held}. Max 10 positions at a time.`);
+      pushSignal(symbol, "BLOCKED", `Max positions (10/10) reached`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
