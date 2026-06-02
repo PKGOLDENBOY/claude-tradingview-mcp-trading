@@ -12,7 +12,7 @@
 import "dotenv/config";
 import Anthropic from "@anthropic-ai/sdk";
 import http from "http";
-import { readFileSync, writeFileSync, existsSync, appendFileSync, renameSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, appendFileSync, renameSync, mkdirSync } from "fs";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import WebSocket from "ws";
@@ -178,8 +178,7 @@ function checkOnboarding() {
 
   // Cloud environments (Railway, etc.) inject vars directly — no .env file needed
   if (missing.length === 0) {
-    const csvPath = new URL("trades.csv", import.meta.url).pathname;
-    console.log(`\n📄 Trade log: ${csvPath}`);
+    console.log(`\n📄 Trade log: ${CSV_FILE}`);
     console.log(
       `   Open in Google Sheets or Excel any time — or tell Claude to move it:\n` +
         `   "Move my trades.csv to ~/Desktop" or "Move it to my Documents folder"\n`,
@@ -216,8 +215,7 @@ function checkOnboarding() {
   }
 
   // Always print the CSV location so users know where to find their trade log
-  const csvPath = new URL("trades.csv", import.meta.url).pathname;
-  console.log(`\n📄 Trade log: ${csvPath}`);
+  console.log(`\n📄 Trade log: ${CSV_FILE}`);
   console.log(
     `   Open in Google Sheets or Excel any time — or tell Claude to move it:\n` +
       `   "Move my trades.csv to ~/Desktop" or "Move it to my Documents folder"\n`,
@@ -2979,10 +2977,25 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
 
 // ─── Tax CSV Logging ─────────────────────────────────────────────────────────
 
-// Use /data/trades.csv when Railway volume is mounted, else local fallback
-const CSV_FILE = process.env.STATE_FILE
-  ? process.env.STATE_FILE.replace(/[^/\\]+$/, "trades.csv")
-  : (existsSync("/data") ? "/data/trades.csv" : "trades.csv");
+// Resolve persistent CSV path. Priority:
+//   1. STATE_FILE env var (legacy) → swap filename to trades.csv
+//   2. /data/trades.csv — create /data if it doesn't exist yet (Railway volume or ephemeral)
+//   3. trades.csv relative (local dev)
+function resolveCSVPath() {
+  if (process.env.STATE_FILE) {
+    return process.env.STATE_FILE.replace(/[^/\\]+$/, "trades.csv");
+  }
+  try {
+    // mkdirSync is a no-op if /data already exists; creates it if not.
+    // On Railway with a mounted volume /data is persistent; without one it's ephemeral but at
+    // least consistent across the process lifetime (won't silently write to /app/).
+    mkdirSync("/data", { recursive: true });
+    return "/data/trades.csv";
+  } catch {
+    return "trades.csv";
+  }
+}
+const CSV_FILE = resolveCSVPath();
 
 // Always ensure trades.csv exists with headers — open it in Excel/Sheets any time
 function initCsv() {
