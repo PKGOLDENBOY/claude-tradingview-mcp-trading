@@ -860,7 +860,7 @@ async function refreshTopMovers() {
     // Cache top 20 gainers for dashboard + momentum path
     _topGainers = allCoins
       .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPr), change24h: parseFloat(t.change24h) * 100, vol: parseFloat(t.usdtVolume) }))
-      .filter(t => t.change24h > 0)
+      .filter(t => t.change24h > 0 && t.vol >= 1_000_000)
       .sort((a, b) => b.change24h - a.change24h)
       .slice(0, 20);
 
@@ -3537,7 +3537,7 @@ async function run(tvSignal = null, symbol = null) {
   const kellySizePct = kellyPositionPct(log, symbol, CONFIG.maxTradeSizePct || 0.25);
   const sizePct = kellySizePct;
   // Scale down as daily losses accumulate + volatile regime + bear snap-backs
-  const bearSnapBack  = regime.btcTrend === "bear" && rsi3 !== null && rsi3 < 35 && (stochRsi?.oversold === true || macd.bullish === true);
+  const bearSnapBack  = regime.btcTrend === "bear" && rsi3 !== null && rsi3 < 25 && (stochRsi?.oversold === true || macd.bullish === true);
   const regimeScale   = regime.volatility === "high" ? 0.50 : 1.0;
   const drawdownScale = drawdown.drawdownPct > 7 ? 0.30 : drawdown.drawdownPct > 5 ? 0.50 : drawdown.drawdownPct > 3 ? 0.75 : 1.0;
   const bearScale     = bearSnapBack ? 0.40 : 1.0; // bear snap-back = 40% size only
@@ -3873,7 +3873,7 @@ async function run(tvSignal = null, symbol = null) {
       const rsiOk    = rsi3 >= 45 && rsi3 <= rsiCeil;
       const stochOk  = !stochRsi || stochRsi.k < 92;       // slightly looser for fast movers
       const priceOk  = price > ema8;                        // price above fast EMA
-      const volOk    = volRatio >= 1.2;                     // lowered from 1.5 — early moves build volume gradually
+      const volOk    = volRatio >= 2.0;                     // real momentum needs real volume
       const notTooHot = gainerInfo.change24h <= 75;         // raised from 40% — still skip the 100%+ blowoffs
 
       const trendOk  = bullTrend1h;                             // 1H uptrend — momentum trades in downtrends fail
@@ -3998,6 +3998,15 @@ async function run(tvSignal = null, symbol = null) {
     if (PERMANENT_EXCLUDE.includes(symbol)) {
       console.log(`🚫 EXCLUDED — ${symbol} has a proven negative edge in live trading. Skipping permanently.`);
       pushSignal(symbol, "BLOCKED", "Permanently excluded — negative edge");;
+      console.log("═══════════════════════════════════════════════════════════\n");
+      return;
+    }
+
+    // Minimum 24h USDT volume — block illiquid/junk coins with no real market
+    const coinInfo = _topGainers.find(t => t.symbol === symbol);
+    if (coinInfo && coinInfo.vol < 1_000_000) {
+      console.log(`🚫 LIQUIDITY BLOCK — ${symbol} only $${Math.round(coinInfo.vol / 1000)}K 24h volume (need $1M+). Too illiquid.`);
+      pushSignal(symbol, "BLOCKED", `Only $${Math.round(coinInfo.vol/1000)}K 24h vol — too illiquid`);
       console.log("═══════════════════════════════════════════════════════════\n");
       return;
     }
