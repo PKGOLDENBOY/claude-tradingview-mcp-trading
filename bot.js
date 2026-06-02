@@ -167,6 +167,9 @@ const coinSnapshots = {};
 // Top 10 gainers cached from last refreshTopMovers() call
 let _topGainers = [];
 
+// Coins that failed "Not enough data" — excluded from scan pool for the process lifetime
+const _insufficientHistory = new Set();
+
 // Live portfolio value (USDT + open coin positions) — updated by buildStatusData on every dashboard poll
 let _livePortfolioValue = null;
 
@@ -850,6 +853,7 @@ async function refreshTopMovers() {
     const allCoins = (json.data || []).filter(t =>
       t.symbol.endsWith("USDT") &&
       !NEVER_TRADE.has(t.symbol) &&
+      !_insufficientHistory.has(t.symbol) &&
       !/UP|DOWN|BEAR|BULL|USDC|TUSD|BUSD|DAI|USD1|FDUSD|RLUSD|PAXG|XAUT/.test(t.symbol) &&
       parseFloat(t.lastPr) >= 0.001 &&
       parseFloat(t.usdtVolume) > 1_000_000   // $1M+ volume — broad but liquid
@@ -913,7 +917,8 @@ async function refreshTopMovers() {
     const bigMovers = _topGainers.filter(t => t.change24h >= 1.5).map(t => t.symbol);
     if (bigMovers.length > 0) console.log(`\n🚀 Big movers today (3%+): ${bigMovers.join(", ")}`);
 
-    const combined = [...new Set([...qualified, ...heldSymbols, ...WATCHLIST, ...newListings, ...bigMovers])];
+    const combined = [...new Set([...qualified, ...heldSymbols, ...WATCHLIST, ...newListings, ...bigMovers])]
+      .filter(s => !_insufficientHistory.has(s));
 
     if (combined.length === 0) {
       console.log(`\n   ⚠️  No movers qualified — keeping previous symbol list\n`);
@@ -3514,7 +3519,9 @@ async function run(tvSignal = null, symbol = null) {
   }
 
   if (vwap === null || rsi3 === null) {
-    console.log("\n⚠️  Not enough data to calculate indicators. Exiting.");
+    console.log("\n⚠️  Not enough data to calculate indicators. Removing from scan pool.");
+    _insufficientHistory.add(symbol);
+    CONFIG.symbols = CONFIG.symbols.filter(s => s !== symbol);
     return;
   }
 
