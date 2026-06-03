@@ -4460,7 +4460,8 @@ async function run(tvSignal = null, symbol = null) {
         console.log(`\n₿ BTC 24h: ${btcChange >= 0 ? "+" : ""}${btcChange.toFixed(2)}% | 3-day: ${btc3dayChange >= 0 ? "+" : ""}${btc3dayChange.toFixed(2)}% | 4H EMA: ${btc4hBearish ? "🔴 bear" : "✅ bull"}`);
 
         // Layer 1: today's crash (same as before)
-        if (btcChange <= -3) {
+        // Exception: bearSnapBack — extreme oversold bounces are specifically for crash days
+        if (btcChange <= -3 && !bearSnapBack) {
           console.log(`🛑 BTC TREND BLOCK — BTC down ${btcChange.toFixed(2)}% today. Skipping new long entries.`);
           console.log("═══════════════════════════════════════════════════════════\n");
           pushSignal(symbol, "BLOCKED", `BTC down ${btcChange.toFixed(1)}% today — no longs in crash`);
@@ -4657,22 +4658,25 @@ async function run(tvSignal = null, symbol = null) {
     console.log(`  ✅ Reversal confirmed — ${reversalReasons.join(" + ")} (${reversalSignals}/5 signals)`);
 
     // 1H RSI(14) trend gate — hourly trend must be at least neutral for any dip-buy entry
-    if (rsi14_1h !== null && rsi14_1h < 50 && !vwapBounceMode) {
+    // bearSnapBack exempt: in a crash 1H RSI will be 25-35 by design — that's the setup
+    if (rsi14_1h !== null && rsi14_1h < 50 && !vwapBounceMode && !bearSnapBack) {
       console.log(`🚫 1H TREND BLOCK — 1H RSI(14)=${rsi14_1h.toFixed(1)} < 50. Hourly trend is bearish — buying a dip in a downtrend. Wait for 1H RSI to recover above 50.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       pushSignal(symbol, "BLOCKED", `1H RSI(14) ${rsi14_1h.toFixed(1)} < 50 — hourly downtrend, no entry`);
       return;
     }
-    if (rsi14_1h !== null) console.log(`  ✅ 1H RSI(14) ${rsi14_1h.toFixed(1)} ≥ 50 — hourly trend ok`);
+    if (rsi14_1h !== null) console.log(`  ✅ 1H RSI(14) ${rsi14_1h.toFixed(1)} ≥ 50 — hourly trend ok${bearSnapBack ? " (bypassed — bear snap-back)" : ""}`);
 
     // 4H trend hard gate — medium-term trend must be bullish to scalp bounces
-    if (!bullTrend4h && !vwapBounceMode) {
+    // bearSnapBack exempt: regime.btcTrend==="bear" implies 4H is bearish — this gate would always fire
+    if (!bullTrend4h && !vwapBounceMode && !bearSnapBack) {
       console.log(`🚫 4H TREND BLOCK — 4H EMA(8) < EMA(21). Medium-term downtrend. Scalp bounces in a 4H downtrend fail. Wait for 4H to turn bullish.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       pushSignal(symbol, "BLOCKED", `4H downtrend — EMA8 < EMA21, no scalp entries`);
       return;
     }
     if (bullTrend4h) console.log(`  ✅ 4H trend bullish — EMA(8) > EMA(21)`);
+    else if (bearSnapBack) console.log(`  ⚡ 4H trend bearish — bypassed (bear snap-back)`);
 
     // MACD momentum gate — histogram must be improving; snap-back entries (below VWAP + RSI<25) need full bullish
     const macdPrev = calcMACD(closes.slice(0, -1));
