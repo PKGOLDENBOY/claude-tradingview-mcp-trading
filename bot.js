@@ -4665,7 +4665,8 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
     const reversalReasons = [priceBouncing && "live bounce", isClosingUp && "closing up", isHigherHigh && "higher high", isHigherLow && "higher low", hasLongWick && "long wick"].filter(Boolean);
-    console.log(`  ✅ Reversal confirmed — ${reversalReasons.join(" + ")} (${reversalSignals}/5 signals)`);
+    const reversalBypassed = (vwapBounceMode || bearSnapBack) && reversalSignals < 3;
+    console.log(`  ${reversalBypassed ? "⚡" : "✅"} Reversal ${reversalBypassed ? `bypassed (${vwapBounceMode ? "VWAP bounce" : "bear snap-back"}) — ${reversalSignals}/5 signals` : `confirmed — ${reversalReasons.join(" + ")} (${reversalSignals}/5 signals)`}`);
 
     // 1H RSI(14) trend gate — hourly trend must be at least neutral for any dip-buy entry
     // bearSnapBack exempt: in a crash 1H RSI will be 25-35 by design — that's the setup
@@ -4709,13 +4710,13 @@ async function run(tvSignal = null, symbol = null) {
     const curVol  = candles[candles.length - 1].volume;
     const prevVol = candles[candles.length - 2].volume;
     const volAccel = curVol / prevVol;
-    if (!vwapBounceMode && volAccel < 1.0) {
+    if (!vwapBounceMode && !bearSnapBack && volAccel < 1.0) {
       console.log(`🚫 VOLUME BLOCK — volume declining (${volAccel.toFixed(2)}× prev candle). Need flat or rising volume to confirm buying pressure.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       pushSignal(symbol, "BLOCKED", `Volume declining ${volAccel.toFixed(2)}× — need ≥1.0× for buying pressure`);
       return;
     }
-    console.log(`  ${volAccel >= 1.0 ? "✅" : "⚠️ "} Volume ${volAccel >= 1.5 ? "surging" : volAccel >= 1.0 ? "holding/rising" : "light"} (${volAccel.toFixed(2)}× prev candle)${vwapBounceMode && volAccel < 1.0 ? " — bypassed (VWAP bounce)" : ""}`);
+    console.log(`  ${volAccel >= 1.0 ? "✅" : "⚠️ "} Volume ${volAccel >= 1.5 ? "surging" : volAccel >= 1.0 ? "holding/rising" : "light"} (${volAccel.toFixed(2)}× prev candle)${(vwapBounceMode || bearSnapBack) && volAccel < 1.0 ? " — bypassed (VWAP bounce / snap-back)" : ""}`);
 
     // Sustained volume gate — 3-bar average must be ≥ 100% of 20-bar avg.
     // Prevents entering on a single-bar spike that collapses next bar and triggers "Volume dried up" exit.
@@ -4893,7 +4894,7 @@ async function run(tvSignal = null, symbol = null) {
     // StochRSI entry gate — must be genuinely oversold to enter (K < 40)
     // Entering at K=50 leaves only 38 points to the exit target (K=88); entering at K=20 leaves 68.
     // Less room to bounce = lower win rate. Require oversold zone for reliable exits.
-    if (rulesPass && stochRsi && stochRsi.k > 40 && !vwapBounceMode) {
+    if (rulesPass && stochRsi && stochRsi.k > 40 && !vwapBounceMode && !bearSnapBack) {
       console.log(`🚫 STOCHRSI BLOCK — K=${stochRsi.k.toFixed(1)} not deeply oversold (need < 40). Bounce has less room to develop.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       pushSignal(symbol, "BLOCKED", `StochRSI K=${stochRsi.k.toFixed(1)} — need <40 for reliable bounce`);
