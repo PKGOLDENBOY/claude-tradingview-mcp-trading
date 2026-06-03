@@ -82,39 +82,153 @@ function emailExit({ symbol, price, entryPrice, pnlPct, pnlUSD, reasons, orderId
 
 async function emailDailySummary(log) {
   const today = new Date().toISOString().slice(0, 10);
-  const todayTrades = (log.trades || []).filter(t => t.timestamp?.startsWith(today) && t.orderPlaced);
-  const exits = todayTrades.filter(t => t.type === "exit" && t.pnlPct !== undefined);
-  const entries = todayTrades.filter(t => t.type === "entry");
-  const wins = exits.filter(t => t.pnlPct > 0).length;
-  const losses = exits.filter(t => t.pnlPct <= 0).length;
-  const totalPnlPct = exits.reduce((s, t) => s + t.pnlPct, 0);
-  const totalPnlUSD = exits.reduce((s, t) => s + (t.pnlUSD || 0), 0);
+  const allExits  = (log.trades || []).filter(t => t.type === "exit" && t.pnlPct !== undefined && t.orderPlaced);
+  const todayExits   = allExits.filter(t => t.timestamp?.startsWith(today));
+  const todayEntries = (log.trades || []).filter(t => t.type === "entry" && t.timestamp?.startsWith(today) && t.orderPlaced);
+
+  // Today stats
+  const wins   = todayExits.filter(t => t.pnlPct > 0).length;
+  const losses = todayExits.filter(t => t.pnlPct <= 0).length;
+  const todayPnlPct = todayExits.reduce((s, t) => s + t.pnlPct, 0);
+  const todayPnlUSD = todayExits.reduce((s, t) => s + (t.pnlUSD || 0), 0);
+
+  // All-time stats
+  const allWins   = allExits.filter(t => t.pnlPct > 0).length;
+  const allLosses = allExits.filter(t => t.pnlPct <= 0).length;
+  const allWR     = allExits.length > 0 ? (allWins / allExits.length * 100).toFixed(1) : "—";
+  const allPnlUSD = allExits.reduce((s, t) => s + (t.pnlUSD || 0), 0);
+
+  // Portfolio
   const portfolioVal = log.portfolioValue || 0;
 
-  const rows = exits.map(t => {
-    const won = t.pnlPct >= 0;
+  // Fetch live prices + open positions
+  let livePriceMap = {};
+  try {
+    const pr = await fetch("https://api.bitget.com/api/v2/spot/market/tickers");
+    const pd = await pr.json();
+    (pd.data || []).forEach(t => { livePriceMap[t.symbol] = parseFloat(t.lastPr); });
+  } catch { /* non-critical */ }
+
+  // BTC regime
+  let regimeLabel = "Unknown";
+  try {
+    const r = await detectMarketRegime();
+    regimeLabel = `${r.regime} (BTC: ${r.btcTrend}, vol: ${r.volatility})`;
+  } catch { /* non-critical */ }
+
+  // Fear & Greed
+  let fgLabel = "";
+  try {
+    const fg = await fetchFearGreed();
+    if (fg) fgLabel = `${fg.value} — ${fg.label}`;
+  } catch { /* non-critical */ }
+
+  // Open positions (scalp + swing)
+  const openPositions = [];
+  for (const [sym, pos] of Object.entries(log.positions || {})) {
+    if (!pos.open) continue;
+    const livePrice = livePriceMap[sym] || 0;
+    const qty = parseFloat(pos.quantity) || 0;
+    const entry = parseFloat(pos.entryPrice) || 0;
+    const unrealPct = entry > 0 ? (livePrice - entry) / entry * 100 : 0;
+    const unrealUSD = qty * (livePrice - entry);
+    const slPrice   = entry * (1 - (pos.slPct || 0.04));
+    const tpPrice   = entry * (1 + (pos.tpPct || 0.08));
+    openPositions.push({ sym, entry, livePrice, qty, unrealPct, unrealUSD, slPrice, tpPrice, type: pos.bearSnapBack ? "snap-back" : pos.entryType || "scalp" });
+  }
+  for (const [sym, pos] of Object.entries(log.swingPositions || {})) {
+    if (!pos.open) continue;
+    const livePrice = livePriceMap[sym] || 0;
+    const qty = parseFloat(pos.quantity) || 0;
+    const entry = parseFloat(pos.entryPrice) || 0;
+    const unrealPct = entry > 0 ? (livePrice - entry) / entry * 100 : 0;
+    const unrealUSD = qty * (livePrice - entry);
+    openPositions.push({ sym, entry, livePrice, qty, unrealPct, unrealUSD, slPrice: entry * 0.95, tpPrice: entry * 1.15, type: "swing" });
+  }
+
+  const openPnlUSD  = openPositions.reduce((s, p) => s + p.unrealUSD, 0);
+  const openValue   = openPositions.reduce((s, p) => s + p.qty * p.livePrice, 0);
+  const usdtFree    = portfolioVal - openValue;
+
+  // Today's trade rows
+  const exitRows = todayExits.map(t => {
+    const won = t.pnlPct > 0;
+    const dur = t.entryTime ? Math.round((new Date(t.timestamp) - new Date(t.entryTime)) / 60000) : "—";
     return `<tr>
-      <td>${t.symbol?.replace("USDT","")}</td>
-      <td style="color:${won?"#16a34a":"#dc2626"}">${t.pnlPct >= 0?"+":""}${t.pnlPct.toFixed(2)}%</td>
-      <td style="color:${won?"#16a34a":"#dc2626"}">${t.pnlUSD >= 0?"+":""}$${(t.pnlUSD||0).toFixed(2)}</td>
+      <td><b>${t.symbol?.replace("USDT","")}</b></td>
+      <td>${t.strategy || t.timeframe || "scalp"}</td>
+      <td style="color:${won?"#16a34a":"#dc2626"};font-weight:bold">${t.pnlPct>=0?"+":""}${t.pnlPct.toFixed(2)}%</td>
+      <td style="color:${won?"#16a34a":"#dc2626"};font-weight:bold">${(t.pnlUSD||0)>=0?"+":""}$${(t.pnlUSD||0).toFixed(2)}</td>
+      <td style="color:#666;font-size:12px">${typeof dur==="number"?dur+"min":dur}</td>
+      <td style="color:#666;font-size:12px">${(t.exitReasons||[]).join(", ").slice(0,40)}</td>
     </tr>`;
   }).join("");
 
+  // Open position rows
+  const openRows = openPositions.map(p => {
+    const col = p.unrealPct >= 0 ? "#16a34a" : "#dc2626";
+    return `<tr>
+      <td><b>${p.sym.replace("USDT","")}</b></td>
+      <td>${p.type}</td>
+      <td>$${p.entry.toFixed(4)}</td>
+      <td>$${p.livePrice.toFixed(4)}</td>
+      <td style="color:${col};font-weight:bold">${p.unrealPct>=0?"+":""}${p.unrealPct.toFixed(2)}%</td>
+      <td style="color:${col};font-weight:bold">${p.unrealUSD>=0?"+":""}$${p.unrealUSD.toFixed(2)}</td>
+      <td style="color:#666;font-size:12px">SL $${p.slPrice.toFixed(4)} / TP $${p.tpPrice.toFixed(4)}</td>
+    </tr>`;
+  }).join("");
+
+  const subjectPnl = todayPnlUSD !== 0 ? `${todayPnlUSD>=0?"+":""}$${todayPnlUSD.toFixed(2)}` : "no closes";
   await sendEmail(
-    `📊 Daily Summary — ${wins}W/${losses}L | ${totalPnlPct >= 0 ? "+" : ""}${totalPnlPct.toFixed(2)}% | $${portfolioVal.toFixed(2)} portfolio`,
-    `<h2>📊 Daily Trading Summary — ${today}</h2>
-     <table style="font-size:16px;line-height:1.8">
-       <tr><td><b>Entries</b></td><td>${entries.length}</td></tr>
-       <tr><td><b>Exits</b></td><td>${exits.length} (${wins}W / ${losses}L)</td></tr>
-       <tr><td><b>Total P&amp;L</b></td><td style="color:${totalPnlPct>=0?"#16a34a":"#dc2626"}"><b>${totalPnlPct>=0?"+":""}${totalPnlPct.toFixed(2)}%</b></td></tr>
-       <tr><td><b>P&amp;L (USD)</b></td><td style="color:${totalPnlUSD>=0?"#16a34a":"#dc2626"}"><b>${totalPnlUSD>=0?"+":""}$${totalPnlUSD.toFixed(2)}</b></td></tr>
-       <tr><td><b>Portfolio</b></td><td>$${portfolioVal.toFixed(2)}</td></tr>
-     </table>
-     ${exits.length > 0 ? `<h3>Trade breakdown</h3>
-     <table border="1" cellpadding="6" style="border-collapse:collapse;font-size:14px">
-       <tr><th>Coin</th><th>P&amp;L %</th><th>P&amp;L $</th></tr>
-       ${rows}
-     </table>` : ""}`
+    `📊 Daily Report — ${subjectPnl} | ${wins}W/${losses}L today | $${portfolioVal.toFixed(2)} portfolio`,
+    `<div style="font-family:sans-serif;max-width:640px;margin:auto">
+    <h2 style="margin-bottom:4px">📊 Daily Bot Report</h2>
+    <p style="color:#666;margin-top:0">${new Date().toUTCString()}</p>
+
+    <h3 style="border-bottom:1px solid #eee;padding-bottom:4px">💼 Portfolio</h3>
+    <table style="font-size:15px;line-height:2;width:100%">
+      <tr><td><b>Total value</b></td><td><b>$${portfolioVal.toFixed(2)}</b></td></tr>
+      <tr><td>USDT free</td><td>$${usdtFree.toFixed(2)}</td></tr>
+      <tr><td>In positions</td><td>$${openValue.toFixed(2)} (${openPositions.length} open)</td></tr>
+      <tr><td>Unrealised P&amp;L</td><td style="color:${openPnlUSD>=0?"#16a34a":"#dc2626"};font-weight:bold">${openPnlUSD>=0?"+":""}$${openPnlUSD.toFixed(2)}</td></tr>
+    </table>
+
+    ${openPositions.length > 0 ? `
+    <h3 style="border-bottom:1px solid #eee;padding-bottom:4px">📂 Open Positions</h3>
+    <table border="1" cellpadding="6" style="border-collapse:collapse;font-size:13px;width:100%">
+      <tr style="background:#f5f5f5"><th>Coin</th><th>Type</th><th>Entry</th><th>Now</th><th>Unreal %</th><th>Unreal $</th><th>Levels</th></tr>
+      ${openRows}
+    </table>` : `<p style="color:#888">No open positions.</p>`}
+
+    <h3 style="border-bottom:1px solid #eee;padding-bottom:4px">📅 Today — ${today}</h3>
+    <table style="font-size:15px;line-height:2;width:100%">
+      <tr><td>Entries</td><td>${todayEntries.length}</td></tr>
+      <tr><td>Exits</td><td>${todayExits.length} (${wins}W / ${losses}L)</td></tr>
+      <tr><td>Today P&amp;L %</td><td style="color:${todayPnlPct>=0?"#16a34a":"#dc2626"};font-weight:bold">${todayPnlPct>=0?"+":""}${todayPnlPct.toFixed(2)}%</td></tr>
+      <tr><td>Today P&amp;L $</td><td style="color:${todayPnlUSD>=0?"#16a34a":"#dc2626"};font-weight:bold">${todayPnlUSD>=0?"+":""}$${todayPnlUSD.toFixed(2)}</td></tr>
+    </table>
+    ${todayExits.length > 0 ? `
+    <table border="1" cellpadding="6" style="border-collapse:collapse;font-size:13px;width:100%;margin-top:8px">
+      <tr style="background:#f5f5f5"><th>Coin</th><th>Type</th><th>P&amp;L %</th><th>P&amp;L $</th><th>Duration</th><th>Exit reason</th></tr>
+      ${exitRows}
+    </table>` : ""}
+
+    <h3 style="border-bottom:1px solid #eee;padding-bottom:4px">📈 All-Time Stats</h3>
+    <table style="font-size:15px;line-height:2;width:100%">
+      <tr><td>Total trades closed</td><td>${allExits.length} (${allWins}W / ${allLosses}L)</td></tr>
+      <tr><td>Live win rate</td><td><b>${allWR}%</b></td></tr>
+      <tr><td>All-time realised P&amp;L</td><td style="color:${allPnlUSD>=0?"#16a34a":"#dc2626"};font-weight:bold">${allPnlUSD>=0?"+":""}$${allPnlUSD.toFixed(2)}</td></tr>
+    </table>
+
+    <h3 style="border-bottom:1px solid #eee;padding-bottom:4px">🌍 Market</h3>
+    <table style="font-size:15px;line-height:2;width:100%">
+      <tr><td>BTC regime</td><td><b>${regimeLabel}</b></td></tr>
+      <tr><td>Fear &amp; Greed</td><td>${fgLabel || "—"}</td></tr>
+      <tr><td>Mode</td><td>${CONFIG.paperTrading ? "📋 Paper trading" : "🔴 Live trading"}</td></tr>
+    </table>
+
+    <p style="color:#aaa;font-size:12px;margin-top:24px">Claude Trading Bot · Railway · joshualiversage01@gmail.com</p>
+    </div>`
   );
 }
 
@@ -8080,10 +8194,10 @@ async function monitorSniperPositions() {
     } catch { /* silent */ }
   }, 15 * 60 * 1000);
 
-  // Daily summary email — fires at midnight UTC
+  // Daily summary email — fires at 8am UTC (good morning report)
   setInterval(async () => {
     const now = new Date();
-    if (now.getUTCHours() === 0 && now.getUTCMinutes() < 5) {
+    if (now.getUTCHours() === 8 && now.getUTCMinutes() < 5) {
       const log = loadLog();
       await emailDailySummary(log);
     }
