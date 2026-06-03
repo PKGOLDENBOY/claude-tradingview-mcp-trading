@@ -4468,8 +4468,9 @@ async function run(tvSignal = null, symbol = null) {
         }
         // Layer 2: sustained multi-day downtrend — persists through the midnight reset
         // Fires when BTC is down >6% over 3 rolling days AND 4H structure is bearish.
-        // Prevents the bot from trading into a week-long dump just because a new daily candle opened.
-        if (btc3dayChange <= -6 && btc4hBearish) {
+        // Exception: bearSnapBack (RSI<25 + StochRSI/MACD confirmation) — panic-bounce trades
+        // are specifically designed for crash conditions and use 40% size + 2% SL.
+        if (btc3dayChange <= -6 && btc4hBearish && !bearSnapBack) {
           console.log(`🛑 MULTI-DAY BEAR BLOCK — BTC down ${btc3dayChange.toFixed(2)}% over 3 days + 4H bearish. Midnight reset doesn't clear a week-long downtrend.`);
           console.log("═══════════════════════════════════════════════════════════\n");
           pushSignal(symbol, "BLOCKED", `Multi-day bear — BTC ${btc3dayChange.toFixed(1)}% over 3 days + 4H bearish`);
