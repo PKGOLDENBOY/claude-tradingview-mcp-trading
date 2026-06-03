@@ -3440,8 +3440,9 @@ function startPriceStream(symbols) {
 // Only handles stop-loss and emergency stops (no indicators needed — just price).
 // Fires BEFORE the 60-second indicator-based exit check, cutting losses faster.
 async function checkLiveHardStops() {
-  const log = loadLog();
-  const openPositions = Object.entries(log.positions || {}).filter(([, p]) => p?.open);
+  // Snapshot open positions once — but reload fresh log inside each iteration so that
+  // if two stops fire in the same 5s cycle, the second save doesn't revert the first deletion.
+  const openPositions = Object.entries(loadLog().positions || {}).filter(([, p]) => p?.open);
   if (openPositions.length === 0) return;
 
   for (const [sym, pos] of openPositions) {
@@ -3472,6 +3473,8 @@ async function checkLiveHardStops() {
       } else {
         console.log(`📋 PAPER STOP SELL`);
       }
+      // Reload fresh so concurrent stops don't clobber each other's saves
+      const log = loadLog();
       delete log.positions[sym];
       log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
       log.trades.push({
@@ -5013,6 +5016,13 @@ async function run(tvSignal = null, symbol = null) {
         console.log(`   RSI(3):${rsi3.toFixed(1)}  VWAP:${vwap.toFixed(4)}  EMA8:${ema8.toFixed(4)}`);
         console.log(`   Entry type: ${entryType}  — all conditions met, buying now`);
         console.log(`🔔🔔🔔\n`);
+      }
+
+      // NaN guard — if any scaling factor produced NaN, abort before touching exchange
+      if (!finalTradeSize || isNaN(finalTradeSize) || finalTradeSize < 1) {
+        console.log(`\n🚫 SIZE GUARD — finalTradeSize=${finalTradeSize} is invalid (NaN/zero/too small). Skipping entry.`);
+        console.log("═══════════════════════════════════════════════════════════\n");
+        return;
       }
 
       // Slippage guard — re-fetch price right before execution.
