@@ -3799,7 +3799,12 @@ async function run(tvSignal = null, symbol = null) {
   // Greed scale — Extreme Greed (>80) means market is euphoric; smaller bets, tighter stops
   // Research: F&G >80 preceded major reversals (Nov 2021 ATH → 65% crash, Dec 2024 peak)
   const fgValue  = fearGreed?.value ?? 50;
-  const greedScale = fgValue > 80 ? 0.50 : fgValue > 70 ? 0.75 : 1.0;
+  // Greed scale: reduce size in euphoria, BOOST in extreme fear (contrarian edge)
+  // F&G ≤ 10: +30% size — historic capitulation levels (once-in-months opportunity)
+  // F&G ≤ 20: +20% size — extreme fear, 90-day median +48.5% from here
+  // F&G > 70: -25% | F&G > 80: -50% (euphoria = high reversal risk)
+  const greedScale = fgValue <= 10 ? 1.30 : fgValue <= 20 ? 1.20 : fgValue > 80 ? 0.50 : fgValue > 70 ? 0.75 : 1.0;
+  if (greedScale > 1.0) console.log(`😱 Fear boost: ${(greedScale*100).toFixed(0)}% position size (F&G=${fgValue} — Extreme Fear contrarian opportunity)`);
   if (greedScale < 1.0) console.log(`🤑 Greed scale: ${(greedScale*100).toFixed(0)}% position size (F&G=${fgValue} — market euphoric, risk reduced)`);
   // Overconfidence guard — after 3+ consecutive wins, humans (and bots) get cocky and overtrade
   // Psychology: λ=2 loss aversion means wins create false confidence → reduce size to stay disciplined
@@ -4777,9 +4782,11 @@ async function run(tvSignal = null, symbol = null) {
       if (mktStructure.choch)                            { entryScore -= 1; advSignals.push(`⚠️  Change of Character (ChoCH) — trend shift warning`); }
     }
 
-    // ── ICT Kill Zone ──
+    // ── ICT Kill Zone — skip dead zone penalty during extreme fear (panic ignores the clock) ──
+    const extremeFear = fearGreed && fearGreed.value <= 20;
     if (killZone.score > 0)                              { entryScore += killZone.score; advSignals.push(`⏰ ${killZone.zone} kill zone (+${killZone.score})`); }
-    if (killZone.score < 0)                              { entryScore += killZone.score; advSignals.push(`💤 ${killZone.zone} — low institutional liquidity (-1)`); }
+    if (killZone.score < 0 && !extremeFear)              { entryScore += killZone.score; advSignals.push(`💤 ${killZone.zone} — low institutional liquidity (-1)`); }
+    if (killZone.score < 0 && extremeFear)               { advSignals.push(`💤 ${killZone.zone} — penalty waived (Extreme Fear overrides session timing)`); }
 
     // ── Ichimoku Cloud signals — scalp TF + 4H confirmation ──
     if (ichi) {
@@ -4816,18 +4823,25 @@ async function run(tvSignal = null, symbol = null) {
       console.log(`  Score: ${baseEntryScore} (base) → ${entryScore} (with advanced signals)`);
     }
 
-    // Entry quality gate — trend-follow entries need score >= 7 (strong confluence required)
-    if (rulesPass && entryType === "trend-follow" && entryScore < 7 && !vwapBounceMode) {
-      console.log(`🚫 ENTRY QUALITY BLOCK — score ${entryScore}/7 needed. Need: RSI<20 (+2), StochRSI oversold (+2), BB%<0.35 (+1), vol surge (+1), divergence (+3), liquidity sweep (+3), neg funding (+2).`);
+    // Entry quality gate — thresholds adapt to Fear & Greed sentiment
+    // Normal: trend-follow needs 8, snapback needs 7 (raised from 7/6 — more signals now available)
+    // Extreme Fear (F&G ≤ 20): lower by 2 — historically 90-day median +48.5% from these levels
+    // Extreme Fear (F&G ≤ 10): lower by 3 — maximum contrarian signal, highest base rate
+    const fgNow = fearGreed?.value ?? 50;
+    const fearDiscount = fgNow <= 10 ? 3 : fgNow <= 20 ? 2 : 0;
+    const tfThreshold   = 8 - fearDiscount;
+    const snapThreshold = 7 - fearDiscount;
+    if (fearDiscount > 0) console.log(`\n😱 FEAR BOUNCE MODE — F&G=${fgNow} (Extreme Fear). Entry thresholds lowered by ${fearDiscount} (trend-follow: ${tfThreshold}, snapback: ${snapThreshold}).`);
+    if (rulesPass && entryType === "trend-follow" && entryScore < tfThreshold && !vwapBounceMode) {
+      console.log(`🚫 ENTRY QUALITY BLOCK — score ${entryScore}/${tfThreshold} needed.`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Entry quality ${entryScore}/7 — need stronger confluence`);
+      pushSignal(symbol, "BLOCKED", `Entry quality ${entryScore}/${tfThreshold} — need stronger confluence`);
       return;
     }
-    // Snapback quality gate — counter-trend entries need strong confirmation
-    if (rulesPass && entryType === "snapback" && entryScore < 6 && !vwapBounceMode) {
-      console.log(`🚫 SNAPBACK QUALITY BLOCK — score ${entryScore}/6 needed. Counter-trend needs: StochRSI oversold (+2), BB% near low (+2), RSI<15 (+2), divergence (+3), or liquidity sweep (+3).`);
+    if (rulesPass && entryType === "snapback" && entryScore < snapThreshold && !vwapBounceMode) {
+      console.log(`🚫 SNAPBACK QUALITY BLOCK — score ${entryScore}/${snapThreshold} needed.`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Snapback quality ${entryScore}/6 — need StochRSI + BB% + more`);
+      pushSignal(symbol, "BLOCKED", `Snapback quality ${entryScore}/${snapThreshold} — need StochRSI + BB% + more`);
       return;
     }
 
@@ -4870,12 +4884,16 @@ async function run(tvSignal = null, symbol = null) {
         const vaScore      = vpoc ? (vpoc.atVAL ? 5 : vpoc.belowVAL ? 3 : vpoc.atVAH ? -3 : 0) : 0;
         const bearDivScore = bearDiv ? -10 : 0;
         const syntheticConf = rsiScore + volScore + trendScore + macdScore + zScoreScore + stScore + fvgScore + ichiScore + ichi4hScore + obScore + msScore + kzScore + vaScore + bearDivScore;
-        console.log(`\n🧠 SYNTHETIC CONFIDENCE — RSI ${rsiScore} + Vol ${volScore} + Trend ${trendScore} + MACD ${macdScore} + Z ${zScoreScore} + ST ${stScore} + FVG ${fvgScore} + Ichi ${ichiScore + ichi4hScore} + OB ${obScore} + MS ${msScore} + KZ ${kzScore} + VA ${vaScore} + BearDiv ${bearDivScore} = ${syntheticConf} (need 65)`);
-        if (syntheticConf < 65) {
-          console.log(`🚫 CONFIDENCE GATE — score ${syntheticConf}/100 too low. Blocking entry (Claude unavailable).`);
+        // Threshold adapts to Fear & Greed — same logic as entry score gates above
+        const fgNowSC = fearGreed?.value ?? 50;
+        const fearDiscountSC = fgNowSC <= 10 ? 15 : fgNowSC <= 20 ? 10 : 0;
+        const confThreshold = 65 - fearDiscountSC;
+        console.log(`\n🧠 SYNTHETIC CONFIDENCE — RSI ${rsiScore} + Vol ${volScore} + Trend ${trendScore} + MACD ${macdScore} + Z ${zScoreScore} + ST ${stScore} + FVG ${fvgScore} + Ichi ${ichiScore + ichi4hScore} + OB ${obScore} + MS ${msScore} + KZ ${kzScore} + VA ${vaScore} + BearDiv ${bearDivScore} = ${syntheticConf} (need ${confThreshold})`);
+        if (syntheticConf < confThreshold) {
+          console.log(`🚫 CONFIDENCE GATE — score ${syntheticConf}/${confThreshold} too low. Blocking entry (Claude unavailable).`);
           allPass = false;
         } else {
-          console.log(`✅ CONFIDENCE GATE — score ${syntheticConf}/100 clears threshold. Proceeding without Claude.`);
+          console.log(`✅ CONFIDENCE GATE — score ${syntheticConf}/${confThreshold} clears threshold. Proceeding without Claude.`);
         }
       }
     } else if (!highConviction) {
