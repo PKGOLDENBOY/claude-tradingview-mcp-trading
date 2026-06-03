@@ -4143,6 +4143,13 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
 
+    // Skip scalp entries for coins the sniper is currently holding — avoids double-buying
+    if ((log.sniperPositions || {})[symbol]?.open) {
+      console.log(`🎯 SNIPER OPEN — ${symbol} already in sniper position. Skipping scalp entry.`);
+      console.log("═══════════════════════════════════════════════════════════\n");
+      return;
+    }
+
     // ── Big Daily Mover — momentum path (bypasses mean-reversion filters) ────────
     // If a coin is up 3%+ on the day with real volume, trade the momentum instead
     // of waiting for it to become oversold. Different rules, smaller size, tight stop.
@@ -7886,6 +7893,11 @@ async function monitorSniperPositions() {
       exitReasons: [reason], orderPlaced: true, tradeType: "sniper", paperTrading: false,
     };
     freshLog.trades.push(exitLog);
+    // Cooldown prevents scalp from immediately re-entering after sniper exits
+    if (!freshLog.coinCooldowns) freshLog.coinCooldowns = {};
+    if (!freshLog.coinCooldowns[symbol]) freshLog.coinCooldowns[symbol] = {};
+    const sniperCooldownMs = pnlPct < 0 ? 2 * 60 * 60 * 1000 : 30 * 60 * 1000;
+    freshLog.coinCooldowns[symbol].scalp = { until: Date.now() + sniperCooldownMs, pnlPct: pnlPct.toFixed(2) };
     saveLog(freshLog);
     writeTradeCsv(exitLog);
     pushSignal(symbol, pnlUSD >= 0 ? "EXIT_WIN" : "EXIT_LOSS", `🎯 Sniper exit: ${reason}`);
