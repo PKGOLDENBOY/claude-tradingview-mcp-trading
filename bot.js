@@ -3585,6 +3585,10 @@ async function checkLiveHardStops() {
     try {
       const pnlUSD = (livePrice - pos.entryPrice) * parseFloat(pos.quantity);
       if (!CONFIG.paperTrading) {
+        if (pos.tpOrderId) {
+          await cancelOrder(sym, pos.tpOrderId);
+          console.log(`  📌 Cancelled resting TP ${pos.tpOrderId} before stop sell`);
+        }
         const order = await placeOrder(sym, "sell", null, livePrice, pos.quantity);
         console.log(`✅ STOP SELL — ${order.orderId}`);
       } else {
@@ -3681,6 +3685,114 @@ async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
   } catch (err) {
     console.log(`  ⚠️  Limit order error (${err.message}) — falling back to market`);
     return null;
+  }
+}
+
+// ─── Resting TP helpers ───────────────────────────────────────────────────────
+
+async function placeLimitSell(symbol, qty, limitPrice) {
+  try {
+    const symRes = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`);
+    const symData = await symRes.json();
+    const pricePrecision = parseInt(symData.data?.[0]?.pricePrecision ?? "4", 10);
+    const qtyPrecision   = parseInt(symData.data?.[0]?.quantityPrecision ?? "6", 10);
+    const limitPriceStr  = limitPrice.toFixed(pricePrecision);
+    const qtyStr = parseFloat(qty).toFixed(qtyPrecision);
+    if (parseFloat(qtyStr) <= 0) return null;
+    const timestamp = Date.now().toString();
+    const path = "/api/v2/spot/trade/place-order";
+    const body = JSON.stringify({ symbol, side: "sell", orderType: "limit", force: "gtc", price: limitPriceStr, size: qtyStr });
+    const signature = signBitGet(timestamp, "POST", path, body);
+    const res = await fetch(`${acct().baseUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": signature, "ACCESS-TIMESTAMP": timestamp, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
+      body,
+    });
+    const data = await res.json();
+    if (data.code !== "00000") throw new Error(data.msg);
+    console.log(`  📌 Resting TP SELL @ $${limitPriceStr} | id: ${data.data.orderId}`);
+    return data.data.orderId;
+  } catch (err) {
+    console.log(`  ⚠️  Resting TP order failed (${err.message}) — poll-based exit still active`);
+    return null;
+  }
+}
+
+async function cancelOrder(symbol, orderId) {
+  try {
+    const ts = Date.now().toString();
+    const path = "/api/v2/spot/trade/cancel-order";
+    const body = JSON.stringify({ symbol, orderId });
+    const sign = signBitGet(ts, "POST", path, body);
+    await fetch(`${acct().baseUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
+      body,
+    });
+  } catch (err) {
+    console.log(`  ⚠️  Cancel order ${orderId} failed: ${err.message}`);
+  }
+}
+
+async function getOrderStatus(symbol, orderId) {
+  try {
+    const ts = Date.now().toString();
+    const path = `/api/v2/spot/trade/orderInfo?orderId=${orderId}&symbol=${symbol}`;
+    const sign = signBitGet(ts, "GET", path);
+    const res = await fetch(`${acct().baseUrl}${path}`, {
+      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
+    });
+    const data = await res.json();
+    return data.data ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function checkTpOrders() {
+  const log = loadLog();
+  const openWithTp = Object.entries(log.positions || {})
+    .filter(([, p]) => p?.open && p?.tpOrderId);
+  if (openWithTp.length === 0) return;
+
+  for (const [sym, pos] of openWithTp) {
+    if (_processingStops.has(sym) || _runningSymbols.has(sym)) continue;
+    const orderData = await getOrderStatus(sym, pos.tpOrderId);
+    if (!orderData || orderData.status !== "full_fill") continue;
+
+    _processingStops.add(sym);
+    try {
+      const fillPrice = parseFloat(orderData.priceAvg || orderData.price || pos.entryPrice * (1 + (pos.tpPct || 0.08)));
+      const qty = parseFloat(pos.quantity);
+      const pnlPct = (fillPrice - pos.entryPrice) / pos.entryPrice * 100;
+      const pnlUSD = (fillPrice - pos.entryPrice) * qty;
+      console.log(`\n🎯 RESTING TP FILLED [exchange] — ${sym} @ $${fillPrice.toFixed(4)} | +${pnlPct.toFixed(2)}% | $${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(2)}`);
+
+      const freshLog = loadLog();
+      delete freshLog.positions[sym];
+      freshLog.portfolioValue = (freshLog.portfolioValue || acct().portfolioValue) + pnlUSD;
+      const tradeRecord = {
+        timestamp: new Date().toISOString(), type: "exit", symbol: sym,
+        price: fillPrice, entryPrice: pos.entryPrice, pnlPct, pnlUSD,
+        indicators: {}, exitReasons: [`Resting TP filled @ $${fillPrice.toFixed(4)} (+${pnlPct.toFixed(2)}%)`],
+        shouldExit: true, quantity: pos.quantity,
+        orderPlaced: true, orderId: pos.tpOrderId,
+        paperTrading: false, tpOrderFill: true,
+      };
+      freshLog.trades.push(tradeRecord);
+      if (!freshLog.coinCooldowns) freshLog.coinCooldowns = {};
+      if (!freshLog.coinCooldowns[sym]) freshLog.coinCooldowns[sym] = {};
+      freshLog.coinCooldowns[sym].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
+      saveLog(freshLog);
+      writeTradeCsv(tradeRecord);
+      await syncPortfolioBalance(freshLog).catch(() => {});
+      pushSignal(sym, "EXIT_WIN", `TP filled @ $${fillPrice.toFixed(4)} | +${pnlPct.toFixed(2)}%`);
+      await emailExit({ symbol: sym, price: fillPrice, entryPrice: pos.entryPrice, pnlPct, pnlUSD, reasons: [`Resting TP order filled`], orderId: pos.tpOrderId }).catch(() => {});
+    } catch (err) {
+      console.error(`checkTpOrders failed for ${sym}: ${err.message}`);
+    } finally {
+      _processingStops.delete(sym);
+    }
   }
 }
 
@@ -4025,6 +4137,16 @@ async function run(tvSignal = null, symbol = null) {
         saveLog(log);
         writeTradeCsv(partialEntry);
         console.log(`💰 Portfolio: $${log.portfolioValue.toFixed(4)} | Remaining: ${halfQty.toFixed(6)} ${symbol}`);
+        // Replace full-qty resting TP with half-qty TP for remaining position
+        if (!CONFIG.paperTrading && position.tpOrderId) {
+          await cancelOrder(symbol, position.tpOrderId);
+          const newTpPrice = position.entryPrice * (1 + (position.tpPct || 0.08));
+          const newTpOrderId = await placeLimitSell(symbol, halfQty.toFixed(6), newTpPrice);
+          if (newTpOrderId) {
+            const _freshLog = (() => { try { return loadLog(); } catch { return log; } })();
+            if (_freshLog.positions?.[symbol]) { _freshLog.positions[symbol].tpOrderId = newTpOrderId; saveLog(_freshLog); log.positions = _freshLog.positions; position = _freshLog.positions[symbol]; }
+          }
+        }
       }
     }
 
@@ -4148,6 +4270,10 @@ async function run(tvSignal = null, symbol = null) {
       } else {
         console.log(`\n🔴 PLACING LIVE SELL — ${position.quantity} ${symbol}`);
         try {
+          if (position.tpOrderId) {
+            await cancelOrder(symbol, position.tpOrderId);
+            console.log(`  📌 Cancelled resting TP ${position.tpOrderId}`);
+          }
           const order = await placeOrder(symbol, "sell", null, price, position.quantity);
           logEntry.orderPlaced = true;
           logEntry.orderId = order.orderId;
@@ -5180,12 +5306,15 @@ async function run(tvSignal = null, symbol = null) {
         }
       } catch { /* non-critical — proceed on fetch failure */ }
 
+      const posTpPct = bearSnapBack ? 0.03 : entryType === "momentum" ? 0.10 : (btResult?.takeProfit ?? 0.08);
+      const posSlPct = bearSnapBack ? 0.02 : (btResult?.stopLoss ?? 0.04);
+
       if (slippageOk && CONFIG.paperTrading) {
         console.log(`\n📋 PAPER TRADE — would buy ${symbol} ~$${finalTradeSize.toFixed(2)} at market`);
         console.log(`   (Set PAPER_TRADING=false in .env to place real orders)`);
         logEntry.orderPlaced = true;
         logEntry.orderId = `PAPER-${Date.now()}`;
-        log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (finalTradeSize / price).toFixed(6), orderId: logEntry.orderId, entryType, bearMarket: bullTrendWeekly === false, bearSnapBack } };
+        log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (finalTradeSize / price).toFixed(6), orderId: logEntry.orderId, entryType, bearMarket: bullTrendWeekly === false, bearSnapBack, tpPct: posTpPct, slPct: posSlPct } };
       } else if (slippageOk) {
         console.log(`\n🔴 PLACING LIVE ORDER — $${finalTradeSize.toFixed(2)} BUY ${symbol}`);
         try {
@@ -5201,8 +5330,15 @@ async function run(tvSignal = null, symbol = null) {
           logEntry.orderPlaced = true;
           logEntry.orderId = order.orderId;
           // Reload fresh to prevent concurrent writes from clobbering other positions
-          try { log.positions = { ...(loadLog().positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: actualQty.toFixed(6), orderId: order.orderId, entryType, bearMarket: bullTrendWeekly === false, bearSnapBack } }; } catch { log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: actualQty.toFixed(6), orderId: order.orderId, entryType, bearMarket: bullTrendWeekly === false, bearSnapBack } }; }
+          try { log.positions = { ...(loadLog().positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: actualQty.toFixed(6), orderId: order.orderId, entryType, bearMarket: bullTrendWeekly === false, bearSnapBack, tpPct: posTpPct, slPct: posSlPct } }; } catch { log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: actualQty.toFixed(6), orderId: order.orderId, entryType, bearMarket: bullTrendWeekly === false, bearSnapBack, tpPct: posTpPct, slPct: posSlPct } }; }
           console.log(`✅ ORDER PLACED — ${order.orderId} | qty: ${actualQty.toFixed(6)}`);
+          // Place resting GTC limit sell at TP price — exchange executes to the millisecond
+          const tpLimitPrice = price * (1 + posTpPct);
+          const tpOrderId = await placeLimitSell(symbol, actualQty.toFixed(6), tpLimitPrice);
+          if (tpOrderId) {
+            const _tpLog = (() => { try { return loadLog(); } catch { return log; } })();
+            if (_tpLog.positions?.[symbol]) { _tpLog.positions[symbol].tpOrderId = tpOrderId; saveLog(_tpLog); log.positions = _tpLog.positions; }
+          }
           pushSignal(symbol, "ENTRY", `Bought @ $${price.toFixed(4)} — $${finalTradeSize.toFixed(2)}`);
         } catch (err) {
           console.log(`❌ ORDER FAILED — ${err.message}`);
@@ -8296,6 +8432,11 @@ async function monitorSniperPositions() {
   setInterval(async () => {
     await _accountStore.run(ACCOUNTS[0], () => checkUpcomingListings()).catch(e => console.error("checkUpcomingListings failed:", e.message));
   }, 5 * 60 * 1000);
+
+  // Resting TP order monitor — check if limit sell orders filled every 15 seconds
+  setInterval(async () => {
+    await _accountStore.run(ACCOUNTS[0], () => checkTpOrders()).catch(e => console.error("checkTpOrders failed:", e.message));
+  }, 15 * 1000);
 
   // Sniper exit monitor — check TP/SL/timeout every 15 seconds
   setInterval(async () => {
