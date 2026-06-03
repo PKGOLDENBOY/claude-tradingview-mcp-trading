@@ -3767,6 +3767,16 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
+  // Data quality gate — coins with zero volume history have no tradeable market
+  // vol.avg=0 means the 20-bar average is literally zero (dead coin / data gap)
+  // RSI=0 with zero volume is a data artefact, not a real signal
+  if (vol.avg === 0 || (rsi3 === 0 && vol.current === 0)) {
+    console.log(`\n⚠️  Zero volume data — ${vol.avg === 0 ? "no volume history" : "RSI=0 + zero current volume"}. Removing from scan pool.`);
+    _insufficientHistory.add(symbol);
+    CONFIG.symbols = CONFIG.symbols.filter(s => s !== symbol);
+    return;
+  }
+
   // Store snapshot for dashboard coin detail view
   coinSnapshots[symbol] = {
     symbol, price, updatedAt: new Date().toISOString(),
