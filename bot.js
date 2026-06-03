@@ -3446,6 +3446,8 @@ async function checkLiveHardStops() {
 
   for (const [sym, pos] of openPositions) {
     if (_processingStops.has(sym)) continue;
+    // Skip if main scan's run() is already processing this symbol — avoids concurrent sell + log-clobber race
+    if (_runningSymbols.has(sym)) continue;
     const live = livePrices.get(sym);
     if (!live || Date.now() - live.ts > 30000) continue; // stale — skip
 
@@ -3480,7 +3482,12 @@ async function checkLiveHardStops() {
         orderPlaced: true, paperTrading: CONFIG.paperTrading,
         wsTriggered: true,
       });
+      // Hard stops are always losses — 2h cooldown prevents immediate re-entry after stop-loss
+      if (!log.coinCooldowns) log.coinCooldowns = {};
+      if (!log.coinCooldowns[sym]) log.coinCooldowns[sym] = {};
+      log.coinCooldowns[sym].scalp = { until: Date.now() + 2 * 60 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
       saveLog(log);
+      console.log(`⏳ Hard stop cooldown — ${sym} blocked for 2h (P&L: ${pnlPct.toFixed(2)}%)`);
       console.log(`💰 Portfolio: $${log.portfolioValue.toFixed(4)}`);
     } catch (err) {
       console.error(`Stop sell failed for ${sym}: ${err.message}`);
