@@ -3783,7 +3783,9 @@ async function checkTpOrders() {
       if (!freshLog.coinCooldowns) freshLog.coinCooldowns = {};
       if (!freshLog.coinCooldowns[sym]) freshLog.coinCooldowns[sym] = {};
       freshLog.coinCooldowns[sym].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
+      const _ltChanged = learnFromTrades(freshLog);
       saveLog(freshLog);
+      if (_ltChanged) saveLog(freshLog);
       writeTradeCsv(tradeRecord);
       await syncPortfolioBalance(freshLog).catch(() => {});
       pushSignal(sym, "EXIT_WIN", `TP filled @ $${fillPrice.toFixed(4)} | +${pnlPct.toFixed(2)}%`);
