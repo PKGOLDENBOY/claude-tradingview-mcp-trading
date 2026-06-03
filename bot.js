@@ -4658,7 +4658,7 @@ async function run(tvSignal = null, symbol = null) {
     const hasLongWick   = lastClosedCandle && (lastClosedCandle.high - lastClosedCandle.low) > 0 &&
                           (lastClosedCandle.close - lastClosedCandle.low) / (lastClosedCandle.high - lastClosedCandle.low) > 0.4;
     const reversalSignals = [priceBouncing, isClosingUp, isHigherHigh, isHigherLow, hasLongWick].filter(Boolean).length;
-    if (reversalSignals < 3 && !vwapBounceMode) {
+    if (reversalSignals < 3 && !vwapBounceMode && !bearSnapBack) {
       console.log(`🚫 REVERSAL BLOCK — only ${reversalSignals}/3 reversal signals (live bounce: ${priceBouncing}, closing up: ${isClosingUp}, higher high: ${isHigherHigh}, higher low: ${isHigherLow}, long wick: ${hasLongWick})`);
       console.log("═══════════════════════════════════════════════════════════\n");
       pushSignal(symbol, "BLOCKED", `Weak reversal — only ${reversalSignals}/3 signals confirmed`);
@@ -4769,7 +4769,8 @@ async function run(tvSignal = null, symbol = null) {
     const { results, allPass: rulesPass, entryType, entryScore: baseEntryScore } = runSafetyCheck(price, ema8, vwap, rsi3, rules, effectiveRsiThreshold, vol, ema21, bullTrendConfirmed, adx, stochRsi, divergence, bb, vwapBounceMode);
 
     // OBV bear divergence — smart money distributing into price rise = skip entry
-    if (obv.bearDivergence) {
+    // bearSnapBack exempt: during capitulation, institutions sell into ANY bounce by definition
+    if (obv.bearDivergence && !bearSnapBack) {
       console.log(`🚫 OBV DIVERGENCE BLOCK — price rising but OBV falling. Institutions are selling into this rally.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       pushSignal(symbol, "BLOCKED", "OBV bear divergence — smart money selling into rally");
