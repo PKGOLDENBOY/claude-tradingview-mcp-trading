@@ -3742,7 +3742,7 @@ async function run(tvSignal = null, symbol = null) {
   console.log(`  ${symbol} $${price.toFixed(4)} | RSI ${rsi3 !== null ? rsi3.toFixed(1) : "N/A"} | BB% ${(bb.pct*100).toFixed(0)}% | Vol ${(vol.current/vol.avg).toFixed(1)}x | ${bullTrend4h ? "4H↑" : "4H↓"} ${bullTrend1h ? "1H↑" : "1H↓"} | VWAP $${vwap ? vwap.toFixed(4) : "N/A"}`);
   if (LOG_VERBOSE) {
     console.log(`  EMA(8):   $${ema8.toFixed(2)} | EMA(21): $${ema21.toFixed(2)} | ${ema8 > ema21 ? "✅ entry TF uptrend" : "🔴 entry TF downtrend"}`);
-    console.log(`  1H trend: EMA(8) $${ema8_1h.toFixed(2)} vs EMA(21) $${ema21_1h.toFixed(2)} | ${bullTrend1h ? "✅ 1H uptrend" : "🔴 1H downtrend"} | RSI(14): ${rsi14_1h !== null ? rsi14_1h.toFixed(1) : "N/A"}${rsi14_1h !== null && rsi14_1h < 45 ? " ⚠️ bearish zone" : ""}`);
+    console.log(`  1H trend: EMA(8) $${ema8_1h.toFixed(2)} vs EMA(21) $${ema21_1h.toFixed(2)} | ${bullTrend1h ? "✅ 1H uptrend" : "🔴 1H downtrend"} | RSI(14): ${rsi14_1h !== null ? rsi14_1h.toFixed(1) : "N/A"}${rsi14_1h !== null && rsi14_1h < 50 ? " ⚠️ bearish zone" : ""}`);
     console.log(`  4H trend: EMA(8) $${ema8_4h.toFixed(2)} vs EMA(21) $${ema21_4h.toFixed(2)} | ${bullTrend4h ? "✅ 4H uptrend" : "🔴 4H downtrend"}`);
     if (bullTrendWeekly !== null) console.log(`  Weekly:   EMA(8) $${ema8_week.toFixed(4)} vs EMA(21) $${ema21_week.toFixed(4)} | ${bullTrendWeekly ? "✅ Weekly bull market" : "🔴 Weekly bear market — stricter filters apply"}`);
     if (rsi15m !== null) console.log(`  RSI(15m): ${rsi15m.toFixed(2)}`);
@@ -4655,15 +4655,14 @@ async function run(tvSignal = null, symbol = null) {
     const reversalReasons = [priceBouncing && "live bounce", isClosingUp && "closing up", isHigherHigh && "higher high", isHigherLow && "higher low", hasLongWick && "long wick"].filter(Boolean);
     console.log(`  ✅ Reversal confirmed — ${reversalReasons.join(" + ")} (${reversalSignals}/5 signals)`);
 
-    // 1H RSI(14) trend gate — analysis of today's trades: 14/16 losses when 1H RSI(14) < 45
-    // When the hourly trend is bearish, mean-reversion dip-buys almost never recover in time
-    if (rsi14_1h !== null && rsi14_1h < 45 && !vwapBounceMode) {
-      console.log(`🚫 1H TREND BLOCK — 1H RSI(14)=${rsi14_1h.toFixed(1)} < 45. Hourly trend is bearish — buying a dip in a downtrend. Wait for 1H RSI to recover above 45.`);
+    // 1H RSI(14) trend gate — hourly trend must be at least neutral for any dip-buy entry
+    if (rsi14_1h !== null && rsi14_1h < 50 && !vwapBounceMode) {
+      console.log(`🚫 1H TREND BLOCK — 1H RSI(14)=${rsi14_1h.toFixed(1)} < 50. Hourly trend is bearish — buying a dip in a downtrend. Wait for 1H RSI to recover above 50.`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `1H RSI(14) ${rsi14_1h.toFixed(1)} < 45 — hourly downtrend, no entry`);
+      pushSignal(symbol, "BLOCKED", `1H RSI(14) ${rsi14_1h.toFixed(1)} < 50 — hourly downtrend, no entry`);
       return;
     }
-    if (rsi14_1h !== null) console.log(`  ✅ 1H RSI(14) ${rsi14_1h.toFixed(1)} ≥ 45 — hourly trend ok`);
+    if (rsi14_1h !== null) console.log(`  ✅ 1H RSI(14) ${rsi14_1h.toFixed(1)} ≥ 50 — hourly trend ok`);
 
     // 4H trend hard gate — medium-term trend must be bullish to scalp bounces
     if (!bullTrend4h && !vwapBounceMode) {
@@ -4674,13 +4673,19 @@ async function run(tvSignal = null, symbol = null) {
     }
     if (bullTrend4h) console.log(`  ✅ 4H trend bullish — EMA(8) > EMA(21)`);
 
-    // MACD momentum gate — histogram must be improving (momentum turning up, not still falling)
+    // MACD momentum gate — histogram must be improving; snap-back entries (below VWAP + RSI<25) need full bullish
     const macdPrev = calcMACD(closes.slice(0, -1));
     const macdImproving = macd.histogram > macdPrev.histogram;
-    if (!macdImproving && !vwapBounceMode && !macd.bullish) {
-      console.log(`🚫 MACD MOMENTUM BLOCK — histogram ${macd.histogram.toFixed(4)} ≤ prev ${macdPrev.histogram.toFixed(4)}. Momentum still falling — not safe to buy.`);
+    const isSnapBackEntry = vwap && price < vwap && rsi3 !== null && rsi3 < 25;
+    if (!vwapBounceMode && !macd.bullish && (!macdImproving || isSnapBackEntry)) {
+      if (isSnapBackEntry && macdImproving) {
+        console.log(`🚫 MACD SNAP-BACK BLOCK — histogram ${macd.histogram.toFixed(4)} improving but still bearish. Below-VWAP snap-back entries require fully bullish MACD (histogram > 0).`);
+        pushSignal(symbol, "BLOCKED", `MACD bearish (snap-back needs histogram > 0, got ${macd.histogram.toFixed(4)})`);
+      } else {
+        console.log(`🚫 MACD MOMENTUM BLOCK — histogram ${macd.histogram.toFixed(4)} ≤ prev ${macdPrev.histogram.toFixed(4)}. Momentum still falling — not safe to buy.`);
+        pushSignal(symbol, "BLOCKED", `MACD momentum falling — wait for histogram to turn up`);
+      }
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `MACD momentum falling — wait for histogram to turn up`);
       return;
     }
     console.log(`  ${macdImproving ? "✅" : "⚠️ "} MACD histogram ${macd.histogram.toFixed(4)} ${macdImproving ? "improving ↑" : "(bullish — ok)"}`);
@@ -4697,13 +4702,13 @@ async function run(tvSignal = null, symbol = null) {
     }
     console.log(`  ${volAccel >= 1.0 ? "✅" : "⚠️ "} Volume ${volAccel >= 1.5 ? "surging" : volAccel >= 1.0 ? "holding/rising" : "light"} (${volAccel.toFixed(2)}× prev candle)${vwapBounceMode && volAccel < 1.0 ? " — bypassed (VWAP bounce)" : ""}`);
 
-    // Sustained volume gate — 3-bar average must be ≥ 80% of 20-bar avg.
+    // Sustained volume gate — 3-bar average must be ≥ 100% of 20-bar avg.
     // Prevents entering on a single-bar spike that collapses next bar and triggers "Volume dried up" exit.
     // Applies to ALL entry modes including VWAP bounce (thin-volume coins still churn).
-    if (vol && vol.vol3Ratio < 0.80) {
-      console.log(`🚫 VOLUME GATE — 3-bar avg volume only ${(vol.vol3Ratio * 100).toFixed(0)}% of 20-bar avg (need 80%+). Volume not sustained — likely to dry up immediately after entry.`);
+    if (vol && vol.vol3Ratio < 1.00) {
+      console.log(`🚫 VOLUME GATE — 3-bar avg volume only ${(vol.vol3Ratio * 100).toFixed(0)}% of 20-bar avg (need 100%+). Volume not sustained — likely to dry up immediately after entry.`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Thin volume — 3-bar avg ${(vol.vol3Ratio * 100).toFixed(0)}% of avg (need 80%)`);
+      pushSignal(symbol, "BLOCKED", `Thin volume — 3-bar avg ${(vol.vol3Ratio * 100).toFixed(0)}% of avg (need 100%)`);
       return;
     }
     if (vol) console.log(`  ✅ Volume sustained — 3-bar avg ${(vol.vol3Ratio * 100).toFixed(0)}% of 20-bar avg`);
