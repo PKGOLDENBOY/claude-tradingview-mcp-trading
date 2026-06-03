@@ -1455,9 +1455,10 @@ function calcVolume(candles) {
   const recent = candles.slice(-20);
   const avg = recent.reduce((s, c) => s + c.volume, 0) / recent.length;
   const current = candles[candles.length - 1].volume;
-  // 3-bar average catches single-bar spikes that immediately collapse
   const vol3 = candles.slice(-3).reduce((s, c) => s + c.volume, 0) / 3;
-  return { current, avg, aboveAvg: current > avg, vol3, vol3Ratio: vol3 / avg };
+  // Guard against zero-avg coins (new listings / missing data) — NaN would bypass the vol3Ratio gate
+  const safeAvg = avg > 0 ? avg : 1;
+  return { current, avg, aboveAvg: current > avg, vol3, vol3Ratio: vol3 / safeAvg };
 }
 
 // Supertrend — ATR-based trend direction (period 10, multiplier 2.0 per crypto backtests)
@@ -4429,9 +4430,10 @@ async function run(tvSignal = null, symbol = null) {
             layer2DataOk   = true;
           }
           if (h4Data.length >= 21) {
-            const h4Closes = h4Data.map(c => parseFloat(c[4]));
-            const ema = (arr, p) => { const k=2/(p+1); return arr.reduce((e,c,i) => i===0?c : c*k+e*(1-k)); };
-            btc4hBearish   = ema(h4Closes.slice(-8), 8) < ema(h4Closes.slice(-21), 21);
+            const h4Closes = h4Data.map(c => parseFloat(c[4])).filter(v => !isNaN(v));
+            const ema = (arr, p) => arr.length ? arr.reduce((e,c,i) => i===0?c : c*(2/(p+1))+e*(1-2/(p+1))) : null;
+            const e8 = ema(h4Closes.slice(-8), 8), e21 = ema(h4Closes.slice(-21), 21);
+            if (e8 !== null && e21 !== null) btc4hBearish = e8 < e21;
           }
         } catch { console.log(`  ⚠️  Layer 2 data fetch failed — defaulting to bear (safe side)`); }
 
