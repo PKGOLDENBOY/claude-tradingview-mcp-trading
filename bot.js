@@ -4414,7 +4414,8 @@ async function run(tvSignal = null, symbol = null) {
         const btcPrice  = parseFloat(btcTicker.lastPr);
 
         // Layer 2: 3-day rolling change + 4H EMA — survives the midnight candle reset
-        let btc3dayChange = 0, btc4hBearish = false;
+        // Default to WORST CASE (assume bear) so a fetch failure doesn't silently disable the block
+        let btc3dayChange = -999, btc4hBearish = true, layer2DataOk = false;
         try {
           const [dRes, h4Res] = await Promise.all([
             fetch("https://api.bitget.com/api/v2/spot/market/candles?symbol=BTCUSDT&granularity=1day&limit=5"),
@@ -4423,15 +4424,16 @@ async function run(tvSignal = null, symbol = null) {
           const dData  = (await dRes.json()).data  || [];
           const h4Data = (await h4Res.json()).data || [];
           if (dData.length >= 4) {
-            const open3d   = parseFloat(dData[dData.length - 4][1]); // open 3 days ago
+            const open3d   = parseFloat(dData[dData.length - 4][1]);
             btc3dayChange  = (btcPrice - open3d) / open3d * 100;
+            layer2DataOk   = true;
           }
           if (h4Data.length >= 21) {
             const h4Closes = h4Data.map(c => parseFloat(c[4]));
             const ema = (arr, p) => { const k=2/(p+1); return arr.reduce((e,c,i) => i===0?c : c*k+e*(1-k)); };
             btc4hBearish   = ema(h4Closes.slice(-8), 8) < ema(h4Closes.slice(-21), 21);
           }
-        } catch { /* non-critical */ }
+        } catch { console.log(`  ⚠️  Layer 2 data fetch failed — defaulting to bear (safe side)`); }
 
         console.log(`\n₿ BTC 24h: ${btcChange >= 0 ? "+" : ""}${btcChange.toFixed(2)}% | 3-day: ${btc3dayChange >= 0 ? "+" : ""}${btc3dayChange.toFixed(2)}% | 4H EMA: ${btc4hBearish ? "🔴 bear" : "✅ bull"}`);
 
