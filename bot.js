@@ -13,6 +13,7 @@ import "dotenv/config";
 import Anthropic from "@anthropic-ai/sdk";
 import http from "http";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, renameSync, mkdirSync } from "fs";
+import { AsyncLocalStorage } from "async_hooks";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import WebSocket from "ws";
@@ -316,9 +317,11 @@ const ACCOUNTS = [
   }] : []),
 ];
 
-// Active account context — set before each account's operation cycle (sequential, never concurrent)
-let _currentAccount = ACCOUNTS[0];
-const acct = () => _currentAccount;
+// Account context — AsyncLocalStorage carries the active account through every await in a call chain.
+// Replaces the old global _currentAccount which was susceptible to race conditions when multiple
+// setInterval callbacks interleaved at await points and corrupted each other's account context.
+const _accountStore = new AsyncLocalStorage();
+const acct = () => _accountStore.getStore() ?? ACCOUNTS[0];
 
 // Per-side taker fee rate for the active exchange.
 // BitGet spot with BGB deduction: 0.064% | BitMart spot: 0.25%
@@ -7956,41 +7959,41 @@ async function monitorSniperPositions() {
       refreshTopMovers().then(() => startPriceStream(CONFIG.symbols)).catch(e => console.error("refreshTopMovers failed:", e.message));
 
       for (const account of ACCOUNTS) {
-        _currentAccount = account;
-        // Startup balance sync + position reconciliation
-        // Reconciliation re-discovers open positions after Railway log wipe
-        if (!CONFIG.paperTrading) {
-          const startLog = loadLog();
-          await syncPortfolioBalance(startLog).catch(e => console.error("syncPortfolioBalance failed:", e.message));
-          await reconcilePositions(startLog).catch(e => console.error("reconcilePositions failed:", e.message));
-          await sweepDust(startLog).catch(e => console.error("sweepDust failed:", e.message));
-          saveLog(startLog);
-          await initSniperSymbols().catch(e => console.error("initSniperSymbols failed:", e.message));
-          await runLongTermPortfolio().catch(e => console.error("LT portfolio startup failed:", e.message));
-          sendEmail(
-            "🤖 Bot Online — Trading Started",
-            `<h2>🤖 Bot is now live</h2>
-             <p>Started at ${new Date().toUTCString()}</p>
-             <p><b>Portfolio:</b> $${(startLog.portfolioValue || 0).toFixed(2)}</p>
-             <p><b>Watching:</b> ${CONFIG.symbols.join(", ")}</p>
-             <p><b>Mode:</b> LIVE TRADING</p>`
-          );
-        }
-        console.log(`\n👛 Account ${account.id} — initial scan (sequential)`);
-        const startSyms = [...CONFIG.symbols];
-        for (const sym of startSyms) {
-          await run(null, sym).catch((err) => { console.error(`Startup ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); });
-        }
-        if (SWING_ENABLED) {
-          for (const sym of CONFIG.symbols) {
-            await runSwing(sym).catch((err) => console.error(`Swing startup ${sym} [acct${account.id}] error:`, err));
+        await _accountStore.run(account, async () => {
+          // Startup balance sync + position reconciliation
+          // Reconciliation re-discovers open positions after Railway log wipe
+          if (!CONFIG.paperTrading) {
+            const startLog = loadLog();
+            await syncPortfolioBalance(startLog).catch(e => console.error("syncPortfolioBalance failed:", e.message));
+            await reconcilePositions(startLog).catch(e => console.error("reconcilePositions failed:", e.message));
+            await sweepDust(startLog).catch(e => console.error("sweepDust failed:", e.message));
+            saveLog(startLog);
+            await initSniperSymbols().catch(e => console.error("initSniperSymbols failed:", e.message));
+            await runLongTermPortfolio().catch(e => console.error("LT portfolio startup failed:", e.message));
+            sendEmail(
+              "🤖 Bot Online — Trading Started",
+              `<h2>🤖 Bot is now live</h2>
+               <p>Started at ${new Date().toUTCString()}</p>
+               <p><b>Portfolio:</b> $${(startLog.portfolioValue || 0).toFixed(2)}</p>
+               <p><b>Watching:</b> ${CONFIG.symbols.join(", ")}</p>
+               <p><b>Mode:</b> LIVE TRADING</p>`
+            );
           }
-          for (const sym of CONFIG.symbols) {
-            await runBreakout(sym).catch((err) => console.error(`Breakout startup ${sym} [acct${account.id}] error:`, err));
+          console.log(`\n👛 Account ${account.id} — initial scan (sequential)`);
+          const startSyms = [...CONFIG.symbols];
+          for (const sym of startSyms) {
+            await run(null, sym).catch((err) => { console.error(`Startup ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); });
           }
-        }
+          if (SWING_ENABLED) {
+            for (const sym of CONFIG.symbols) {
+              await runSwing(sym).catch((err) => console.error(`Swing startup ${sym} [acct${account.id}] error:`, err));
+            }
+            for (const sym of CONFIG.symbols) {
+              await runBreakout(sym).catch((err) => console.error(`Breakout startup ${sym} [acct${account.id}] error:`, err));
+            }
+          }
+        });
       }
-      _currentAccount = ACCOUNTS[0];
       _lastScanTime = Date.now();
       _lastScanCount = CONFIG.symbols.length;
     })();
@@ -8067,117 +8070,112 @@ async function monitorSniperPositions() {
   // WebSocket hard-stop checker — fires every 5 seconds using live streamed prices
   setInterval(async () => {
     for (const account of ACCOUNTS) {
-      _currentAccount = account;
-      await checkLiveHardStops();
+      await _accountStore.run(account, () => checkLiveHardStops());
     }
-    _currentAccount = ACCOUNTS[0];
   }, 5000);
 
   // Fast exit monitor — check open scalp positions every 60 seconds
   setInterval(async () => {
     for (const account of ACCOUNTS) {
-      _currentAccount = account;
-      const log = loadLog();
-      const openSymbols = Object.entries(log.positions || {})
-        .filter(([, p]) => p && p.open)
-        .map(([sym]) => sym);
-      for (const sym of openSymbols) {
-        await run(null, sym).catch((err) => { console.error(`Exit monitor ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); });
-      }
+      await _accountStore.run(account, async () => {
+        const log = loadLog();
+        const openSymbols = Object.entries(log.positions || {})
+          .filter(([, p]) => p && p.open)
+          .map(([sym]) => sym);
+        for (const sym of openSymbols) {
+          await run(null, sym).catch((err) => { console.error(`Exit monitor ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); });
+        }
+      });
     }
-    _currentAccount = ACCOUNTS[0];
   }, 60 * 1000);
 
   // Swing exit monitor — check open swing positions every 30 minutes
   setInterval(async () => {
     if (!SWING_ENABLED) return;
     for (const account of ACCOUNTS) {
-      _currentAccount = account;
-      const log = loadLog();
-      const openSwings = Object.entries(log.swingPositions || {})
-        .filter(([, p]) => p && p.open)
-        .map(([sym]) => sym);
-      if (openSwings.length > 0) {
-        console.log(`\n📈 Swing exit check [acct${account.id}] — ${openSwings.join(", ")}`);
-        for (const sym of openSwings) {
-          await runSwing(sym).catch((err) => console.error(`Swing exit ${sym} [acct${account.id}] error:`, err));
+      await _accountStore.run(account, async () => {
+        const log = loadLog();
+        const openSwings = Object.entries(log.swingPositions || {})
+          .filter(([, p]) => p && p.open)
+          .map(([sym]) => sym);
+        if (openSwings.length > 0) {
+          console.log(`\n📈 Swing exit check [acct${account.id}] — ${openSwings.join(", ")}`);
+          for (const sym of openSwings) {
+            await runSwing(sym).catch((err) => console.error(`Swing exit ${sym} [acct${account.id}] error:`, err));
+          }
         }
-      }
+      });
     }
-    _currentAccount = ACCOUNTS[0];
   }, 30 * 60 * 1000);
 
   // Swing entry scan — every 4 hours (aligned with 4H candle closes)
   setInterval(async () => {
     if (!SWING_ENABLED) return;
     for (const account of ACCOUNTS) {
-      _currentAccount = account;
-      console.log(`\n📈 Swing entry scan [acct${account.id}]...`);
-      for (const sym of CONFIG.symbols) {
-        await runSwing(sym).catch((err) => console.error(`Swing scan ${sym} [acct${account.id}] error:`, err));
-      }
+      await _accountStore.run(account, async () => {
+        console.log(`\n📈 Swing entry scan [acct${account.id}]...`);
+        for (const sym of CONFIG.symbols) {
+          await runSwing(sym).catch((err) => console.error(`Swing scan ${sym} [acct${account.id}] error:`, err));
+        }
+      });
     }
-    _currentAccount = ACCOUNTS[0];
   }, 4 * 60 * 60 * 1000);
 
   // Breakout exit monitor — every 15 minutes (1H candles, faster reaction than swing)
   setInterval(async () => {
     if (!SWING_ENABLED) return;
     for (const account of ACCOUNTS) {
-      _currentAccount = account;
-      const log = loadLog();
-      const openBk = Object.entries(log.breakoutPositions || {})
-        .filter(([, p]) => p?.open).map(([s]) => s);
-      if (openBk.length > 0) {
-        console.log(`\n🚀 Breakout exit check [acct${account.id}] — ${openBk.join(", ")}`);
-        for (const sym of openBk) {
-          await runBreakout(sym).catch((err) => console.error(`Breakout exit ${sym} [acct${account.id}] error:`, err));
+      await _accountStore.run(account, async () => {
+        const log = loadLog();
+        const openBk = Object.entries(log.breakoutPositions || {})
+          .filter(([, p]) => p?.open).map(([s]) => s);
+        if (openBk.length > 0) {
+          console.log(`\n🚀 Breakout exit check [acct${account.id}] — ${openBk.join(", ")}`);
+          for (const sym of openBk) {
+            await runBreakout(sym).catch((err) => console.error(`Breakout exit ${sym} [acct${account.id}] error:`, err));
+          }
         }
-      }
+      });
     }
-    _currentAccount = ACCOUNTS[0];
   }, 15 * 60 * 1000);
 
   // Breakout entry scan — every 1 hour
   setInterval(async () => {
     if (!SWING_ENABLED) return;
     for (const account of ACCOUNTS) {
-      _currentAccount = account;
-      for (const sym of CONFIG.symbols) {
-        await runBreakout(sym).catch((err) => console.error(`Breakout scan ${sym} [acct${account.id}] error:`, err));
-      }
+      await _accountStore.run(account, async () => {
+        for (const sym of CONFIG.symbols) {
+          await runBreakout(sym).catch((err) => console.error(`Breakout scan ${sym} [acct${account.id}] error:`, err));
+        }
+      });
     }
-    _currentAccount = ACCOUNTS[0];
   }, 60 * 60 * 1000);
 
-  // New listing sniper — poll every 10 seconds for instant detection
+  // New listing sniper — poll every 10 seconds for instant detection (BitGet only)
   setInterval(async () => {
-    _currentAccount = ACCOUNTS[0];
-    await checkNewListings().catch(e => console.error("checkNewListings failed:", e.message));
+    await _accountStore.run(ACCOUNTS[0], () => checkNewListings()).catch(e => console.error("checkNewListings failed:", e.message));
   }, 10 * 1000);
 
   // Pre-announcement monitor — check BitGet announcement API every 5 minutes to get ahead of listings
   setInterval(async () => {
-    _currentAccount = ACCOUNTS[0];
-    await checkUpcomingListings().catch(e => console.error("checkUpcomingListings failed:", e.message));
+    await _accountStore.run(ACCOUNTS[0], () => checkUpcomingListings()).catch(e => console.error("checkUpcomingListings failed:", e.message));
   }, 5 * 60 * 1000);
 
   // Sniper exit monitor — check TP/SL/timeout every 15 seconds
   setInterval(async () => {
-    _currentAccount = ACCOUNTS[0];
-    await monitorSniperPositions().catch(e => console.error("monitorSniperPositions failed:", e.message));
+    await _accountStore.run(ACCOUNTS[0], () => monitorSniperPositions()).catch(e => console.error("monitorSniperPositions failed:", e.message));
   }, 15 * 1000);
 
   // Check all symbols every 5 minutes (scalp entry scan + exit check) — sequential to prevent log clobber
   setInterval(async () => {
     for (const account of ACCOUNTS) {
-      _currentAccount = account;
-      const pollSyms = [...CONFIG.symbols];
-      for (const sym of pollSyms) {
-        await run(null, sym).catch((err) => { console.error(`Poll ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); });
-      }
+      await _accountStore.run(account, async () => {
+        const pollSyms = [...CONFIG.symbols];
+        for (const sym of pollSyms) {
+          await run(null, sym).catch((err) => { console.error(`Poll ${sym} [acct${account.id}] error:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); });
+        }
+      });
     }
-    _currentAccount = ACCOUNTS[0];
     _lastScanTime = Date.now();
     _lastScanCount = CONFIG.symbols.length;
   }, 5 * 60 * 1000);
