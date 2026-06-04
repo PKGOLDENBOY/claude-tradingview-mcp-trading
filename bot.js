@@ -3559,10 +3559,14 @@ function startPriceStream(symbols) {
 async function checkLiveHardStops() {
   // Snapshot open positions once — but reload fresh log inside each iteration so that
   // if two stops fire in the same 5s cycle, the second save doesn't revert the first deletion.
-  const openPositions = Object.entries(loadLog().positions || {}).filter(([, p]) => p?.open);
+  const snap = loadLog();
+  const scalpOpen   = Object.entries(snap.positions         || {}).filter(([, p]) => p?.open).map(([s, p]) => [s, p, "positions"]);
+  const swingOpen   = Object.entries(snap.swingPositions    || {}).filter(([, p]) => p?.open).map(([s, p]) => [s, p, "swingPositions"]);
+  const breakoutOpen = Object.entries(snap.breakoutPositions|| {}).filter(([, p]) => p?.open).map(([s, p]) => [s, p, "breakoutPositions"]);
+  const openPositions = [...scalpOpen, ...swingOpen, ...breakoutOpen];
   if (openPositions.length === 0) return;
 
-  for (const [sym, pos] of openPositions) {
+  for (const [sym, pos, posStore] of openPositions) {
     if (_processingStops.has(sym)) continue;
     // Skip if main scan's run() is already processing this symbol — avoids concurrent sell + log-clobber race
     if (_runningSymbols.has(sym)) continue;
@@ -3571,7 +3575,8 @@ async function checkLiveHardStops() {
 
     const livePrice = live.price;
     const pnlPct = (livePrice - pos.entryPrice) / pos.entryPrice * 100;
-    const slPct = pos.slPct ?? ((typeof BACKTEST !== "undefined" && BACKTEST[sym]?.stopLoss) ? BACKTEST[sym].stopLoss : 0.04);
+    const defaultSl = posStore === "swingPositions" ? (SWING.stopLoss ?? 0.05) : posStore === "breakoutPositions" ? 0.03 : 0.04;
+    const slPct = pos.slPct ?? ((typeof BACKTEST !== "undefined" && BACKTEST[sym]?.stopLoss) ? BACKTEST[sym].stopLoss : defaultSl);
     const slPrice = pos.entryPrice * (1 - slPct);
     const emergencyHit = pnlPct <= -8;
     const slHit = livePrice <= slPrice;
@@ -3596,7 +3601,7 @@ async function checkLiveHardStops() {
       }
       // Reload fresh so concurrent stops don't clobber each other's saves
       const log = loadLog();
-      delete log.positions[sym];
+      if (log[posStore]) delete log[posStore][sym];
       log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
       log.trades.push({
         timestamp: new Date().toISOString(), type: "exit", symbol: sym,
@@ -3627,7 +3632,7 @@ async function checkLiveHardStops() {
         const totalUSD = totalBal * livePrice;
         if (totalUSD < 2.0) {
           const log = loadLog();
-          delete log.positions[sym];
+          if (log[posStore]) delete log[posStore][sym];
           if (!log.coinCooldowns) log.coinCooldowns = {};
           if (!log.coinCooldowns[sym]) log.coinCooldowns[sym] = {};
           log.coinCooldowns[sym].scalp = { until: Date.now() + 2 * 60 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
@@ -3771,11 +3776,13 @@ async function getOrderStatus(symbol, orderId) {
 
 async function checkTpOrders() {
   const log = loadLog();
-  const openWithTp = Object.entries(log.positions || {})
-    .filter(([, p]) => p?.open && p?.tpOrderId);
+  const scalp   = Object.entries(log.positions          || {}).filter(([, p]) => p?.open && p?.tpOrderId).map(([s, p]) => [s, p, "positions"]);
+  const swing   = Object.entries(log.swingPositions     || {}).filter(([, p]) => p?.open && p?.tpOrderId).map(([s, p]) => [s, p, "swingPositions"]);
+  const breakout = Object.entries(log.breakoutPositions || {}).filter(([, p]) => p?.open && p?.tpOrderId).map(([s, p]) => [s, p, "breakoutPositions"]);
+  const openWithTp = [...scalp, ...swing, ...breakout];
   if (openWithTp.length === 0) return;
 
-  for (const [sym, pos] of openWithTp) {
+  for (const [sym, pos, posStore] of openWithTp) {
     if (_processingStops.has(sym) || _runningSymbols.has(sym)) continue;
     const orderData = await getOrderStatus(sym, pos.tpOrderId);
     if (!orderData) continue;
@@ -3794,7 +3801,7 @@ async function checkTpOrders() {
       console.log(`\n🎯 RESTING TP FILLED [exchange] — ${sym} @ $${fillPrice.toFixed(4)} | +${pnlPct.toFixed(2)}% | $${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(2)}`);
 
       const freshLog = loadLog();
-      delete freshLog.positions[sym];
+      if (freshLog[posStore]) delete freshLog[posStore][sym];
       freshLog.portfolioValue = (freshLog.portfolioValue || acct().portfolioValue) + pnlUSD;
       const tradeRecord = {
         timestamp: new Date().toISOString(), type: "exit", symbol: sym,
@@ -3802,7 +3809,7 @@ async function checkTpOrders() {
         indicators: {}, exitReasons: [`Resting TP filled @ $${fillPrice.toFixed(4)} (+${pnlPct.toFixed(2)}%)`],
         shouldExit: true, quantity: pos.quantity,
         orderPlaced: true, orderId: pos.tpOrderId,
-        paperTrading: false, tpOrderFill: true,
+        paperTrading: false, tpOrderFill: true, tradeType: posStore === "positions" ? "scalp" : posStore.replace("Positions",""),
       };
       freshLog.trades.push(tradeRecord);
       if (!freshLog.coinCooldowns) freshLog.coinCooldowns = {};
@@ -4906,7 +4913,14 @@ async function run(tvSignal = null, symbol = null) {
         }
 
         // Reload fresh to prevent concurrent writes clobbering other swing positions
-        try { log.swingPositions = { ...(loadLog().swingPositions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId, tradeType: "swing", partialExitDone: false } }; } catch { log.swingPositions = { ...(log.swingPositions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId, tradeType: "swing", partialExitDone: false } }; }
+        try { log.swingPositions = { ...(loadLog().swingPositions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId, tradeType: "swing", partialExitDone: false, tpPct: SWING.takeProfit, slPct: SWING.stopLoss } }; } catch { log.swingPositions = { ...(log.swingPositions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId, tradeType: "swing", partialExitDone: false, tpPct: SWING.takeProfit, slPct: SWING.stopLoss } }; }
+        if (!CONFIG.paperTrading) {
+          const tpOrderId = await placeLimitSell(symbol, qty.toFixed(6), price * (1 + SWING.takeProfit));
+          if (tpOrderId) {
+            const _tpLog = (() => { try { return loadLog(); } catch { return log; } })();
+            if (_tpLog.swingPositions?.[symbol]) { _tpLog.swingPositions[symbol].tpOrderId = tpOrderId; saveLog(_tpLog); log.swingPositions = _tpLog.swingPositions; }
+          }
+        }
         const swingLog = {
           timestamp: new Date().toISOString(), type: "entry", symbol,
           timeframe: "4H", price, strategy: "swing", swingScore: swingSetup.score,
@@ -7575,6 +7589,10 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           reasons: exitReasons, orderPlaced: true,
           paperTrading: CONFIG.paperTrading, tradeType: "swing",
         };
+        if (!CONFIG.paperTrading && swingPos.tpOrderId) {
+          await cancelOrder(symbol, swingPos.tpOrderId);
+          console.log(`  📌 Cancelled resting swing TP ${swingPos.tpOrderId}`);
+        }
         log.swingPositions[symbol] = { ...swingPos, open: false };
         log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
         log.trades.push(exitEntry);
@@ -7582,8 +7600,11 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
         const swingCooldownMs = pnlPct < 0 ? 2 * 60 * 60 * 1000 : 30 * 60 * 1000;
         log.coinCooldowns[symbol].swing = { until: Date.now() + swingCooldownMs, pnlPct: pnlPct.toFixed(2) };
+        learnFromTrades(log);
         saveLog(log);
         writeTradeCsv(exitEntry);
+        await syncPortfolioBalance(log).catch(() => {});
+        await emailExit({ symbol, price, entryPrice: swingPos.entryPrice, pnlPct, pnlUSD, reasons: exitReasons, orderId: swingPos.orderId }).catch(() => {});
       }
       return;
     }
@@ -7678,7 +7699,15 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       open: true, side: "long", entryPrice: price, highWatermark: price,
       entryTime: new Date().toISOString(), quantity: qty.toFixed(6),
       orderId, tradeType: "swing", partialExitDone: false,
+      tpPct: btResult.takeProfit, slPct: btResult.stopLoss,
     }};
+    if (!CONFIG.paperTrading) {
+      const tpOrderId = await placeLimitSell(symbol, qty.toFixed(6), price * (1 + btResult.takeProfit));
+      if (tpOrderId) {
+        const _tpLog = (() => { try { return loadLog(); } catch { return log; } })();
+        if (_tpLog.swingPositions?.[symbol]) { _tpLog.swingPositions[symbol].tpOrderId = tpOrderId; saveLog(_tpLog); log.swingPositions = _tpLog.swingPositions; }
+      }
+    }
 
     const entryLog = {
       timestamp: new Date().toISOString(), type: "entry", symbol,
@@ -7690,6 +7719,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     log.trades.push(entryLog);
     saveLog(log);
     writeTradeCsv(entryLog);
+    await emailEntry({ symbol, price, tradeSize: swingSize, orderId });
 
     } finally {
       _runningSymbols.delete(symbol);
@@ -7773,6 +7803,10 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           price, pnlPct, pnlUSD: +pnlUSD.toFixed(4), reasons: exitReasons,
           orderPlaced: true, paperTrading: CONFIG.paperTrading, tradeType: "breakout",
         };
+        if (!CONFIG.paperTrading && bkPos.tpOrderId) {
+          await cancelOrder(symbol, bkPos.tpOrderId);
+          console.log(`  📌 Cancelled resting breakout TP ${bkPos.tpOrderId}`);
+        }
         log.breakoutPositions[symbol] = { ...bkPos, open: false };
         log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
         log.trades.push(exitEntry);
@@ -7780,8 +7814,11 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
         const bkCooldownMs = pnlPct < 0 ? 2 * 60 * 60 * 1000 : 30 * 60 * 1000;
         log.coinCooldowns[symbol].breakout = { until: Date.now() + bkCooldownMs, pnlPct: pnlPct.toFixed(2) };
+        learnFromTrades(log);
         saveLog(log);
         writeTradeCsv(exitEntry);
+        await syncPortfolioBalance(log).catch(() => {});
+        await emailExit({ symbol, price, entryPrice: bkPos.entryPrice, pnlPct, pnlUSD, reasons: exitReasons, orderId: bkPos.orderId }).catch(() => {});
       }
       return;
     }
@@ -7866,12 +7903,21 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       console.log(`📋 PAPER BREAKOUT BUY — $${bkSize.toFixed(2)} ${symbol} @ $${price.toFixed(4)}`);
     }
 
+    const bkTpPct = (targetPrice - price) / price;
+    const bkSlPct = 0.03;
     log.breakoutPositions = { ...(log.breakoutPositions || {}), [symbol]: {
       open: true, side: "long", entryPrice: price, highWatermark: price,
       entryTime: new Date().toISOString(), quantity: qty.toFixed(6),
       orderId, tradeType: "breakout", breakoutLevel: rangeHigh,
-      targetPrice, rangeLow, rangeHigh,
+      targetPrice, rangeLow, rangeHigh, tpPct: bkTpPct, slPct: bkSlPct,
     }};
+    if (!CONFIG.paperTrading) {
+      const tpOrderId = await placeLimitSell(symbol, qty.toFixed(6), targetPrice);
+      if (tpOrderId) {
+        const _tpLog = (() => { try { return loadLog(); } catch { return log; } })();
+        if (_tpLog.breakoutPositions?.[symbol]) { _tpLog.breakoutPositions[symbol].tpOrderId = tpOrderId; saveLog(_tpLog); log.breakoutPositions = _tpLog.breakoutPositions; }
+      }
+    }
     const entryLog = {
       timestamp: new Date().toISOString(), type: "entry", symbol, timeframe: "1H",
       price, tradeSize: bkSize, indicators: { ema8, ema21, range, volRatio: vol.current/vol.avg },
@@ -7881,6 +7927,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     log.trades.push(entryLog);
     saveLog(log);
     writeTradeCsv(entryLog);
+    await emailEntry({ symbol, price, tradeSize: bkSize, orderId });
 
     } finally {
       _runningSymbols.delete(symbol);
