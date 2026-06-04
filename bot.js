@@ -17,28 +17,28 @@ import { AsyncLocalStorage } from "async_hooks";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import WebSocket from "ws";
-import nodemailer from "nodemailer";
-
-// ─── Email notifications ──────────────────────────────────────────────────────
+// ─── Email notifications (Resend — HTTP, no SMTP, works on Railway) ──────────
 
 const EMAIL_TO = process.env.NOTIFY_EMAIL || "joshualiversage01@gmail.com";
-let _mailer = null;
-
-function getMailer() {
-  if (_mailer) return _mailer;
-  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) return null;
-  _mailer = nodemailer.createTransport({
-    service: "gmail",
-    auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
-  });
-  return _mailer;
-}
 
 async function sendEmail(subject, html) {
-  const mailer = getMailer();
-  if (!mailer) return;
+  if (!process.env.RESEND_API_KEY) return;
   try {
-    await mailer.sendMail({ from: `"Trading Bot 🤖" <${process.env.GMAIL_USER}>`, to: EMAIL_TO, subject, html });
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: "Trading Bot <onboarding@resend.dev>",
+        to: [EMAIL_TO],
+        subject,
+        html,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || res.statusText);
     console.log(`📧 Email sent: ${subject}`);
   } catch (e) {
     console.log(`📧 Email failed: ${e.message}`);
