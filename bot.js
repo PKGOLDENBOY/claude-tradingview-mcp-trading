@@ -4424,9 +4424,12 @@ async function run(tvSignal = null, symbol = null) {
       const notTooHot = gainerInfo.change24h <= 75;         // raised from 40% — still skip the 100%+ blowoffs
 
       const trendOk  = bullTrend1h;                             // 1H uptrend — momentum trades in downtrends fail
-      console.log(`  Vol: ${volRatio.toFixed(1)}x avg | RSI(3): ${rsi3?.toFixed(1)} (ceil ${rsiCeil}) | StochRSI K: ${stochRsi?.k?.toFixed(1) ?? "—"} | Above EMA8: ${price > ema8 ? "yes" : "no"} | 1H trend: ${bullTrend1h ? "✅ up" : "🔴 down"}`);
+      const regimeOk = regime.btcTrend !== "bear";              // no momentum buys in BTC bear — pumps reverse fast
+      console.log(`  Vol: ${volRatio.toFixed(1)}x avg | RSI(3): ${rsi3?.toFixed(1)} (ceil ${rsiCeil}) | StochRSI K: ${stochRsi?.k?.toFixed(1) ?? "—"} | Above EMA8: ${price > ema8 ? "yes" : "no"} | 1H trend: ${bullTrend1h ? "✅ up" : "🔴 down"} | BTC regime: ${regime.btcTrend}`);
 
-      if (rsiOk && stochOk && priceOk && volOk && notTooHot && trendOk) {
+      if (!regimeOk) {
+        console.log(`🚫 MOMENTUM BLOCK — BTC in bear regime. Pumps in bear markets reverse fast. Waiting for BTC to recover.`);
+      } else if (rsiOk && stochOk && priceOk && volOk && notTooHot && trendOk) {
         console.log(`\n✅ MOMENTUM ENTRY — big mover conditions met. Position (40% size, 2% SL, trailing stop).`);
         pushSignal(symbol, "ENTRY", `Big mover +${gainerInfo.change24h.toFixed(1)}% — momentum entry`);
         const momSize = Math.min(currentPortfolio * sizePct * 0.40, CONFIG.maxTradeSizeUSD ?? Infinity);
