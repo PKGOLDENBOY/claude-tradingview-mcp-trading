@@ -3571,7 +3571,7 @@ async function checkLiveHardStops() {
 
     const livePrice = live.price;
     const pnlPct = (livePrice - pos.entryPrice) / pos.entryPrice * 100;
-    const slPct = (typeof BACKTEST !== "undefined" && BACKTEST[sym]?.stopLoss) ? BACKTEST[sym].stopLoss : 0.04;
+    const slPct = pos.slPct ?? ((typeof BACKTEST !== "undefined" && BACKTEST[sym]?.stopLoss) ? BACKTEST[sym].stopLoss : 0.04);
     const slPrice = pos.entryPrice * (1 - slPct);
     const emergencyHit = pnlPct <= -8;
     const slHit = livePrice <= slPrice;
@@ -3610,7 +3610,10 @@ async function checkLiveHardStops() {
       if (!log.coinCooldowns) log.coinCooldowns = {};
       if (!log.coinCooldowns[sym]) log.coinCooldowns[sym] = {};
       log.coinCooldowns[sym].scalp = { until: Date.now() + 2 * 60 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
+      learnFromTrades(log);
       saveLog(log);
+      writeTradeCsv(log.trades[log.trades.length - 1]);
+      await syncPortfolioBalance(log).catch(() => {});
       console.log(`⏳ Hard stop cooldown — ${sym} blocked for 2h (P&L: ${pnlPct.toFixed(2)}%)`);
       console.log(`💰 Portfolio: $${log.portfolioValue.toFixed(4)}`);
     } catch (err) {
@@ -4465,16 +4468,23 @@ async function run(tvSignal = null, symbol = null) {
           paperTrading: CONFIG.paperTrading,
           limits: { maxTradeSizeUSD: CONFIG.maxTradeSizeUSD, maxTradesPerDay: CONFIG.maxTradesPerDay, tradesToday: countTodaysTrades(log) },
         };
+        const momTpPct = 0.10;
+        const momSlPct = 0.04;
         if (CONFIG.paperTrading) {
           momEntry.orderPlaced = true; momEntry.orderId = `PAPER-${Date.now()}`;
-          try { log.positions = { ...(loadLog().positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (momSize / price).toFixed(6), orderId: momEntry.orderId, entryType: "momentum" } }; } catch { log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (momSize / price).toFixed(6), orderId: momEntry.orderId, entryType: "momentum" } }; }
+          try { log.positions = { ...(loadLog().positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (momSize / price).toFixed(6), orderId: momEntry.orderId, entryType: "momentum", tpPct: momTpPct, slPct: momSlPct } }; } catch { log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (momSize / price).toFixed(6), orderId: momEntry.orderId, entryType: "momentum", tpPct: momTpPct, slPct: momSlPct } }; }
         } else {
           try {
             const order = await placeOrder(symbol, "buy", momSize, price);
             const qty = order.confirmedQty ?? (momSize / price);
             momEntry.orderPlaced = true; momEntry.orderId = order.orderId;
             // Reload fresh before writing position — prevents stale log overwriting concurrent writes
-            try { log.positions = { ...(loadLog().positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId: order.orderId, entryType: "momentum" } }; } catch { log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId: order.orderId, entryType: "momentum" } }; }
+            try { log.positions = { ...(loadLog().positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId: order.orderId, entryType: "momentum", tpPct: momTpPct, slPct: momSlPct } }; } catch { log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId: order.orderId, entryType: "momentum", tpPct: momTpPct, slPct: momSlPct } }; }
+            const tpOrderId = await placeLimitSell(symbol, qty.toFixed(6), price * (1 + momTpPct));
+            if (tpOrderId) {
+              const _tpLog = (() => { try { return loadLog(); } catch { return log; } })();
+              if (_tpLog.positions?.[symbol]) { _tpLog.positions[symbol].tpOrderId = tpOrderId; saveLog(_tpLog); log.positions = _tpLog.positions; }
+            }
             await emailEntry({ symbol, price, tradeSize: momSize, orderId: order.orderId });
           } catch(err) {
             console.error(`\n❌ Momentum order failed: ${err.message}`);
@@ -4796,11 +4806,13 @@ async function run(tvSignal = null, symbol = null) {
         paperTrading: CONFIG.paperTrading,
         limits: { maxTradeSizeUSD: CONFIG.maxTradeSizeUSD, maxTradesPerDay: CONFIG.maxTradesPerDay, tradesToday: countTodaysTrades(log) },
       };
+      const listingTpPct = 0.10;
+      const listingSlPct = 0.04;
       if (CONFIG.paperTrading) {
         console.log(`\n📋 PAPER TRADE — would buy ${symbol} ~$${tradeSize.toFixed(2)} at market`);
         momEntry.orderPlaced = true;
         momEntry.orderId = `PAPER-${Date.now()}`;
-        log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (tradeSize / price).toFixed(6), orderId: momEntry.orderId, entryType: "momentum" } };
+        log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (tradeSize / price).toFixed(6), orderId: momEntry.orderId, entryType: "momentum", tpPct: listingTpPct, slPct: listingSlPct } };
       } else {
         console.log(`\n🔴 PLACING LIVE MOMENTUM ORDER — $${tradeSize.toFixed(2)} BUY ${symbol}`);
         try {
@@ -4808,8 +4820,13 @@ async function run(tvSignal = null, symbol = null) {
           const actualQty = order.confirmedQty ?? (tradeSize / price);
           momEntry.orderPlaced = true;
           momEntry.orderId = order.orderId;
-          log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: actualQty.toFixed(6), orderId: order.orderId, entryType: "momentum" } };
-          console.log(`✅ MOMENTUM ORDER PLACED — ${order.orderId} | qty: ${actualQty.toFixed(6)} | stop: -3% | TP: +10%`);
+          log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: actualQty.toFixed(6), orderId: order.orderId, entryType: "momentum", tpPct: listingTpPct, slPct: listingSlPct } };
+          const tpOrderId = await placeLimitSell(symbol, actualQty.toFixed(6), price * (1 + listingTpPct));
+          if (tpOrderId) {
+            const _tpLog = (() => { try { return loadLog(); } catch { return log; } })();
+            if (_tpLog.positions?.[symbol]) { _tpLog.positions[symbol].tpOrderId = tpOrderId; saveLog(_tpLog); log.positions = _tpLog.positions; }
+          }
+          console.log(`✅ MOMENTUM ORDER PLACED — ${order.orderId} | qty: ${actualQty.toFixed(6)} | stop: -4% | TP: +10%`);
         } catch (err) {
           console.log(`❌ ORDER FAILED — ${err.message}`);
           momEntry.error = err.message;
@@ -7309,11 +7326,37 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       return;
     }
 
-    // Legacy status endpoint
+    // Status endpoint — also prints to Railway logs so you can read it there
     if (req.method === "GET" && path === "/status") {
       const log = loadLog();
+      const openPositions = Object.entries(log.positions || {}).filter(([, p]) => p?.open);
+      const positionSummary = openPositions.map(([sym, p]) => {
+        const live = livePrices.get(sym);
+        const livePrice = live?.price ?? null;
+        const pnlPct = livePrice ? ((livePrice - p.entryPrice) / p.entryPrice * 100) : null;
+        const pnlUSD = livePrice ? (livePrice - p.entryPrice) * parseFloat(p.quantity) : null;
+        return { sym, entryPrice: p.entryPrice, livePrice, pnlPct: pnlPct?.toFixed(2), pnlUSD: pnlUSD?.toFixed(2), qty: p.quantity, tpPct: p.tpPct, slPct: p.slPct, tpOrderId: p.tpOrderId ?? null };
+      });
+
+      const btcLive = livePrices.get("BTCUSDT");
+      const statusOut = {
+        time: new Date().toISOString(),
+        portfolio: log.portfolioValue?.toFixed(2),
+        paused: _tradingPaused,
+        openCount: openPositions.length,
+        positions: positionSummary,
+        btcPrice: btcLive?.price ?? null,
+        lastScan: _lastScanTime ? new Date(_lastScanTime).toISOString() : null,
+      };
+
+      // Print to Railway logs so it's visible without hitting the URL
+      console.log(`\n📊 STATUS — ${statusOut.time}`);
+      console.log(`  Portfolio: $${statusOut.portfolio} | Paused: ${statusOut.paused} | Open: ${statusOut.openCount}`);
+      positionSummary.forEach(p => console.log(`  ${p.sym}: entry $${p.entryPrice} | live $${p.livePrice ?? "—"} | P&L ${p.pnlPct ?? "—"}% ($${p.pnlUSD ?? "—"}) | TP: ${p.tpOrderId ? "resting ✅" : "poll 🔄"}`));
+      console.log(`  BTC: $${statusOut.btcPrice ?? "—"} | Last scan: ${statusOut.lastScan ?? "—"}\n`);
+
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ portfolio: log.portfolioValue, positions: log.positions, paused: _tradingPaused }));
+      res.end(JSON.stringify(statusOut));
       return;
     }
 
