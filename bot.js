@@ -3615,6 +3615,23 @@ async function checkLiveHardStops() {
       console.log(`💰 Portfolio: $${log.portfolioValue.toFixed(4)}`);
     } catch (err) {
       console.error(`Stop sell failed for ${sym}: ${err.message}`);
+      // Dust cleanup — if the actual balance is below $1 (e.g. resting TP partially filled),
+      // the position is unsellable. Wipe it from the log so the retry loop stops.
+      const isDust = err.message.startsWith("DUST:") || err.message.includes("Parameter verification exception size");
+      if (isDust) {
+        const baseCoin = sym.replace("USDT", "");
+        const totalBal = await getSpotBalanceTotal(baseCoin).catch(() => 0);
+        const totalUSD = totalBal * livePrice;
+        if (totalUSD < 2.0) {
+          const log = loadLog();
+          delete log.positions[sym];
+          if (!log.coinCooldowns) log.coinCooldowns = {};
+          if (!log.coinCooldowns[sym]) log.coinCooldowns[sym] = {};
+          log.coinCooldowns[sym].scalp = { until: Date.now() + 2 * 60 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
+          saveLog(log);
+          console.log(`🗑️  Dust cleanup [hard stop] — ${sym} $${totalUSD.toFixed(4)} unsellable, removed from log`);
+        }
+      }
     } finally {
       _processingStops.delete(sym);
     }
@@ -3758,7 +3775,12 @@ async function checkTpOrders() {
   for (const [sym, pos] of openWithTp) {
     if (_processingStops.has(sym) || _runningSymbols.has(sym)) continue;
     const orderData = await getOrderStatus(sym, pos.tpOrderId);
-    if (!orderData || orderData.status !== "full_fill") continue;
+    if (!orderData) continue;
+    // Treat partial fills that left dust as full exits — remaining $<1 is unsellable anyway
+    const isFull = orderData.status === "full_fill";
+    const isPartialDust = orderData.status === "partial_fill" && parseFloat(orderData.priceAvg || 0) > 0 &&
+      (parseFloat(pos.quantity) * parseFloat(orderData.priceAvg || 0) - parseFloat(orderData.accBaseVolume || 0) * parseFloat(orderData.priceAvg || 0)) < 1.0;
+    if (!isFull && !isPartialDust) continue;
 
     _processingStops.add(sym);
     try {
