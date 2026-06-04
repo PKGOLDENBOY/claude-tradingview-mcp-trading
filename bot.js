@@ -4966,15 +4966,16 @@ async function run(tvSignal = null, symbol = null) {
     console.log(`  ${volAccel >= 1.0 ? "✅" : "⚠️ "} Volume ${volAccel >= 1.5 ? "surging" : volAccel >= 1.0 ? "holding/rising" : "light"} (${volAccel.toFixed(2)}× prev candle)${(vwapBounceMode || bearSnapBack) && volAccel < 1.0 ? " — bypassed (VWAP bounce / snap-back)" : ""}`);
 
     // Sustained volume gate — 3-bar average must be ≥ 100% of 20-bar avg.
-    // Prevents entering on a single-bar spike that collapses next bar and triggers "Volume dried up" exit.
-    // Applies to ALL entry modes including VWAP bounce (thin-volume coins still churn).
-    if (vol && vol.vol3Ratio < 1.00) {
-      console.log(`🚫 VOLUME GATE — 3-bar avg volume only ${(vol.vol3Ratio * 100).toFixed(0)}% of 20-bar avg (need 100%+). Volume not sustained — likely to dry up immediately after entry.`);
+    // bearSnapBack uses 50% threshold: crash dump candles inflate the 20-bar avg, so bounce candles
+    // will always look thin by comparison. Require some volume but not full avg.
+    const volThreshold = bearSnapBack ? 0.50 : 1.00;
+    if (vol && vol.vol3Ratio < volThreshold) {
+      console.log(`🚫 VOLUME GATE — 3-bar avg volume only ${(vol.vol3Ratio * 100).toFixed(0)}% of 20-bar avg (need ${(volThreshold * 100).toFixed(0)}%+). Volume not sustained.`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Thin volume — 3-bar avg ${(vol.vol3Ratio * 100).toFixed(0)}% of avg (need 100%)`);
+      pushSignal(symbol, "BLOCKED", `Thin volume — 3-bar avg ${(vol.vol3Ratio * 100).toFixed(0)}% of avg (need ${(volThreshold * 100).toFixed(0)}%)`);
       return;
     }
-    if (vol) console.log(`  ✅ Volume sustained — 3-bar avg ${(vol.vol3Ratio * 100).toFixed(0)}% of 20-bar avg`);
+    if (vol) console.log(`  ✅ Volume sustained — 3-bar avg ${(vol.vol3Ratio * 100).toFixed(0)}% of 20-bar avg (threshold ${(volThreshold * 100).toFixed(0)}%)`);
 
     // Live backtest gate — run fresh 1000-candle backtest before every buy
     console.log(`\n── Live Backtest Gate ───────────────────────────────────\n`);
