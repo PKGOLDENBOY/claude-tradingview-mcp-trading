@@ -367,7 +367,7 @@ const LT_COINS = [
   "FLOWUSDT","KAVAUSDT","PAALUSDT","MERLUSDT",
 ];
 
-const BASE_WATCHLIST = ["ATOMUSDT","GOMININGUSDT","AXSUSDT","KAVAUSDT","SOLUSDT","XLMUSDT"];
+const BASE_WATCHLIST = ["ATOMUSDT","GOMININGUSDT","AXSUSDT","KAVAUSDT","SOLUSDT"];
 const WATCHLIST = [...new Set([
   ...BASE_WATCHLIST,
   ...(process.env.WATCHLIST || "").split(",").map(s => s.trim().toUpperCase()).filter(Boolean),
@@ -3857,7 +3857,7 @@ async function checkTpOrders() {
       freshLog.trades.push(tradeRecord);
       if (!freshLog.coinCooldowns) freshLog.coinCooldowns = {};
       if (!freshLog.coinCooldowns[sym]) freshLog.coinCooldowns[sym] = {};
-      freshLog.coinCooldowns[sym].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
+      freshLog.coinCooldowns[sym].scalp = { until: Date.now() + 2 * 60 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
       const _ltChanged = learnFromTrades(freshLog);
       saveLog(freshLog);
       if (_ltChanged) saveLog(freshLog);
@@ -4418,9 +4418,9 @@ async function run(tvSignal = null, symbol = null) {
       // Per-coin per-strategy cooldown: only blocks scalp re-entry, not swing/LT
       if (!log.coinCooldowns) log.coinCooldowns = {};
       if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
-      const cooldownMs = pnlPct < 0 ? 2 * 60 * 60 * 1000 : 30 * 60 * 1000;
+      const cooldownMs = 2 * 60 * 60 * 1000; // 2h regardless of win/loss — prevents churn re-entries
       log.coinCooldowns[symbol].scalp = { until: Date.now() + cooldownMs, pnlPct: pnlPct.toFixed(2) };
-      console.log(`⏳ Scalp cooldown set for ${symbol} — no scalp re-entry for ${pnlPct < 0 ? "2h (loss)" : "30min (exit)"} (P&L: ${pnlPct.toFixed(2)}%)`);
+      console.log(`⏳ Scalp cooldown set for ${symbol} — no scalp re-entry for 2h (P&L: ${pnlPct.toFixed(2)}%)`);
       saveLog(log);
       console.log(`\nDecision log saved → ${LOG_FILE}`);
       writeTradeCsv(logEntry);
