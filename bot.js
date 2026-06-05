@@ -2507,7 +2507,16 @@ async function reconcilePositions(log) {
       const usdValue = qty * price;
       if (usdValue < 5) continue; // skip dust < $5
 
-      // Skip coins recently sold by the bot — reconciliation would re-add dust as a position
+      // Skip coins with active scalp cooldown — cooldown is written to disk BEFORE the sell order is placed,
+      // so this is the most reliable guard against reconcile re-adding a just-sold position
+      const cooldown = log.coinCooldowns?.[symbol]?.scalp;
+      if (cooldown && Date.now() < cooldown.until) {
+        const minsLeft = Math.ceil((cooldown.until - Date.now()) / 60000);
+        console.log(`🔒 Reconcile skip ${symbol} — active scalp cooldown (${minsLeft}min left, pnl=${cooldown.pnlPct})`);
+        continue;
+      }
+
+      // Secondary check: trade history for recent exits
       const recentlySold = (log.trades || []).slice(-50).some(t =>
         t.type === "exit" && t.symbol === symbol && t.orderPlaced &&
         Date.now() - new Date(t.timestamp).getTime() < 4 * 60 * 60 * 1000
