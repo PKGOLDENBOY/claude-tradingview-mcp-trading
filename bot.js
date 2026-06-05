@@ -935,7 +935,7 @@ async function scanNewListings(allTickers) {
     .filter(t =>
       t.symbol.endsWith("USDT") &&
       !/UP|DOWN|BEAR|BULL|USDC|TUSD|BUSD|DAI/.test(t.symbol) &&
-      parseFloat(t.usdtVolume) > 2_000_000 &&   // $2M+ volume
+      parseFloat(t.usdtVolume) > 20_000_000 &&  // $20M+ — new coins below this gap through stops
       parseFloat(t.change24h) > 0.08             // > 8% gain today — new listings pump hard
     )
     .sort((a, b) => parseFloat(b.change24h) - parseFloat(a.change24h))
@@ -973,13 +973,13 @@ async function refreshTopMovers() {
       !_insufficientHistory.has(t.symbol) &&
       !/UP|DOWN|BEAR|BULL|USDC|TUSD|BUSD|DAI|USD1|FDUSD|RLUSD|PAXG|XAUT/.test(t.symbol) &&
       parseFloat(t.lastPr) >= 0.001 &&
-      parseFloat(t.usdtVolume) > 1_000_000   // $1M+ volume — broad but liquid
+      parseFloat(t.usdtVolume) > 5_000_000   // $5M+ volume — filters illiquid coins that gap through stops
     );
 
     // Cache top 20 gainers for dashboard + momentum path
     _topGainers = allCoins
       .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPr), change24h: parseFloat(t.change24h) * 100, vol: parseFloat(t.usdtVolume) }))
-      .filter(t => t.change24h > 0 && t.vol >= 1_000_000)
+      .filter(t => t.change24h > 0 && t.vol >= 10_000_000)  // $10M+ for momentum path only
       .sort((a, b) => b.change24h - a.change24h)
       .slice(0, 20);
 
@@ -4788,10 +4788,10 @@ async function run(tvSignal = null, symbol = null) {
         }
         // Layer 2: sustained multi-day downtrend — persists through the midnight reset
         // Fires when BTC is down >6% over 3 rolling days AND 4H structure is bearish.
-        // Exception: bearSnapBack (RSI<25 + StochRSI/MACD confirmation) — panic-bounce trades
-        // are specifically designed for crash conditions and use 40% size + 2% SL.
-        if (btc3dayChange <= -6 && btc4hBearish && !bearSnapBack) {
-          console.log(`🛑 MULTI-DAY BEAR BLOCK — BTC down ${btc3dayChange.toFixed(2)}% over 3 days + 4H bearish. Midnight reset doesn't clear a week-long downtrend.`);
+        // No snap-back exception — during a sustained crash, oversold keeps going lower.
+        // Data shows snap-back entries during -6%+ crashes produce outsized losses.
+        if (btc3dayChange <= -6 && btc4hBearish) {
+          console.log(`🛑 MULTI-DAY BEAR BLOCK — BTC down ${btc3dayChange.toFixed(2)}% over 3 days + 4H bearish. All entries blocked including snap-backs.`);
           console.log("═══════════════════════════════════════════════════════════\n");
           pushSignal(symbol, "BLOCKED", `Multi-day bear — BTC ${btc3dayChange.toFixed(1)}% over 3 days + 4H bearish`);
           return;
