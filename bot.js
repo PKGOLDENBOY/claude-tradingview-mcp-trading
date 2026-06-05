@@ -276,6 +276,12 @@ let _lastTradeAt = null;    // ISO timestamp of most recent executed order
 // Per-symbol mutex — prevents duplicate exits when poll + webhook run concurrently
 const _runningSymbols = new Set();
 
+// Post-sell lock — set in-memory the instant a sell fires, before log is even saved.
+// Prevents any entry path from re-buying the same coin for 30 minutes regardless of
+// log state, race conditions, or concurrent timers.
+const _recentlySold = new Map(); // symbol → timestamp of last sell
+const POST_SELL_LOCK_MS = 30 * 60 * 1000; // 30 min
+
 // Per-coin latest scan data — shown in dashboard coin detail view
 const coinSnapshots = {};
 
@@ -374,7 +380,7 @@ const WATCHLIST = [...new Set([
 ])];
 
 const CONFIG = {
-  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "NEARUSDT,BNBUSDT,LINKUSDT,SOLUSDT,ADAUSDT,DOTUSDT,ZECUSDT,KAVAUSDT,AXSUSDT")
+  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "NEARUSDT,BNBUSDT,LINKUSDT,SOLUSDT,INJUSDT,ADAUSDT,DOTUSDT,ZECUSDT,KAVAUSDT,AXSUSDT")
     .replace(/^SYMBOLS=/i, "")
     .split(",")
     .map((s) => s.trim().toUpperCase()),
@@ -3626,6 +3632,7 @@ async function checkLiveHardStops() {
     _processingStops.add(sym);
     const reason = emergencyHit ? `Emergency stop ${pnlPct.toFixed(2)}%` : `Stop-loss $${slPrice.toFixed(4)} (${(slPct*100).toFixed(0)}%)`;
     console.log(`\n🚨 LIVE STOP [WebSocket] — ${sym} @ $${livePrice.toFixed(4)} | ${reason}`);
+    _recentlySold.set(sym, Date.now()); // lock immediately before placing sell
 
     try {
       const pnlUSD = (livePrice - pos.entryPrice) * parseFloat(pos.quantity);
@@ -3854,6 +3861,7 @@ async function checkTpOrders() {
       const pnlPct = (fillPrice - pos.entryPrice) / pos.entryPrice * 100;
       const pnlUSD = (fillPrice - pos.entryPrice) * qty;
       console.log(`\n🎯 RESTING TP FILLED [exchange] — ${sym} @ $${fillPrice.toFixed(4)} | +${pnlPct.toFixed(2)}% | $${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(2)}`);
+      _recentlySold.set(sym, Date.now()); // lock immediately on TP fill
 
       const freshLog = loadLog();
       if (freshLog[posStore]) delete freshLog[posStore][sym];
@@ -4376,6 +4384,7 @@ async function run(tvSignal = null, symbol = null) {
           } else {
             await cancelAllSymbolOrders(symbol);
           }
+          _recentlySold.set(symbol, Date.now()); // in-memory lock — blocks re-entry before log is saved
           const order = await placeOrder(symbol, "sell", null, price, position.quantity);
           logEntry.orderPlaced = true;
           logEntry.orderId = order.orderId;
@@ -4459,6 +4468,16 @@ async function run(tvSignal = null, symbol = null) {
 
   } else {
     // ── ENTRY FLOW ──────────────────────────────────────────────────────────
+
+    // Post-sell lock — fastest gate, checked before anything else
+    const soldAt = _recentlySold.get(symbol);
+    if (soldAt && Date.now() - soldAt < POST_SELL_LOCK_MS) {
+      const minsLeft = Math.ceil((POST_SELL_LOCK_MS - (Date.now() - soldAt)) / 60000);
+      console.log(`🔒 POST-SELL LOCK — ${symbol} sold ${Math.floor((Date.now()-soldAt)/1000)}s ago, blocked for ${minsLeft}min`);
+      console.log("═══════════════════════════════════════════════════════════\n");
+      pushSignal(symbol, "BLOCKED", `Post-sell lock — ${minsLeft}min remaining`);
+      return;
+    }
 
     // Hard block — never trade exchange tokens or wrapped assets
     if (["BGBUSDT","BSVUSDT","WBTCUSDT","STETHUSDT"].includes(symbol)) {
