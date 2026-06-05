@@ -3782,6 +3782,24 @@ async function cancelOrder(symbol, orderId) {
   }
 }
 
+async function cancelAllSymbolOrders(symbol) {
+  try {
+    const ts = Date.now().toString();
+    const path = "/api/v2/spot/trade/cancel-symbol-orders";
+    const body = JSON.stringify({ symbol });
+    const sign = signBitGet(ts, "POST", path, body);
+    const res = await fetch(`${acct().baseUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
+      body,
+    });
+    const d = await res.json();
+    console.log(`  🗑️  Cancelled all open orders for ${symbol}: ${d.msg || "ok"}`);
+  } catch (err) {
+    console.log(`  ⚠️  cancelAllSymbolOrders(${symbol}) failed: ${err.message}`);
+  }
+}
+
 async function getOrderStatus(symbol, orderId) {
   try {
     const ts = Date.now().toString();
@@ -4327,9 +4345,12 @@ async function run(tvSignal = null, symbol = null) {
       } else {
         console.log(`\n🔴 PLACING LIVE SELL — ${position.quantity} ${symbol}`);
         try {
+          // Cancel known TP order + any unknown resting orders (reconciled positions have no tpOrderId)
           if (position.tpOrderId) {
             await cancelOrder(symbol, position.tpOrderId);
             console.log(`  📌 Cancelled resting TP ${position.tpOrderId}`);
+          } else {
+            await cancelAllSymbolOrders(symbol);
           }
           const order = await placeOrder(symbol, "sell", null, price, position.quantity);
           logEntry.orderPlaced = true;
@@ -4349,8 +4370,27 @@ async function run(tvSignal = null, symbol = null) {
             const totalBal = await getSpotBalanceTotal(baseCoin).catch(() => 0);
             const totalUSD = totalBal * price;
             if (totalUSD >= 2.0) {
-              // Real position — coins may be frozen in a pending order; don't wipe from log
-              console.log(`⚠️  Sell failed but $${totalUSD.toFixed(2)} of ${baseCoin} still held (may be frozen) — keeping position, will retry`);
+              // Coins still frozen — cancel ALL open orders then force-sell whatever is available
+              console.log(`⚠️  Sell failed, $${totalUSD.toFixed(2)} of ${baseCoin} frozen — cancelling all orders and retrying`);
+              await cancelAllSymbolOrders(symbol);
+              await new Promise(r => setTimeout(r, 1500)); // wait for cancel to settle
+              try {
+                const freshBal = await getSpotBalanceTotal(baseCoin).catch(() => 0);
+                if (freshBal * price >= 1.0) {
+                  const retryOrder = await placeOrder(symbol, "sell", null, price, (freshBal * 0.999).toFixed(6));
+                  logEntry.orderPlaced = true;
+                  logEntry.orderId = retryOrder.orderId;
+                  delete (log.positions || {})[symbol]; log.positions = { ...(log.positions || {}) };
+                  log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
+                  console.log(`✅ RETRY SELL PLACED — ${retryOrder.orderId}`);
+                } else {
+                  console.log(`🗑️  After cancel, balance still dust — removing from log`);
+                  delete (log.positions || {})[symbol]; log.positions = { ...(log.positions || {}) };
+                  logEntry.orderPlaced = true; logEntry.orderId = "DUST-CLEANUP";
+                }
+              } catch (retryErr) {
+                console.log(`❌ Retry sell also failed: ${retryErr.message}`);
+              }
             } else {
               console.log(`🗑️  Dust cleanup — ${symbol} total balance $${totalUSD.toFixed(4)} is unsellable, removing from log`);
               delete (log.positions || {})[symbol];
