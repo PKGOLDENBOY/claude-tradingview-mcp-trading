@@ -2451,6 +2451,53 @@ async function syncPortfolioBalance(log) {
 
 // On Railway, the log is wiped on every redeploy. This function re-discovers any
 // open positions by comparing actual BitGet balances against the log.
+// On startup, restore _recentlySold from BitGet fill history so the in-memory gate
+// works immediately — before any webhook can arrive in the new container.
+async function initRecentlySold(log) {
+  if (CONFIG.paperTrading || acct().exchange !== "bitget") return;
+  try {
+    const WINDOW = 35 * 60 * 1000;
+    const ts = Date.now().toString();
+    const path = `/api/v2/spot/trade/fills?limit=100&startTime=${Date.now() - WINDOW}`;
+    const sig = signBitGet(ts, "GET", path);
+    const res = await fetch(`${acct().baseUrl}${path}`, {
+      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sig, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" }
+    });
+    const data = await res.json();
+    const fills = data.data || [];
+    const recentSells = {};
+    for (const f of fills) {
+      if (f.side === "sell") {
+        const sym = f.symbol.toUpperCase();
+        const t = parseInt(f.cTime);
+        if (!recentSells[sym] || t > recentSells[sym]) recentSells[sym] = t;
+      }
+    }
+    const now = Date.now();
+    let locked = 0;
+    for (const [sym, sellTime] of Object.entries(recentSells)) {
+      const remaining = POST_SELL_LOCK_MS - (now - sellTime);
+      if (remaining <= 0) continue;
+      _recentlySold.set(sym, sellTime);
+      locked++;
+      const minsLeft = Math.ceil(remaining / 60000);
+      console.log(`🔒 Startup lock: ${sym} sold ${Math.floor((now - sellTime) / 60000)}min ago — blocking re-entry for ${minsLeft}min`);
+      // Also write to disk so the cooldown check works even if _recentlySold is bypassed
+      if (log) {
+        if (!log.coinCooldowns) log.coinCooldowns = {};
+        if (!log.coinCooldowns[sym]) log.coinCooldowns[sym] = {};
+        if (!(log.coinCooldowns[sym].scalp?.until > now)) {
+          log.coinCooldowns[sym].scalp = { until: sellTime + POST_SELL_LOCK_MS, pnlPct: "startup-restore" };
+        }
+      }
+    }
+    if (locked > 0) console.log(`🔒 initRecentlySold: ${locked} coin(s) locked from BitGet fill history`);
+    else console.log(`🔒 initRecentlySold: no recent sells — all coins unlocked`);
+  } catch (e) {
+    console.log(`⚠️ initRecentlySold failed: ${e.message}`);
+  }
+}
+
 async function reconcilePositions(log) {
   if (CONFIG.paperTrading || acct().exchange !== "bitget") return;
   try {
@@ -8589,6 +8636,7 @@ async function monitorSniperPositions() {
           if (!CONFIG.paperTrading) {
             const startLog = loadLog();
             await syncPortfolioBalance(startLog).catch(e => console.error("syncPortfolioBalance failed:", e.message));
+            await initRecentlySold(startLog).catch(e => console.error("initRecentlySold failed:", e.message));
             await reconcilePositions(startLog).catch(e => console.error("reconcilePositions failed:", e.message));
             await sweepDust(startLog).catch(e => console.error("sweepDust failed:", e.message));
             saveLog(startLog);
