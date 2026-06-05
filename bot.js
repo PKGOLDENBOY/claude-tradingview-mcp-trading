@@ -3784,17 +3784,19 @@ async function cancelOrder(symbol, orderId) {
 
 async function cancelAllSymbolOrders(symbol) {
   try {
+    // Fetch open orders then cancel individually (bulk cancel endpoint is not available)
     const ts = Date.now().toString();
-    const path = "/api/v2/spot/trade/cancel-symbol-orders";
-    const body = JSON.stringify({ symbol });
-    const sign = signBitGet(ts, "POST", path, body);
-    const res = await fetch(`${acct().baseUrl}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
-      body,
+    const listPath = `/api/v2/spot/trade/unfilled-orders?symbol=${symbol}&limit=20`;
+    const listSign = signBitGet(ts, "GET", listPath);
+    const listRes = await fetch(`${acct().baseUrl}${listPath}`, {
+      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": listSign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
     });
-    const d = await res.json();
-    console.log(`  🗑️  Cancelled all open orders for ${symbol}: ${d.msg || "ok"}`);
+    const listData = await listRes.json();
+    const orders = listData.data || [];
+    console.log(`  🗑️  Found ${orders.length} open orders for ${symbol}`);
+    for (const o of orders) {
+      await cancelOrder(symbol, o.orderId);
+    }
   } catch (err) {
     console.log(`  ⚠️  cancelAllSymbolOrders(${symbol}) failed: ${err.message}`);
   }
@@ -4373,11 +4375,13 @@ async function run(tvSignal = null, symbol = null) {
               // Coins still frozen — cancel ALL open orders then force-sell whatever is available
               console.log(`⚠️  Sell failed, $${totalUSD.toFixed(2)} of ${baseCoin} frozen — cancelling all orders and retrying`);
               await cancelAllSymbolOrders(symbol);
-              await new Promise(r => setTimeout(r, 1500)); // wait for cancel to settle
+              await new Promise(r => setTimeout(r, 2000)); // wait for cancel to settle
               try {
-                const freshBal = await getSpotBalanceTotal(baseCoin).catch(() => 0);
+                const freshBal = await getSpotBalance(baseCoin).catch(() => 0); // available only
                 if (freshBal * price >= 1.0) {
-                  const retryOrder = await placeOrder(symbol, "sell", null, price, (freshBal * 0.999).toFixed(6));
+                  // Use integer qty for coins that require it (e.g. KAS scale=0)
+                  const retryQty = Math.floor(freshBal * 0.999 * 100) / 100;
+                  const retryOrder = await placeOrder(symbol, "sell", null, price, retryQty.toString());
                   logEntry.orderPlaced = true;
                   logEntry.orderId = retryOrder.orderId;
                   delete (log.positions || {})[symbol]; log.positions = { ...(log.positions || {}) };
