@@ -7651,6 +7651,43 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
             res.end(JSON.stringify({ error: `Unknown symbol: ${sym}. Allowed: ${CONFIG.symbols.join(", ")}` }));
             return;
           }
+          // For BUY signals: check BitGet fill history before calling run().
+          // This is the outermost gate — runs before _recentlySold, before disk cooldown,
+          // before anything else. Survives Railway restarts because it reads from BitGet directly.
+          if (action === "BUY" && !CONFIG.paperTrading && acct().exchange === "bitget") {
+            try {
+              const THIRTY_FIVE_MIN = 35 * 60 * 1000;
+              const efTs2 = Date.now().toString();
+              const efPath2 = `/api/v2/spot/trade/fills?limit=50&startTime=${Date.now() - THIRTY_FIVE_MIN}`;
+              const efSign2 = signBitGet(efTs2, "GET", efPath2);
+              const efRes2 = await fetch(`${acct().baseUrl}${efPath2}`, {
+                headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": efSign2, "ACCESS-TIMESTAMP": efTs2, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" }
+              });
+              const efData2 = await efRes2.json();
+              const hadRecentSell2 = (efData2.data || []).some(f => f.side === "sell" && f.symbol.toUpperCase() === sym);
+              if (hadRecentSell2) {
+                const minsAgo = Math.floor((Date.now() - Math.max(...(efData2.data || []).filter(f => f.side === "sell" && f.symbol.toUpperCase() === sym).map(f => parseInt(f.cTime)))) / 60000);
+                console.log(`🔒 WEBHOOK GATE — ${sym} had SELL fill ${minsAgo}min ago on BitGet — BUY blocked at webhook level`);
+                // Also sync _recentlySold and disk cooldown so subsequent calls are fast-blocked too
+                _recentlySold.set(sym, Date.now());
+                try {
+                  const wLog = loadLog();
+                  if (!wLog.coinCooldowns) wLog.coinCooldowns = {};
+                  if (!wLog.coinCooldowns[sym]) wLog.coinCooldowns[sym] = {};
+                  if (!(wLog.coinCooldowns[sym].scalp?.until > Date.now())) {
+                    wLog.coinCooldowns[sym].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: "webhook-gate" };
+                    saveLog(wLog);
+                  }
+                } catch {}
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ received: true, blocked: true, reason: `Recent sell on exchange — re-entry blocked 30min` }));
+                return; // Don't call run() at all
+              }
+            } catch (e) {
+              console.log(`⚠️ Webhook gate fill-check failed: ${e.message} — falling through to run()`);
+            }
+          }
+
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ received: true, action, symbol: sym }));
           console.log(`\n📡 TradingView webhook: ${action} ${sym}`);
