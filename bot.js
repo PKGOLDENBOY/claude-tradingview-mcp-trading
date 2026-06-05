@@ -363,7 +363,7 @@ const LT_COINS = [
   "MANAUSDT","PEPEUSDT","SEIUSDT","SLPUSDT","SUIUSDT","THETAUSDT","VIRTUALUSDT",
   "VRAUSDT","XRPUSDT","ARKMUSDT","STRKUSDT","CHRUSDT","PHBUSDT","ZILUSDT",
   "EGLDUSDT","IOTAUSDT","INJUSDT","DOTUSDT","JASMYUSDT","RUNEUSDT","ALICEUSDT",
-  "ORAIUSDT","ORDIUSDT","NEOUSDT","XLMUSDT","COTIUSDT","1INCHUSDT","COMPUSDT",
+  "ORAIUSDT","ORDIUSDT","NEOUSDT","COTIUSDT","1INCHUSDT","COMPUSDT",
   "FLOWUSDT","KAVAUSDT","PAALUSDT","MERLUSDT",
 ];
 
@@ -2730,6 +2730,11 @@ async function checkLtEntry(sym) {
 
 async function _runLtPortfolioLegacy() {
   if (!LT_ENABLED || CONFIG.paperTrading) return;
+  // Block new LT buys during bear regime — hold existing, but don't buy into a downtrend
+  const regime = _regimeCache?.value;
+  if (regime?.btcTrend === "bear") {
+    console.log(`\n💎 LT Portfolio — BTC bear regime, skipping new buys (exits still monitored)`);
+  }
   console.log(`\n💎 ── Long-Term Portfolio ──────────────────────────────────`);
 
   // Fetch all prices in one call
@@ -2841,6 +2846,12 @@ async function _runLtPortfolioLegacy() {
     );
 
     console.log(`  💎 Scanning ${missing.length} unacquired coin(s) for entry signal...`);
+
+    if (regime?.btcTrend === "bear") {
+      console.log(`  🚫 LT buys blocked — BTC bear regime. Holding existing positions only.`);
+      if (changed) saveLog(log);
+      return;
+    }
 
     // Check each missing coin — stagger requests to avoid hammering the API
     const results = [];
@@ -8170,6 +8181,27 @@ async function checkUpcomingListings() {
 }
 
 async function sniperBuy(symbol) {
+  // Block sniper entries during bear regime or crash block — new listings crash hardest in bear markets
+  const regime = _regimeCache?.value;
+  if (regime?.btcTrend === "bear") {
+    console.log(`🚫 Sniper blocked — BTC bear regime. Not buying ${symbol} in a downtrend.`);
+    return;
+  }
+  try {
+    const btcRes = await fetch("https://api.bitget.com/api/v2/spot/market/candles?symbol=BTCUSDT&granularity=4h&limit=20", { signal: AbortSignal.timeout(5000) });
+    const btcData = await btcRes.json();
+    const btcCandles = (btcData.data || []).map(c => ({ o: +c[1], c: +c[4] }));
+    if (btcCandles.length >= 18) {
+      const open3d = btcCandles[btcCandles.length - 18].o;
+      const btcNow = btcCandles[btcCandles.length - 1].c;
+      const change3d = (btcNow - open3d) / open3d * 100;
+      if (change3d <= -6) {
+        console.log(`🚫 Sniper blocked — BTC crash block active (${change3d.toFixed(1)}% 3-day). Not buying ${symbol}.`);
+        return;
+      }
+    }
+  } catch { /* if check fails, proceed cautiously */ }
+
   // Load a fresh log at the start — don't accept a shared one (race condition if
   // multiple snipers fire in parallel; each must own its read-modify-write cycle)
   const log = loadLog();
