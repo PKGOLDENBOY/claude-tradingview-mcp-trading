@@ -280,7 +280,7 @@ const _runningSymbols = new Set();
 // Prevents any entry path from re-buying the same coin for 30 minutes regardless of
 // log state, race conditions, or concurrent timers.
 const _recentlySold = new Map(); // symbol → timestamp of last sell
-const POST_SELL_LOCK_MS = 30 * 60 * 1000; // 30 min
+const POST_SELL_LOCK_MS = 60 * 60 * 1000; // 60 min — 30min was too short, churn was eating profits
 
 // Per-coin latest scan data — shown in dashboard coin detail view
 const coinSnapshots = {};
@@ -388,7 +388,7 @@ const CONFIG = {
   portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD || "1000"),
   maxTradeSizePct: (() => { const v = process.env.MAX_TRADE_SIZE_USD || "25%"; return v.trim().endsWith("%") ? parseFloat(v) / 100 : null; })(),
   maxTradeSizeUSD: (() => { const v = process.env.MAX_TRADE_SIZE_USD || "25%"; return v.trim().endsWith("%") ? null : parseFloat(v); })(),
-  maxTradesPerDay: parseInt(process.env.MAX_TRADES_PER_DAY || "40"),
+  maxTradesPerDay: parseInt(process.env.MAX_TRADES_PER_DAY || "15"),
   paperTrading: process.env.PAPER_TRADING !== "false",
   tradeMode: process.env.TRADE_MODE || "spot",
   bitget: {
