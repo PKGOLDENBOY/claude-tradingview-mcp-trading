@@ -2229,7 +2229,7 @@ ${recentHistory || "No prior trades recorded."}
 ${hasPosition ? "EXIT or HOLD?" : "BUY or HOLD?"}`;
 
   const response = await anthropic.messages.create({
-    model: "claude-haiku-4-5-20251001",
+    model: "claude-sonnet-4-6",
     max_tokens: 400,
     system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
     messages: [{ role: "user", content: userMessage }],
