@@ -554,10 +554,10 @@ function checkDailyDrawdown(log) {
   const drawdownPct = Math.abs(totalLoss) / portfolio * 100;
   const gainPct = totalGain / portfolio * 100;
   const DAILY_STOP   = 3; // stop trading if down 3% on the day
-  const DAILY_TARGET = 3; // stop trading if up 3% on the day — lock in profits
+  const DAILY_TARGET = 3; // milestone — log it but keep trading (user wants max gains)
   const stopHit   = drawdownPct >= DAILY_STOP;
   const targetHit = gainPct >= DAILY_TARGET;
-  return { drawdownPct, gainPct, totalLoss, totalGain, paused: stopHit || targetHit, stopHit, targetHit, limit: DAILY_STOP, target: DAILY_TARGET };
+  return { drawdownPct, gainPct, totalLoss, totalGain, paused: stopHit, stopHit, targetHit, limit: DAILY_STOP, target: DAILY_TARGET };
 }
 
 // Adaptive mode — automatically tightens strategy when losing
@@ -1019,7 +1019,7 @@ async function refreshTopMovers() {
         } else {
           console.log(`  🚫 ${sym.padEnd(14)} no valid setup`);
         }
-        if (result.recommendation !== "SKIP") qualified.push(sym);
+        if (result.recommendation === "TRADE") qualified.push(sym); // require 75%+ WR, not just non-SKIP
       } catch (e) {
         console.log(`  ⚠️  ${sym}: backtest failed — skipping`);
       }
@@ -3943,18 +3943,16 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
-  // Daily stop loss (3%) + daily profit target (3%) — no new entries once either hits
+  // Daily stop loss (3%) — halt on losses. Daily target (3%) is a milestone, not a ceiling.
   const drawdown = checkDailyDrawdown(log);
   if (drawdown.paused) {
-    if (drawdown.targetHit) {
-      console.log(`\n🎯 DAILY TARGET HIT — up ${drawdown.gainPct.toFixed(2)}% today ($${drawdown.totalGain.toFixed(2)} profit). Done for the day — protecting gains.`);
-      pushSignal(symbol, "BLOCKED", `Daily target hit — up ${drawdown.gainPct.toFixed(1)}% today`);
-    } else {
-      console.log(`\n🛑 DAILY STOP LOSS — down ${drawdown.drawdownPct.toFixed(2)}% today ($${Math.abs(drawdown.totalLoss).toFixed(2)} lost). No more trades until tomorrow.`);
-      pushSignal(symbol, "BLOCKED", `Daily stop — down ${drawdown.drawdownPct.toFixed(1)}% today`);
-    }
+    console.log(`\n🛑 DAILY STOP LOSS — down ${drawdown.drawdownPct.toFixed(2)}% today ($${Math.abs(drawdown.totalLoss).toFixed(2)} lost). No more trades until tomorrow.`);
+    pushSignal(symbol, "BLOCKED", `Daily stop — down ${drawdown.drawdownPct.toFixed(1)}% today`);
     console.log("═══════════════════════════════════════════════════════════\n");
     return;
+  }
+  if (drawdown.targetHit) {
+    console.log(`\n🎯 DAILY TARGET ACHIEVED — up ${drawdown.gainPct.toFixed(2)}% today. Keep going, making more!`);
   }
   if (drawdown.drawdownPct > 0) console.log(`\n⚠️  Daily P&L: -${drawdown.drawdownPct.toFixed(2)}% / -${drawdown.limit}% stop | +${drawdown.gainPct.toFixed(2)}% / +${drawdown.target}% target`);
   if (drawdown.gainPct > 0)    console.log(`\n✅ Daily P&L: +${drawdown.gainPct.toFixed(2)}% / +${drawdown.target}% target | -${drawdown.drawdownPct.toFixed(2)}% / -${drawdown.limit}% stop`);
@@ -3981,8 +3979,17 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
-  // Session gate removed — momentum path has its own safety gates (price > EMA8, vol > 1.2x, RSI 45-90)
-  // that already prevent chasing dead pumps regardless of time of day
+  // Trading hours gate — EU/US overlap (13:00–22:00 UTC) where volume and moves are reliable
+  // Exits and position management always continue regardless of hour
+  if (!earlyPosition?.open) {
+    const utcHour = new Date().getUTCHours();
+    const inTradingWindow = utcHour >= 13 && utcHour < 22;
+    if (!inTradingWindow) {
+      console.log(`\n⏰ Outside trading hours (${utcHour}:xx UTC) — new entries blocked until 13:00 UTC. Monitoring exits only.`);
+      pushSignal(symbol, "BLOCKED", `Outside trading hours (${utcHour}:xx UTC) — entries open 13:00–22:00 UTC`);
+      return;
+    }
+  }
 
   // In BEAR regime: only manage exits on existing positions, skip all new scalp entries
   // In VOLATILE regime: reduce scalp size by 50% (applied in tradeSize calc below)
@@ -5132,10 +5139,10 @@ async function run(tvSignal = null, symbol = null) {
       console.log(`  ⚠️  Backtest failed (${e.message}) — proceeding with caution`);
       btResult = null;
     }
-    if (btResult && btResult.recommendation === "SKIP") {
-      console.log(`🚫 BACKTEST BLOCK — ${symbol} has ${btResult.winRate}% win rate over ${btResult.trades} trades (need 65%+). Skipping.`);
+    if (btResult && btResult.recommendation !== "TRADE") {
+      console.log(`🚫 BACKTEST BLOCK — ${symbol} WR ${btResult.winRate}% over ${btResult.trades} trades (need 75%+ TRADE rating). Skipping.`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Backtest WR ${btResult.winRate}% across ${btResult.trades} trades — need 65%+`);
+      pushSignal(symbol, "BLOCKED", `Backtest WR ${btResult.winRate}% — need 75%+ TRADE rating (got ${btResult.recommendation})`);
       return;
     }
 
