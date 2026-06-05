@@ -2409,6 +2409,10 @@ async function getBalance(coin) {
 }
 
 async function placeOrder(symbol, side, sizeUSD, price, quantityOverride = null) {
+  if (side === "buy") {
+    console.log(`🔍 BUY ORDER TRACE — ${symbol}:`);
+    console.trace();
+  }
   return acct().exchange === "bitmart"
     ? placeBitMartOrder(symbol, side, sizeUSD, price, quantityOverride)
     : placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride);
