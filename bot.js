@@ -2470,6 +2470,28 @@ async function reconcilePositions(log) {
     if (!log.positions) log.positions = {};
     let found = 0, pruned = 0;
 
+    // Fetch recent fills from BitGet — authoritative source that survives Railway log wipes.
+    // Any coin with a SELL fill in the last 35min will be skipped by reconcile.
+    const recentlySoldOnExchange = new Set();
+    try {
+      const THIRTY_FIVE_MIN = 35 * 60 * 1000;
+      const fillsTs = Date.now().toString();
+      const fillsPath = `/api/v2/spot/trade/fills?limit=100&startTime=${Date.now() - THIRTY_FIVE_MIN}`;
+      const fillsSign = signBitGet(fillsTs, "GET", fillsPath);
+      const fillsRes = await fetch(`${acct().baseUrl}${fillsPath}`, {
+        headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": fillsSign, "ACCESS-TIMESTAMP": fillsTs, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" }
+      });
+      const fillsData = await fillsRes.json();
+      for (const f of (fillsData.data || [])) {
+        if (f.side === "sell") recentlySoldOnExchange.add(f.symbol.toUpperCase());
+      }
+      if (recentlySoldOnExchange.size > 0) {
+        console.log(`🔒 Reconcile — recent sells on exchange (last 35min): ${[...recentlySoldOnExchange].join(", ")}`);
+      }
+    } catch (e) {
+      console.log(`⚠️ Reconcile fill-history check failed: ${e.message}`);
+    }
+
     // Build a lookup of actual Bitget balances by symbol for pruning below
     const bitgetBalances = {};
     for (const asset of data.data) {
@@ -2507,8 +2529,19 @@ async function reconcilePositions(log) {
       const usdValue = qty * price;
       if (usdValue < 5) continue; // skip dust < $5
 
-      // Skip coins with active scalp cooldown — cooldown is written to disk BEFORE the sell order is placed,
-      // so this is the most reliable guard against reconcile re-adding a just-sold position
+      // Primary guard: exchange fill history — survives Railway log wipes on restart
+      if (recentlySoldOnExchange.has(symbol)) {
+        console.log(`🔒 Reconcile skip ${symbol} — SELL fill detected on exchange in last 35min`);
+        // Write a cooldown to disk so entry flow is also blocked after reconcile
+        if (!log.coinCooldowns) log.coinCooldowns = {};
+        if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
+        if (!(log.coinCooldowns[symbol].scalp?.until > Date.now())) {
+          log.coinCooldowns[symbol].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: "recent-sell" };
+        }
+        continue;
+      }
+
+      // Secondary guard: disk-based cooldown (written before the sell order is placed)
       const cooldown = log.coinCooldowns?.[symbol]?.scalp;
       if (cooldown && Date.now() < cooldown.until) {
         const minsLeft = Math.ceil((cooldown.until - Date.now()) / 60000);
@@ -2516,7 +2549,7 @@ async function reconcilePositions(log) {
         continue;
       }
 
-      // Secondary check: trade history for recent exits
+      // Tertiary check: trade history for recent exits
       const recentlySold = (log.trades || []).slice(-50).some(t =>
         t.type === "exit" && t.symbol === symbol && t.orderPlaced &&
         Date.now() - new Date(t.timestamp).getTime() < 4 * 60 * 60 * 1000
@@ -4497,6 +4530,38 @@ async function run(tvSignal = null, symbol = null) {
       console.log("═══════════════════════════════════════════════════════════\n");
       pushSignal(symbol, "BLOCKED", `Post-sell lock — ${minsLeft}min remaining`);
       return;
+    }
+
+    // Exchange-side sell check — guards against Railway log wipes clearing disk cooldowns on restart.
+    // If BitGet shows a SELL fill for this symbol in the last 35min, block entry and write cooldown to disk.
+    if (!CONFIG.paperTrading) {
+      try {
+        const THIRTY_FIVE_MIN = 35 * 60 * 1000;
+        const efTs = Date.now().toString();
+        const efPath = `/api/v2/spot/trade/fills?limit=50&startTime=${Date.now() - THIRTY_FIVE_MIN}`;
+        const efSign = signBitGet(efTs, "GET", efPath);
+        const efRes = await fetch(`${acct().baseUrl}${efPath}`, {
+          headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": efSign, "ACCESS-TIMESTAMP": efTs, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" }
+        });
+        const efData = await efRes.json();
+        const hadRecentSell = (efData.data || []).some(f => f.side === "sell" && f.symbol.toUpperCase() === symbol);
+        if (hadRecentSell) {
+          // Ensure cooldown is on disk for future calls
+          if (!log.coinCooldowns) log.coinCooldowns = {};
+          if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
+          if (!(log.coinCooldowns[symbol].scalp?.until > Date.now())) {
+            log.coinCooldowns[symbol].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: "recent-sell" };
+            saveLog(log);
+          }
+          _recentlySold.set(symbol, Date.now());
+          console.log(`🔒 EXCHANGE SELL LOCK — ${symbol} had SELL fill in last 35min on BitGet — blocking re-entry`);
+          console.log("═══════════════════════════════════════════════════════════\n");
+          pushSignal(symbol, "BLOCKED", `Recent sell on exchange — re-entry blocked 30min`);
+          return;
+        }
+      } catch (e) {
+        console.log(`⚠️ Exchange sell check failed: ${e.message} — proceeding with disk-only cooldown`);
+      }
     }
 
     // Hard block — never trade exchange tokens or wrapped assets
