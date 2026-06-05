@@ -2485,7 +2485,7 @@ async function reconcilePositions(log) {
           delete log[store][symbol];
           if (!log.coinCooldowns) log.coinCooldowns = {};
           if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
-          log.coinCooldowns[symbol].scalp = { until: Date.now() + 2 * 60 * 60 * 1000, pnlPct: "ghost" };
+          log.coinCooldowns[symbol].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: "ghost" };
           console.log(`🗑️  Ghost prune [${store}] — ${symbol} shows open but Bitget balance $${actualUSD.toFixed(4)} — removing`);
           pruned++;
         }
@@ -3654,12 +3654,12 @@ async function checkLiveHardStops() {
       // Hard stops are always losses — 2h cooldown prevents immediate re-entry after stop-loss
       if (!log.coinCooldowns) log.coinCooldowns = {};
       if (!log.coinCooldowns[sym]) log.coinCooldowns[sym] = {};
-      log.coinCooldowns[sym].scalp = { until: Date.now() + 2 * 60 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
+      log.coinCooldowns[sym].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
       learnFromTrades(log);
       saveLog(log);
       writeTradeCsv(log.trades[log.trades.length - 1]);
       await syncPortfolioBalance(log).catch(() => {});
-      console.log(`⏳ Hard stop cooldown — ${sym} blocked for 2h (P&L: ${pnlPct.toFixed(2)}%)`);
+      console.log(`⏳ Hard stop cooldown — ${sym} blocked for 30min (P&L: ${pnlPct.toFixed(2)}%)`);
       console.log(`💰 Portfolio: $${log.portfolioValue.toFixed(4)}`);
     } catch (err) {
       console.error(`Stop sell failed for ${sym}: ${err.message}`);
@@ -3671,7 +3671,7 @@ async function checkLiveHardStops() {
         if (freshLog[posStore]?.[sym]) delete freshLog[posStore][sym];
         if (!freshLog.coinCooldowns) freshLog.coinCooldowns = {};
         if (!freshLog.coinCooldowns[sym]) freshLog.coinCooldowns[sym] = {};
-        freshLog.coinCooldowns[sym].scalp = { until: Date.now() + 2 * 60 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
+        freshLog.coinCooldowns[sym].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
         saveLog(freshLog);
         console.log(`🗑️  Dust cleanup [hard stop] — ${sym} unsellable, removed from log (P&L: ${pnlPct.toFixed(2)}%)`);
       }
@@ -3869,7 +3869,7 @@ async function checkTpOrders() {
       freshLog.trades.push(tradeRecord);
       if (!freshLog.coinCooldowns) freshLog.coinCooldowns = {};
       if (!freshLog.coinCooldowns[sym]) freshLog.coinCooldowns[sym] = {};
-      freshLog.coinCooldowns[sym].scalp = { until: Date.now() + 2 * 60 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
+      freshLog.coinCooldowns[sym].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
       const _ltChanged = learnFromTrades(freshLog);
       saveLog(freshLog);
       if (_ltChanged) saveLog(freshLog);
@@ -4440,9 +4440,9 @@ async function run(tvSignal = null, symbol = null) {
       // Per-coin per-strategy cooldown: only blocks scalp re-entry, not swing/LT
       if (!log.coinCooldowns) log.coinCooldowns = {};
       if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
-      const cooldownMs = 2 * 60 * 60 * 1000; // 2h regardless of win/loss — prevents churn re-entries
+      const cooldownMs = 30 * 60 * 1000; // 30min per-coin cooldown — gates protect quality, not time
       log.coinCooldowns[symbol].scalp = { until: Date.now() + cooldownMs, pnlPct: pnlPct.toFixed(2) };
-      console.log(`⏳ Scalp cooldown set for ${symbol} — no scalp re-entry for 2h (P&L: ${pnlPct.toFixed(2)}%)`);
+      console.log(`⏳ Scalp cooldown set for ${symbol} — no scalp re-entry for 30min (P&L: ${pnlPct.toFixed(2)}%)`);
       saveLog(log);
       console.log(`\nDecision log saved → ${LOG_FILE}`);
       writeTradeCsv(logEntry);
@@ -7692,7 +7692,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         log.trades.push(exitEntry);
         if (!log.coinCooldowns) log.coinCooldowns = {};
         if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
-        const swingCooldownMs = pnlPct < 0 ? 2 * 60 * 60 * 1000 : 30 * 60 * 1000;
+        const swingCooldownMs = 30 * 60 * 1000;
         log.coinCooldowns[symbol].swing = { until: Date.now() + swingCooldownMs, pnlPct: pnlPct.toFixed(2) };
         learnFromTrades(log);
         saveLog(log);
@@ -7906,7 +7906,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         log.trades.push(exitEntry);
         if (!log.coinCooldowns) log.coinCooldowns = {};
         if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
-        const bkCooldownMs = pnlPct < 0 ? 2 * 60 * 60 * 1000 : 30 * 60 * 1000;
+        const bkCooldownMs = 30 * 60 * 1000;
         log.coinCooldowns[symbol].breakout = { until: Date.now() + bkCooldownMs, pnlPct: pnlPct.toFixed(2) };
         learnFromTrades(log);
         saveLog(log);
@@ -8416,7 +8416,7 @@ async function monitorSniperPositions() {
     // Cooldown prevents scalp from immediately re-entering after sniper exits
     if (!freshLog.coinCooldowns) freshLog.coinCooldowns = {};
     if (!freshLog.coinCooldowns[symbol]) freshLog.coinCooldowns[symbol] = {};
-    const sniperCooldownMs = pnlPct < 0 ? 2 * 60 * 60 * 1000 : 30 * 60 * 1000;
+    const sniperCooldownMs = 30 * 60 * 1000;
     freshLog.coinCooldowns[symbol].scalp = { until: Date.now() + sniperCooldownMs, pnlPct: pnlPct.toFixed(2) };
     saveLog(freshLog);
     writeTradeCsv(exitLog);
