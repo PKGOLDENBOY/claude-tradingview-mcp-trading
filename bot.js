@@ -2409,8 +2409,20 @@ async function getBalance(coin) {
 }
 
 async function placeOrder(symbol, side, sizeUSD, price, quantityOverride = null) {
+  if (side === "sell") {
+    // Always stamp the cooldown at the exact moment of sell — no matter which code path triggered it.
+    _recentlySold.set(symbol, Date.now());
+    console.log(`🔒 placeOrder SELL — ${symbol} cooldown stamped`);
+  }
   if (side === "buy") {
-    console.log(`🔍 BUY ORDER TRACE — ${symbol}:`);
+    const soldAt = _recentlySold.get(symbol);
+    if (soldAt && Date.now() - soldAt < POST_SELL_LOCK_MS) {
+      const minsLeft = Math.ceil((POST_SELL_LOCK_MS - (Date.now() - soldAt)) / 60000);
+      console.log(`🔒 placeOrder BUY BLOCKED — ${symbol} sold ${Math.floor((Date.now() - soldAt) / 60000)}min ago — ${minsLeft}min remaining (stack trace follows)`);
+      console.trace();
+      return { blocked: true, code: "POST_SELL_LOCK", reason: `Sold ${Math.floor((Date.now() - soldAt) / 60000)}min ago` };
+    }
+    console.log(`🔍 BUY ORDER PROCEEDING — ${symbol}`);
     console.trace();
   }
   return acct().exchange === "bitmart"
@@ -7655,9 +7667,18 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
             res.end(JSON.stringify({ error: `Unknown symbol: ${sym}. Allowed: ${CONFIG.symbols.join(", ")}` }));
             return;
           }
-          // For BUY signals: check BitGet fill history before calling run().
-          // This is the outermost gate — runs before _recentlySold, before disk cooldown,
-          // before anything else. Survives Railway restarts because it reads from BitGet directly.
+          // For BUY signals: check in-memory cooldown first (instant, no API lag),
+          // then fall back to BitGet fill history (survives Railway restarts).
+          if (action === "BUY") {
+            const soldAt = _recentlySold.get(sym);
+            if (soldAt && Date.now() - soldAt < POST_SELL_LOCK_MS) {
+              const minsLeft = Math.ceil((POST_SELL_LOCK_MS - (Date.now() - soldAt)) / 60000);
+              console.log(`🔒 WEBHOOK GATE (memory) — ${sym} sold ${Math.floor((Date.now() - soldAt) / 60000)}min ago — BUY blocked, ${minsLeft}min remaining`);
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ received: true, blocked: true, reason: `Recent sell — re-entry blocked ${minsLeft}min` }));
+              return;
+            }
+          }
           if (action === "BUY" && !CONFIG.paperTrading && acct().exchange === "bitget") {
             try {
               const THIRTY_FIVE_MIN = 35 * 60 * 1000;
