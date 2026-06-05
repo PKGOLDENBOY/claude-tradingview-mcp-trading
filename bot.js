@@ -4379,9 +4379,14 @@ async function run(tvSignal = null, symbol = null) {
               try {
                 const freshBal = await getSpotBalance(baseCoin).catch(() => 0); // available only
                 if (freshBal * price >= 1.0) {
-                  // Use integer qty for coins that require it (e.g. KAS scale=0)
-                  const retryQty = Math.floor(freshBal * 0.999 * 100) / 100;
-                  const retryOrder = await placeOrder(symbol, "sell", null, price, retryQty.toString());
+                  // Try decreasing precision until BitGet accepts (handles coins like KAS that need integer qty)
+                  let retryOrder;
+                  for (const scale of [6, 4, 2, 1, 0]) {
+                    const factor = Math.pow(10, scale);
+                    const retryQty = (Math.floor(freshBal * 0.999 * factor) / factor).toFixed(scale);
+                    try { retryOrder = await placeOrder(symbol, "sell", null, price, retryQty); break; }
+                    catch (precErr) { if (scale === 0) throw precErr; }
+                  }
                   logEntry.orderPlaced = true;
                   logEntry.orderId = retryOrder.orderId;
                   delete (log.positions || {})[symbol]; log.positions = { ...(log.positions || {}) };
