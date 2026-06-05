@@ -568,7 +568,7 @@ function checkDailyDrawdown(log) {
 function getAdaptiveMode(trades) {
   const wr = calcWinRate(trades, 10);
   if (!wr) return { mode: "normal", label: "📊 Normal — not enough history yet", rsiThreshold: 38, confidenceMin: 0, sizeMultiplier: 1.0 };
-  if (wr.winRate >= 0.65) return { mode: "normal",    label: `✅ Normal — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample})`,    rsiThreshold: 38, confidenceMin: 70, sizeMultiplier: 1.0 };
+  if (wr.winRate >= 0.65) return { mode: "normal",    label: `✅ Normal — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample})`,    rsiThreshold: 38, confidenceMin: 80, sizeMultiplier: 1.0 };
   if (wr.winRate >= 0.45) return { mode: "cautious",  label: `⚠️  Cautious — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample})`,  rsiThreshold: 25, confidenceMin: 80, sizeMultiplier: 0.75 };
   if (wr.winRate >= 0.35) return { mode: "defensive", label: `🔴 Defensive — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample})`, rsiThreshold: 20, confidenceMin: 85, sizeMultiplier: 0.5 };
   return { mode: "paused", label: `🛑 Paused — win rate ${(wr.winRate*100).toFixed(0)}% (${wr.wins}/${wr.sample}) too low`, rsiThreshold: 20, confidenceMin: 90, sizeMultiplier: 0.10 };
@@ -5265,13 +5265,13 @@ async function run(tvSignal = null, symbol = null) {
     }
 
     // Entry quality gate — thresholds adapt to Fear & Greed sentiment
-    // Normal: trend-follow needs 8, snapback needs 7 (raised from 7/6 — more signals now available)
+    // Normal: trend-follow needs 10, snapback needs 9 — only high-confluence setups
     // Extreme Fear (F&G ≤ 20): lower by 2 — historically 90-day median +48.5% from these levels
     // Extreme Fear (F&G ≤ 10): lower by 3 — maximum contrarian signal, highest base rate
     const fgNow = fearGreed?.value ?? 50;
     const fearDiscount = fgNow <= 10 ? 3 : fgNow <= 20 ? 2 : 0;
-    const tfThreshold   = 8 - fearDiscount;
-    const snapThreshold = 7 - fearDiscount;
+    const tfThreshold   = 10 - fearDiscount;
+    const snapThreshold = 9 - fearDiscount;
     if (fearDiscount > 0) console.log(`\n😱 FEAR BOUNCE MODE — F&G=${fgNow} (Extreme Fear). Entry thresholds lowered by ${fearDiscount} (trend-follow: ${tfThreshold}, snapback: ${snapThreshold}).`);
     if (rulesPass && entryType === "trend-follow" && entryScore < tfThreshold && !vwapBounceMode) {
       console.log(`🚫 ENTRY QUALITY BLOCK — score ${entryScore}/${tfThreshold} needed.`);
@@ -5328,7 +5328,7 @@ async function run(tvSignal = null, symbol = null) {
         // Threshold adapts to Fear & Greed — same logic as entry score gates above
         const fgNowSC = fearGreed?.value ?? 50;
         const fearDiscountSC = fgNowSC <= 10 ? 15 : fgNowSC <= 20 ? 10 : 0;
-        const confThreshold = 65 - fearDiscountSC;
+        const confThreshold = 75 - fearDiscountSC;
         console.log(`\n🧠 SYNTHETIC CONFIDENCE — RSI ${rsiScore} + Vol ${volScore} + Trend ${trendScore} + MACD ${macdScore} + Z ${zScoreScore} + ST ${stScore} + FVG ${fvgScore} + Ichi ${ichiScore + ichi4hScore} + OB ${obScore} + MS ${msScore} + KZ ${kzScore} + VA ${vaScore} + BearDiv ${bearDivScore} = ${syntheticConf} (need ${confThreshold})`);
         if (syntheticConf < confThreshold) {
           console.log(`🚫 CONFIDENCE GATE — score ${syntheticConf}/${confThreshold} too low. Blocking entry (Claude unavailable).`);
