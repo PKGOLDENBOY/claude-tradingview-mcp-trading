@@ -3641,6 +3641,12 @@ async function checkLiveHardStops() {
           await cancelOrder(sym, pos.tpOrderId);
           console.log(`  📌 Cancelled resting TP ${pos.tpOrderId} before stop sell`);
         }
+        // Persist cooldown before sell — survives container restarts
+        const preSellLog = loadLog();
+        if (!preSellLog.coinCooldowns) preSellLog.coinCooldowns = {};
+        if (!preSellLog.coinCooldowns[sym]) preSellLog.coinCooldowns[sym] = {};
+        preSellLog.coinCooldowns[sym].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: "stop", selling: true };
+        saveLog(preSellLog);
         const order = await placeOrder(sym, "sell", null, livePrice, pos.quantity);
         console.log(`✅ STOP SELL — ${order.orderId}`);
       } else {
@@ -4384,7 +4390,12 @@ async function run(tvSignal = null, symbol = null) {
           } else {
             await cancelAllSymbolOrders(symbol);
           }
-          _recentlySold.set(symbol, Date.now()); // in-memory lock — blocks re-entry before log is saved
+          // Persist cooldown to disk BEFORE placing sell — survives container restarts
+          if (!log.coinCooldowns) log.coinCooldowns = {};
+          if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
+          log.coinCooldowns[symbol].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: pnlPct.toFixed(2), selling: true };
+          saveLog(log);
+          _recentlySold.set(symbol, Date.now()); // in-memory lock — fastest path
           const order = await placeOrder(symbol, "sell", null, price, position.quantity);
           logEntry.orderPlaced = true;
           logEntry.orderId = order.orderId;
