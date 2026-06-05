@@ -374,7 +374,7 @@ const WATCHLIST = [...new Set([
 ])];
 
 const CONFIG = {
-  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "NEARUSDT,BNBUSDT,LINKUSDT,SOLUSDT,INJUSDT,ADAUSDT,DOTUSDT,ZECUSDT,KAVAUSDT,AXSUSDT")
+  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "NEARUSDT,BNBUSDT,LINKUSDT,SOLUSDT,ADAUSDT,DOTUSDT,ZECUSDT,KAVAUSDT,AXSUSDT")
     .replace(/^SYMBOLS=/i, "")
     .split(",")
     .map((s) => s.trim().toUpperCase()),
@@ -4597,7 +4597,7 @@ async function run(tvSignal = null, symbol = null) {
           if (log.positions?.[symbol]) freshLog.positions = { ...(freshLog.positions || {}), [symbol]: log.positions[symbol] };
           if (!freshLog.coinCooldowns) freshLog.coinCooldowns = {};
           if (!freshLog.coinCooldowns[symbol]) freshLog.coinCooldowns[symbol] = {};
-          freshLog.coinCooldowns[symbol].scalp = { until: Date.now() + 6 * 60 * 60 * 1000, pnlPct: "0.00", justBought: true };
+          freshLog.coinCooldowns[symbol].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: "0.00", justBought: true };
           freshLog.trades.push(momEntry);
           saveLog(freshLog);
           writeTradeCsv(momEntry);
