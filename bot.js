@@ -978,7 +978,7 @@ async function refreshTopMovers() {
     // ── Full market scan ────────────────────────────────────────────────────
     // Score every liquid USDT pair — both gainers and high-volume movers
     // Never trade exchange tokens, stablecoins, or leveraged tokens
-    const NEVER_TRADE = new Set(["BGBUSDT","BSVUSDT","WBTCUSDT","STETHUSDT","CBETHUSDT","BETHUSDT","LUNCUSDT","SHIBUSDT","PEPEUSDT","FLOKIUSDT","BONKUSDT"]);
+    const NEVER_TRADE = new Set(["BGBUSDT","BSVUSDT","WBTCUSDT","STETHUSDT","CBETHUSDT","BETHUSDT"]);
     const allCoins = (json.data || []).filter(t =>
       t.symbol.endsWith("USDT") &&
       !NEVER_TRADE.has(t.symbol) &&
@@ -4479,9 +4479,9 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
 
-    // Hard block — never trade exchange tokens, wrapped assets, or sub-cent junk coins
-    if (["BGBUSDT","BSVUSDT","WBTCUSDT","STETHUSDT","LUNCUSDT","SHIBUSDT","PEPEUSDT","FLOKIUSDT","BONKUSDT"].includes(symbol)) {
-      console.log(`🚫 NEVER_TRADE block — ${symbol} is blacklisted (exchange token / junk coin)`);
+    // Hard block — never trade exchange tokens or wrapped assets
+    if (["BGBUSDT","BSVUSDT","WBTCUSDT","STETHUSDT"].includes(symbol)) {
+      console.log(`🚫 NEVER_TRADE block — ${symbol} is an exchange token / wrapped asset`);
       return;
     }
 
@@ -8574,7 +8574,7 @@ async function monitorSniperPositions() {
       const res  = await fetch("https://api.bitget.com/api/v2/spot/market/tickers");
       const json = await res.json();
       if (json.code !== "00000") return;
-      const NEVER_TRADE = new Set(["BGBUSDT","BSVUSDT","WBTCUSDT","STETHUSDT","CBETHUSDT","BETHUSDT","LUNCUSDT","SHIBUSDT","PEPEUSDT","FLOKIUSDT","BONKUSDT"]);
+      const NEVER_TRADE = new Set(["BGBUSDT","BSVUSDT","WBTCUSDT","STETHUSDT","CBETHUSDT","BETHUSDT"]);
       const allCoins = (json.data || []).filter(t =>
         t.symbol.endsWith("USDT") && !NEVER_TRADE.has(t.symbol) &&
         parseFloat(t.usdtVolume) > 1_000_000
