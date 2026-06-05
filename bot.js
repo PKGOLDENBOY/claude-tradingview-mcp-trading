@@ -2461,7 +2461,35 @@ async function reconcilePositions(log) {
     const prices = Object.fromEntries((priceData.data || []).map(t => [t.symbol, parseFloat(t.lastPr)]));
 
     if (!log.positions) log.positions = {};
-    let found = 0;
+    let found = 0, pruned = 0;
+
+    // Build a lookup of actual Bitget balances by symbol for pruning below
+    const bitgetBalances = {};
+    for (const asset of data.data) {
+      const qty = parseFloat(asset.available) + parseFloat(asset.frozen || 0);
+      if (asset.coin === "USDT" || qty < 0.0001) continue;
+      const symbol = asset.coin + "USDT";
+      const price = prices[symbol];
+      if (!price) continue;
+      bitgetBalances[symbol] = qty * price;
+    }
+
+    // Prune ghost positions across all stores — log says open but Bitget balance is dust (already stopped/sold)
+    for (const store of ["positions", "swingPositions", "breakoutPositions", "sniperPositions"]) {
+      if (!log[store]) continue;
+      for (const [symbol, pos] of Object.entries(log[store])) {
+        if (!pos?.open) continue;
+        const actualUSD = bitgetBalances[symbol] ?? 0;
+        if (actualUSD < 2.0) {
+          delete log[store][symbol];
+          if (!log.coinCooldowns) log.coinCooldowns = {};
+          if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
+          log.coinCooldowns[symbol].scalp = { until: Date.now() + 2 * 60 * 60 * 1000, pnlPct: "ghost" };
+          console.log(`🗑️  Ghost prune [${store}] — ${symbol} shows open but Bitget balance $${actualUSD.toFixed(4)} — removing`);
+          pruned++;
+        }
+      }
+    }
 
     for (const asset of data.data) {
       const qty = parseFloat(asset.available) + parseFloat(asset.frozen || 0);
@@ -2498,7 +2526,7 @@ async function reconcilePositions(log) {
         found++;
       }
     }
-    if (found > 0) { saveLog(log); console.log(`🔄 Reconciled ${found} position(s) from BitGet balances`); }
+    if (found > 0 || pruned > 0) { saveLog(log); console.log(`🔄 Reconciled ${found} position(s) from BitGet | Pruned ${pruned} ghost(s)`); }
     else console.log(`🔄 Position reconciliation: log matches BitGet balances`);
   } catch (err) {
     console.log(`⚠️ Position reconciliation failed: ${err.message}`);
@@ -3623,22 +3651,17 @@ async function checkLiveHardStops() {
       console.log(`💰 Portfolio: $${log.portfolioValue.toFixed(4)}`);
     } catch (err) {
       console.error(`Stop sell failed for ${sym}: ${err.message}`);
-      // Dust cleanup — if the actual balance is below $1 (e.g. resting TP partially filled),
-      // the position is unsellable. Wipe it from the log so the retry loop stops.
       const isDust = err.message.startsWith("DUST:") || err.message.includes("Parameter verification exception size");
       if (isDust) {
-        const baseCoin = sym.replace("USDT", "");
-        const totalBal = await getSpotBalanceTotal(baseCoin).catch(() => 0);
-        const totalUSD = totalBal * livePrice;
-        if (totalUSD < 2.0) {
-          const log = loadLog();
-          if (log[posStore]) delete log[posStore][sym];
-          if (!log.coinCooldowns) log.coinCooldowns = {};
-          if (!log.coinCooldowns[sym]) log.coinCooldowns[sym] = {};
-          log.coinCooldowns[sym].scalp = { until: Date.now() + 2 * 60 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
-          saveLog(log);
-          console.log(`🗑️  Dust cleanup [hard stop] — ${sym} $${totalUSD.toFixed(4)} unsellable, removed from log`);
-        }
+        // The DUST error already proves the sellable balance is < $1 — no need for an extra API call
+        // that can return a stale/frozen balance and block cleanup. Remove immediately.
+        const freshLog = loadLog();
+        if (freshLog[posStore]?.[sym]) delete freshLog[posStore][sym];
+        if (!freshLog.coinCooldowns) freshLog.coinCooldowns = {};
+        if (!freshLog.coinCooldowns[sym]) freshLog.coinCooldowns[sym] = {};
+        freshLog.coinCooldowns[sym].scalp = { until: Date.now() + 2 * 60 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
+        saveLog(freshLog);
+        console.log(`🗑️  Dust cleanup [hard stop] — ${sym} unsellable, removed from log (P&L: ${pnlPct.toFixed(2)}%)`);
       }
     } finally {
       _processingStops.delete(sym);
