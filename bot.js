@@ -7421,6 +7421,22 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       return;
     }
 
+    // Manual portfolio sync — triggers immediate BitGet balance fetch and updates log
+    if (req.method === "POST" && path === "/api/sync") {
+      if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Wrong PIN" })); return; }
+      try {
+        const log = loadLog();
+        await syncPortfolioBalance(log);
+        saveLog(log);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ message: `Synced — portfolio: $${log.portfolioValue.toFixed(2)}`, portfolioValue: log.portfolioValue }));
+      } catch (e) {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
     // Trades CSV download — lets you pull the full Railway trade history locally
     if (req.method === "GET" && path === "/api/trades") {
       if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Wrong PIN" })); return; }
