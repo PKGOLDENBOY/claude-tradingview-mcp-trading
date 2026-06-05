@@ -374,7 +374,7 @@ const WATCHLIST = [...new Set([
 ])];
 
 const CONFIG = {
-  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "KAVAUSDT,ZECUSDT,NEARUSDT,BNBUSDT,LINKUSDT,SOLUSDT,AXSUSDT,ADAUSDT,DOTUSDT,INJUSDT")
+  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "NEARUSDT,BNBUSDT,LINKUSDT,SOLUSDT,INJUSDT,ADAUSDT,DOTUSDT,ZECUSDT,KAVAUSDT,AXSUSDT")
     .replace(/^SYMBOLS=/i, "")
     .split(",")
     .map((s) => s.trim().toUpperCase()),
@@ -2032,57 +2032,52 @@ function checkExitConditions(position, price, ema8, vwap, rsi3, candles = null, 
       check(`Bear snap-back TP hit — $${snapTpPrice.toFixed(4)} (+3%)`, price >= snapTpPrice && pnlPct >= 3);
     }
 
-    // Soft exits — fire on real market signals, not arbitrary timers.
-    // Rule: if price is STILL above EMA8 AND VWAP, the trend is intact — hold through
-    // overbought oscillator readings. Only exit on exhaustion when trend actually weakens.
-    // SOFT_MIN = 1.0%: profit must cover fees + buffer before any soft exit fires.
-    const SOFT_MIN = 1.0;
-    const trendIntact = price > ema8 && price > vwap;
-    if (trendIntact) console.log(`  📈 Trend intact (price > EMA8 & VWAP) — holding through overbought signals`);
+    // ── EXIT PHILOSOPHY (data-driven from trade history) ──────────────────────
+    // Winners:  Partial TP 100% WR +9.68% avg | StochRSI TP 100% WR +1.91% avg
+    // Losers:   Volume dried up 30% WR -0.10% avg (REMOVED) | RSI faded 0% WR (REMOVED)
+    //           Trend reversed 0% WR (REMOVED) — all three cut winners before real TP
+    // Rule: hold until a REAL signal fires. Don't exit on noise.
 
-    // RSI extreme overbought: only exit if trend is weakening (price slipping vs EMA) OR big gain
-    check(`RSI(3) overbought > 88 | Actual: ${rsi3.toFixed(2)}`, rsi3 > 88 && pnlPct >= SOFT_MIN && (!trendIntact || pnlPct >= 2.0));
+    const SOFT_MIN = 1.5; // raised from 1.0% — must clear fees + meaningful profit
+    const trendIntact = price > ema8 && price > vwap;
+    if (trendIntact) console.log(`  📈 Trend intact (price > EMA8 & VWAP) — holding for TP`);
+
+    // StochRSI overbought — best exit signal (100% WR historically)
     if (stochRsi) {
-      // StochRSI > 92 + trend breaking OR big gain = true exhaustion
-      const stochExhausted = stochRsi.overbought && pnlPct >= SOFT_MIN && (!trendIntact || pnlPct >= 2.0 || (rsi3 > 90 && sr?.nearResistance));
-      check(`StochRSI overbought > 92 | K=${stochRsi.k.toFixed(1)}${stochRsi.overbought && !stochExhausted ? ` (holding — trend intact or P&L ${pnlPct.toFixed(2)}% < target)` : ""}`, stochExhausted);
+      const stochExhausted = stochRsi.overbought && pnlPct >= SOFT_MIN && (!trendIntact || pnlPct >= 3.0);
+      check(`StochRSI overbought > 92 | K=${stochRsi.k.toFixed(1)}`, stochExhausted);
     }
-    // BB% extreme — price at very top of band AND trend showing signs of reversal
-    if (bb) check(`BB% > 0.92 (extreme upper band) | BB%=${bb.pct.toFixed(2)}`, bb.pct > 0.92 && pnlPct >= SOFT_MIN && (!trendIntact || pnlPct >= 2.0));
-    // Snap-back entries start below VWAP deliberately — "trend reversed" doesn't apply.
-    // Dynamic TP: exit RSI threshold shifts based on distance to resistance
+    // RSI extreme — only on clear exhaustion (88+ AND not trending)
+    check(`RSI(3) overbought > 88 | Actual: ${rsi3.toFixed(2)}`, rsi3 > 88 && pnlPct >= SOFT_MIN && !trendIntact && pnlPct >= 3.0);
+    // BB% extreme — only with trend broken AND decent profit
+    if (bb) check(`BB% > 0.92 | BB%=${bb.pct.toFixed(2)}`, bb.pct > 0.92 && pnlPct >= SOFT_MIN && !trendIntact && pnlPct >= 3.0);
+
+    // Snap-back: dynamic RSI TP
     if (position.entryType === "snapback") {
       const distToRes = sr?.distToResistance ?? null;
       let snapRsiExit, snapLabel;
       if (distToRes !== null && distToRes < 1.5) {
         snapRsiExit = 72; snapLabel = `RSI(3) > 72 — near resistance ($${sr.nearestResistance?.toFixed(2)}, ${distToRes.toFixed(1)}% away)`;
-      } else if (distToRes !== null && distToRes > 5) {
-        snapRsiExit = 82; snapLabel = `RSI(3) > 82 — room to run (resistance ${distToRes.toFixed(1)}% away), holding longer`;
       } else {
-        snapRsiExit = 72; snapLabel = `RSI(3) recovered above 72 — snap-back complete`;
+        snapRsiExit = 80; snapLabel = `RSI(3) > 80 — snap-back complete`;
       }
       check(snapLabel, rsi3 > snapRsiExit && pnlPct >= SOFT_MIN && !trendIntact);
     } else {
-      // Failed bounce — 20 min minimum so normal entry volatility doesn't trigger this.
-      // The first 20 min of a trade often dips before recovering — cutting at minute 5 is noise, not signal.
-      if (minsOpen > 20 && pnlPct < -1.5 && macd && !macd.bullish) {
-        check(`Failed bounce — down ${pnlPct.toFixed(2)}% with bearish MACD (cut loss early)`, true);
+      // Hard loss cut: down 2%+ with bearish MACD after 30min — not a dip, it's a failed trade
+      if (minsOpen > 30 && pnlPct < -2.0 && macd && !macd.bullish) {
+        check(`Failed trade — down ${pnlPct.toFixed(2)}% with bearish MACD after 30min`, true);
       }
-      // Trend reversed — 20 min minimum for the same reason. VWAP can breach briefly on entry noise.
-      const vwapBreachPct = (vwap - price) / vwap * 100;
-      const macdBearish = !macd ? vwapBreachPct > 0.5 : macd.histogram < 0;
-      check(`Trend reversed — ${vwapBreachPct.toFixed(2)}% below VWAP${macd && macdBearish ? " with bearish MACD" : ""}`, minsOpen > 20 && price < vwap && macdBearish && vwapBreachPct > 1.5 && pnlPct < -0.5);
     }
     check(`ATR stop hit — $${effectiveStop.toFixed(2)} (${breakEvenActive ? "break-even floor" : `${(trailPct*100).toFixed(1)}% trail`})`, price < effectiveStop);
 
-    // Max hold time — winners get 10h to run, losers cut at 6h, deeply underwater cut at 2h
+    // Max hold: winners run 12h, losers cut at 6h
     if (position.entryTime) {
       const hoursOpen = (Date.now() - new Date(position.entryTime).getTime()) / (1000 * 60 * 60);
-      const maxHold = pnlPct > 0 ? 10.0 : 6.0; // let profitable positions breathe longer
+      const maxHold = pnlPct > 0 ? 12.0 : 6.0;
       if (hoursOpen > maxHold) {
         check(`Max hold exceeded — open ${hoursOpen.toFixed(1)}h (limit ${maxHold}h)`, true);
-      } else if (hoursOpen > 2.0 && pnlPct < -2.0) {
-        check(`Stale trade — ${hoursOpen.toFixed(1)}h, down ${pnlPct.toFixed(2)}% (cutting loss)`, true);
+      } else if (hoursOpen > 3.0 && pnlPct < -2.5) {
+        check(`Stale loser — ${hoursOpen.toFixed(1)}h, down ${pnlPct.toFixed(2)}% (cutting)`, true);
       }
     }
   }
