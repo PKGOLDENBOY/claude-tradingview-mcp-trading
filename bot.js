@@ -549,9 +549,15 @@ function checkDailyDrawdown(log) {
     (t) => t.type === "exit" && t.timestamp.startsWith(today) && t.pnlUSD !== undefined,
   );
   const totalLoss = todayExits.reduce((sum, t) => sum + Math.min(t.pnlUSD, 0), 0);
-  const drawdownPct = Math.abs(totalLoss) / (log.portfolioValue || acct().portfolioValue) * 100;
-  const limit = 10; // 10% max daily loss
-  return { drawdownPct, totalLoss, paused: drawdownPct >= limit, limit };
+  const totalGain = todayExits.reduce((sum, t) => sum + Math.max(t.pnlUSD, 0), 0);
+  const portfolio = log.portfolioValue || acct().portfolioValue;
+  const drawdownPct = Math.abs(totalLoss) / portfolio * 100;
+  const gainPct = totalGain / portfolio * 100;
+  const DAILY_STOP   = 3; // stop trading if down 3% on the day
+  const DAILY_TARGET = 3; // stop trading if up 3% on the day — lock in profits
+  const stopHit   = drawdownPct >= DAILY_STOP;
+  const targetHit = gainPct >= DAILY_TARGET;
+  return { drawdownPct, gainPct, totalLoss, totalGain, paused: stopHit || targetHit, stopHit, targetHit, limit: DAILY_STOP, target: DAILY_TARGET };
 }
 
 // Adaptive mode — automatically tightens strategy when losing
@@ -3937,18 +3943,21 @@ async function run(tvSignal = null, symbol = null) {
     return;
   }
 
-  // Drawdown stop — pause all trading if down 10% on the day
+  // Daily stop loss (3%) + daily profit target (3%) — no new entries once either hits
   const drawdown = checkDailyDrawdown(log);
   if (drawdown.paused) {
-    console.log(`\n🛑 DRAWDOWN STOP — down ${drawdown.drawdownPct.toFixed(2)}% today ($${Math.abs(drawdown.totalLoss).toFixed(4)} lost)`);
-    console.log(`   Limit: ${drawdown.limit}% per day. Bot paused until tomorrow.`);
+    if (drawdown.targetHit) {
+      console.log(`\n🎯 DAILY TARGET HIT — up ${drawdown.gainPct.toFixed(2)}% today ($${drawdown.totalGain.toFixed(2)} profit). Done for the day — protecting gains.`);
+      pushSignal(symbol, "BLOCKED", `Daily target hit — up ${drawdown.gainPct.toFixed(1)}% today`);
+    } else {
+      console.log(`\n🛑 DAILY STOP LOSS — down ${drawdown.drawdownPct.toFixed(2)}% today ($${Math.abs(drawdown.totalLoss).toFixed(2)} lost). No more trades until tomorrow.`);
+      pushSignal(symbol, "BLOCKED", `Daily stop — down ${drawdown.drawdownPct.toFixed(1)}% today`);
+    }
     console.log("═══════════════════════════════════════════════════════════\n");
-    pushSignal(symbol, "BLOCKED", `Drawdown stop — down ${drawdown.drawdownPct.toFixed(1)}% today`);
     return;
   }
-  if (drawdown.drawdownPct > 0) {
-    console.log(`\n⚠️  Daily drawdown: ${drawdown.drawdownPct.toFixed(2)}% / ${drawdown.limit}% limit`);
-  }
+  if (drawdown.drawdownPct > 0) console.log(`\n⚠️  Daily P&L: -${drawdown.drawdownPct.toFixed(2)}% / -${drawdown.limit}% stop | +${drawdown.gainPct.toFixed(2)}% / +${drawdown.target}% target`);
+  if (drawdown.gainPct > 0)    console.log(`\n✅ Daily P&L: +${drawdown.gainPct.toFixed(2)}% / +${drawdown.target}% target | -${drawdown.drawdownPct.toFixed(2)}% / -${drawdown.limit}% stop`);
 
   // Adaptive mode — computed now, early-return check moved to after coinSnapshots
   // so the dashboard always shows live prices/indicators even when trading is paused
