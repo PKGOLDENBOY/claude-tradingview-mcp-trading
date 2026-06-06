@@ -2425,9 +2425,12 @@ async function placeOrder(symbol, side, sizeUSD, price, quantityOverride = null)
     console.log(`🔍 BUY ORDER PROCEEDING — ${symbol}`);
     console.trace();
   }
-  return acct().exchange === "bitmart"
+  const result = acct().exchange === "bitmart"
     ? placeBitMartOrder(symbol, side, sizeUSD, price, quantityOverride)
     : placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride);
+  // Ensure any coin we buy is tracked by the live price stream so the hard stop fires.
+  if (side === "buy") subscribeSymbolToStream(symbol);
+  return result;
 }
 
 async function syncPortfolioBalance(log) {
@@ -3702,6 +3705,19 @@ function startPriceStream(symbols) {
   }, 25000);
 
   return ws;
+}
+
+// Subscribe a single symbol to the live price stream without restarting the WebSocket.
+// Called when a position is opened in a coin not on the main watchlist (sniper, LT, etc.)
+function subscribeSymbolToStream(symbol) {
+  if (!priceStreamWs || priceStreamWs.readyState !== 1) return; // WebSocket.OPEN = 1
+  if (livePrices.has(symbol)) return; // already streaming
+  try {
+    priceStreamWs.send(JSON.stringify({ op: "subscribe", args: [{ instType: "SPOT", channel: "ticker", instId: symbol }] }));
+    console.log(`📡 Subscribed ${symbol} to live price stream — hard stop now active`);
+  } catch (e) {
+    console.log(`⚠️ Failed to subscribe ${symbol} to stream: ${e.message}`);
+  }
 }
 
 // Hard-stop monitor — checks live prices every 5 seconds.
