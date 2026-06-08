@@ -1001,12 +1001,32 @@ async function scanNewListings(allTickers) {
 
 // ─── Top Movers — swap coins every 4 hours ───────────────────────────────────
 
+// Full ticker snapshot per symbol, refreshed each scan cycle by refreshTopMovers().
+// Used by liquiditySnapshot() to tag entries with entry-time liquidity (volume, spread,
+// 24h range) so we can later design a data-driven liquidity gate. Read-only for analysis;
+// does not affect any trade decision yet.
+const _tickerCache = new Map(); // symbol -> raw BitGet ticker object
+
+function liquiditySnapshot(symbol) {
+  const t = _tickerCache.get(symbol);
+  if (!t) return null;
+  const bid = parseFloat(t.bidPr), ask = parseFloat(t.askPr), mid = (bid + ask) / 2;
+  const hi = parseFloat(t.high24h), lo = parseFloat(t.low24h);
+  return {
+    volUsd: Math.round(parseFloat(t.usdtVolume) || 0),
+    spreadPct: mid > 0 ? +(((ask - bid) / mid) * 100).toFixed(4) : null,
+    range24hPct: lo > 0 ? +(((hi - lo) / lo) * 100).toFixed(2) : null,
+  };
+}
+
 async function refreshTopMovers() {
   try {
     // Use BitGet's own spot ticker — avoids Binance geo-blocks and guarantees symbols are tradeable
     const res = await fetch("https://api.bitget.com/api/v2/spot/market/tickers");
     const json = await res.json();
     if (json.code !== "00000") throw new Error(`BitGet tickers error: ${json.msg}`);
+    // Cache full ticker objects (unfiltered) for entry-time liquidity tagging.
+    for (const t of (json.data || [])) _tickerCache.set(t.symbol, t);
 
     // ── Full market scan ────────────────────────────────────────────────────
     // Score every liquid USDT pair — both gainers and high-volume movers
@@ -4804,6 +4824,7 @@ async function run(tvSignal = null, symbol = null) {
         const momEntry = {
           timestamp: new Date().toISOString(), type: "entry", symbol,
           timeframe: CONFIG.timeframe, price, indicators: { ema8, vwap, rsi3 },
+          liquidity: liquiditySnapshot(symbol),
           allPass: true, claudeAnalysis: null, tradeSize: momSize, orderPlaced: false, orderId: null,
           entryType: "momentum", entryConfidence: Math.min(100, Math.round((vol.current / vol.avg) / 5 * 100)),
           paperTrading: CONFIG.paperTrading,
@@ -5141,6 +5162,7 @@ async function run(tvSignal = null, symbol = null) {
       const momEntry = {
         timestamp: new Date().toISOString(), type: "entry", symbol,
         timeframe: "1H", price, indicators: { ema8, vwap, rsi3 },
+        liquidity: liquiditySnapshot(symbol),
         conditions: momResults, allPass: true, claudeAnalysis: null,
         entryType: "momentum", entryConfidence: Math.round(momResults.filter(r => r.pass).length / momResults.length * 100),
         tradeSize, orderPlaced: false, orderId: null,
@@ -5259,6 +5281,7 @@ async function run(tvSignal = null, symbol = null) {
           timestamp: new Date().toISOString(), type: "entry", symbol,
           timeframe: "4H", price, strategy: "swing", swingScore: swingSetup.score,
           tradeSize: swingSize, orderPlaced: true, orderId,
+          liquidity: liquiditySnapshot(symbol),
           paperTrading: CONFIG.paperTrading,
         };
         log.trades.push(swingLog);
@@ -5617,6 +5640,7 @@ async function run(tvSignal = null, symbol = null) {
       timeframe: CONFIG.timeframe,
       price,
       indicators: { ema8, vwap, rsi3 },
+      liquidity: liquiditySnapshot(symbol),
       conditions: results,
       allPass,
       claudeAnalysis,
@@ -8106,6 +8130,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       timestamp: new Date().toISOString(), type: "entry", symbol,
       timeframe: SWING.tf, price, tradeSize: swingSize,
       indicators: { rsi3, rsi14, vwap, ema8, ema21, adx: adx?.adx },
+      liquidity: liquiditySnapshot(symbol),
       score, entryConfidence: Math.round(Math.min(score, 9) / 9 * 100),
       orderPlaced: true, paperTrading: CONFIG.paperTrading, tradeType: "swing",
     };
@@ -8314,6 +8339,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     const entryLog = {
       timestamp: new Date().toISOString(), type: "entry", symbol, timeframe: "1H",
       price, tradeSize: bkSize, indicators: { ema8, ema21, range, volRatio: vol.current/vol.avg },
+      liquidity: liquiditySnapshot(symbol),
       breakoutLevel: rangeHigh, targetPrice, orderPlaced: true,
       paperTrading: CONFIG.paperTrading, tradeType: "breakout",
     };
