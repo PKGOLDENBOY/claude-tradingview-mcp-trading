@@ -13,6 +13,7 @@ import "dotenv/config";
 import Anthropic from "@anthropic-ai/sdk";
 import http from "http";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, renameSync, mkdirSync } from "fs";
+import { dirname, join } from "path";
 import { AsyncLocalStorage } from "async_hooks";
 import crypto from "crypto";
 import { execSync } from "child_process";
@@ -404,6 +405,10 @@ const anthropic = process.env.ANTHROPIC_API_KEY
   : null;
 
 const LOG_FILE = process.env.STATE_FILE || "safety-check-log.json";
+// Directory that holds persistent state. On Railway STATE_FILE=/data/safety-check-log.json
+// so STATE_DIR=/data (the mounted volume). Locally it resolves to "." (cwd).
+// All per-account state logs live here so they survive container redeploys.
+const STATE_DIR = dirname(LOG_FILE);
 const LOG_VERBOSE = process.env.LOG_VERBOSE === "true"; // set to "true" to restore full indicator dumps
 
 // ─── Multi-account support ────────────────────────────────────────────────────
@@ -415,7 +420,7 @@ const ACCOUNTS = [
     passphrase: process.env.BITGET_PASSPHRASE,
     baseUrl:    process.env.BITGET_BASE_URL || "https://api.bitget.com",
     portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD || "1000"),
-    logFile:    "safety-check-log.json",
+    logFile:    LOG_FILE,   // = STATE_FILE (/data volume on Railway) — was hardcoded ephemeral path
   },
   ...(process.env.BITGET_API_KEY_2 ? [{
     id: 2, exchange: "bitget",
@@ -424,7 +429,7 @@ const ACCOUNTS = [
     passphrase: process.env.BITGET_PASSPHRASE_2,
     baseUrl:    process.env.BITGET_BASE_URL || "https://api.bitget.com",
     portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD_2 || process.env.PORTFOLIO_VALUE_USD || "1000"),
-    logFile:    "safety-check-log-2.json",
+    logFile:    join(STATE_DIR, "safety-check-log-2.json"),
   }] : []),
   ...(process.env.BITMART_API_KEY && process.env.BITMART_SECRET_KEY && process.env.BITMART_MEMO ? [{
     id: "BM", exchange: "bitmart",
@@ -433,7 +438,7 @@ const ACCOUNTS = [
     memo:       process.env.BITMART_MEMO,
     baseUrl:    "https://api-cloud.bitmart.com",
     portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD_BITMART || process.env.PORTFOLIO_VALUE_USD || "1000"),
-    logFile:    "safety-check-log-bitmart.json",
+    logFile:    join(STATE_DIR, "safety-check-log-bitmart.json"),
   }] : []),
 ];
 
@@ -470,14 +475,42 @@ const SWING = {
 
 // ─── Logging ────────────────────────────────────────────────────────────────
 
+// Strip null / corrupt entries from every position store. A null position (left behind by
+// an interrupted write) can't be acted on, is never pruned by reconcile, and crashes any code
+// path that reads pos.entryPrice — so remove them on every load.
+function sanitizeLog(log) {
+  let removed = 0;
+  for (const store of ["positions", "swingPositions", "breakoutPositions", "sniperPositions", "ltPositions"]) {
+    const obj = log[store];
+    if (!obj || typeof obj !== "object") continue;
+    for (const [sym, pos] of Object.entries(obj)) {
+      if (!pos || typeof pos !== "object") { delete obj[sym]; removed++; }
+    }
+  }
+  if (removed > 0) console.log(`🧹 sanitizeLog: removed ${removed} null/corrupt position record(s)`);
+  return log;
+}
+
 function loadLog() {
   const fresh = () => ({ trades: [], portfolioValue: acct().portfolioValue, dayStartValue: acct().portfolioValue, dayStartDate: new Date().toISOString().slice(0, 10), _needsPortfolioSync: true });
-  if (!existsSync(acct().logFile)) return fresh();
+  let sourceFile = acct().logFile;
+  if (!existsSync(sourceFile)) {
+    // One-time migration: older builds wrote state to a relative path in the (ephemeral) app
+    // dir instead of the /data volume. If the volume copy is missing but a legacy file exists,
+    // adopt it so open positions aren't lost during the switch to persistent storage.
+    const legacy = "safety-check-log.json";
+    if (existsSync(legacy) && legacy !== sourceFile) {
+      console.log(`🔄 Migrating state from legacy ${legacy} -> ${sourceFile}`);
+      sourceFile = legacy;
+    } else {
+      return fresh();
+    }
+  }
   let raw;
   try {
-    raw = readFileSync(acct().logFile);
+    raw = readFileSync(sourceFile);
     if (raw[0] === 0xEF && raw[1] === 0xBB && raw[2] === 0xBF) raw = raw.slice(3);
-    const log = JSON.parse(raw.toString("utf8"));
+    const log = sanitizeLog(JSON.parse(raw.toString("utf8")));
     const today = new Date().toISOString().slice(0, 10);
     if (!log.portfolioValue) log.portfolioValue = acct().portfolioValue;
     if (log.dayStartDate !== today) {
@@ -490,7 +523,7 @@ function loadLog() {
   } catch (e) {
     // Corrupted log (e.g. process killed mid-write) — back it up and start fresh
     console.error(`⚠️ loadLog: JSON parse failed (${e.message}) — backing up corrupted file and starting fresh`);
-    try { renameSync(acct().logFile, acct().logFile + ".bak." + Date.now()); } catch {}
+    try { renameSync(sourceFile, sourceFile + ".bak." + Date.now()); } catch {}
     return fresh();
   }
 }
@@ -2570,7 +2603,7 @@ async function reconcilePositions(log) {
     }
 
     // Prune ghost positions across all stores — log says open but Bitget balance is dust (already stopped/sold)
-    for (const store of ["positions", "swingPositions", "breakoutPositions", "sniperPositions"]) {
+    for (const store of ["positions", "swingPositions", "breakoutPositions", "sniperPositions", "ltPositions"]) {
       if (!log[store]) continue;
       for (const [symbol, pos] of Object.entries(log[store])) {
         if (!pos?.open) continue;
