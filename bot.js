@@ -2727,6 +2727,7 @@ async function reconcilePositions(log) {
           slPct: 0.04, tpPct: 0.08,
         };
         found++;
+        subscribeSymbolToStream(symbol); // ensure hard stop covers re-adopted positions after a restart
       }
     }
     if (found > 0 || pruned > 0) { saveLog(log); console.log(`🔄 Reconciled ${found} position(s) from BitGet | Pruned ${pruned} ghost(s)`); }
@@ -3753,17 +3754,35 @@ function generateTaxSummary() {
 
 let _wsGeneration = 0; // incremented on every intentional restart; stale close handlers bail out
 
+// Symbols of all currently-open positions across every store. The price stream — and thus
+// the hard-stop monitor — must always cover coins we hold, even off-watchlist ones, and must
+// survive WebSocket reconnects and process restarts (where only CONFIG.symbols was re-subscribed).
+function openPositionSymbols() {
+  try {
+    const log = loadLog();
+    const syms = new Set();
+    for (const store of ["positions", "swingPositions", "breakoutPositions", "sniperPositions", "ltPositions"]) {
+      const obj = log[store];
+      if (!obj) continue;
+      for (const [sym, pos] of Object.entries(obj)) if (pos) syms.add(sym);
+    }
+    return [...syms];
+  } catch { return []; }
+}
+
 function startPriceStream(symbols) {
   const generation = ++_wsGeneration;
   if (priceStreamWs) {
     try { priceStreamWs.terminate(); } catch {}
   }
+  // Always include open-position coins so the hard stop never goes blind on a coin we hold.
+  const streamSymbols = [...new Set([...(symbols || []), ...openPositionSymbols()])];
   const ws = new WebSocket("wss://ws.bitget.com/v2/ws/public");
   priceStreamWs = ws;
 
   ws.on("open", () => {
-    console.log(`\n📡 WebSocket connected — streaming ${symbols.length} symbols`);
-    const args = symbols.map(s => ({ instType: "SPOT", channel: "ticker", instId: s }));
+    console.log(`\n📡 WebSocket connected — streaming ${streamSymbols.length} symbols (${openPositionSymbols().length} open positions included)`);
+    const args = streamSymbols.map(s => ({ instType: "SPOT", channel: "ticker", instId: s }));
     ws.send(JSON.stringify({ op: "subscribe", args }));
   });
 
