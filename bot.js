@@ -2550,6 +2550,41 @@ async function initRecentlySold(log) {
   }
 }
 
+// Cached lookup of symbols sold on BitGet in the last 35min. The entry guard used to call
+// /spot/trade/fills once PER SYMBOL every scan, which rate-limited Railway's IP (BitGet then
+// returns an HTML error page that fails JSON.parse). Fetch once per ~60s and reuse the result
+// across all symbols in the cycle. On failure, reuse the stale cache or return null so callers
+// fall back to disk-only cooldown — identical to the previous behaviour.
+const _recentSellsCache = new Map(); // accountId -> { symbols: Set<string>, ts: number }
+const RECENT_SELLS_TTL_MS = 60 * 1000;
+
+async function getRecentlySoldSymbols() {
+  if (CONFIG.paperTrading || acct().exchange !== "bitget") return null;
+  const key = acct().id;
+  const cached = _recentSellsCache.get(key);
+  if (cached && Date.now() - cached.ts < RECENT_SELLS_TTL_MS) return cached.symbols;
+  try {
+    const THIRTY_FIVE_MIN = 35 * 60 * 1000;
+    const ts = Date.now().toString();
+    const path = `/api/v2/spot/trade/fills?limit=100&startTime=${Date.now() - THIRTY_FIVE_MIN}`;
+    const sign = signBitGet(ts, "GET", path);
+    const res = await fetch(`${acct().baseUrl}${path}`, {
+      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" }
+    });
+    const data = await res.json();
+    const symbols = new Set();
+    for (const f of (data.data || [])) {
+      if (f.side === "sell") symbols.add(f.symbol.toUpperCase());
+    }
+    _recentSellsCache.set(key, { symbols, ts: Date.now() });
+    return symbols;
+  } catch (e) {
+    if (cached) return cached.symbols;
+    console.log(`⚠️ Recent-sells lookup failed: ${e.message} — using disk-only cooldown`);
+    return null;
+  }
+}
+
 async function reconcilePositions(log) {
   if (CONFIG.paperTrading || acct().exchange !== "bitget") return;
   try {
@@ -4647,32 +4682,21 @@ async function run(tvSignal = null, symbol = null) {
     // Exchange-side sell check — guards against Railway log wipes clearing disk cooldowns on restart.
     // If BitGet shows a SELL fill for this symbol in the last 35min, block entry and write cooldown to disk.
     if (!CONFIG.paperTrading) {
-      try {
-        const THIRTY_FIVE_MIN = 35 * 60 * 1000;
-        const efTs = Date.now().toString();
-        const efPath = `/api/v2/spot/trade/fills?limit=50&startTime=${Date.now() - THIRTY_FIVE_MIN}`;
-        const efSign = signBitGet(efTs, "GET", efPath);
-        const efRes = await fetch(`${acct().baseUrl}${efPath}`, {
-          headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": efSign, "ACCESS-TIMESTAMP": efTs, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" }
-        });
-        const efData = await efRes.json();
-        const hadRecentSell = (efData.data || []).some(f => f.side === "sell" && f.symbol.toUpperCase() === symbol);
-        if (hadRecentSell) {
-          // Ensure cooldown is on disk for future calls
-          if (!log.coinCooldowns) log.coinCooldowns = {};
-          if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
-          if (!(log.coinCooldowns[symbol].scalp?.until > Date.now())) {
-            log.coinCooldowns[symbol].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: "recent-sell" };
-            saveLog(log);
-          }
-          _recentlySold.set(symbol, Date.now());
-          console.log(`🔒 EXCHANGE SELL LOCK — ${symbol} had SELL fill in last 35min on BitGet — blocking re-entry`);
-          console.log("═══════════════════════════════════════════════════════════\n");
-          pushSignal(symbol, "BLOCKED", `Recent sell on exchange — re-entry blocked 30min`);
-          return;
+      // Cached once-per-cycle lookup (see getRecentlySoldSymbols) — avoids per-symbol rate-limiting.
+      const recentSells = await getRecentlySoldSymbols();
+      if (recentSells && recentSells.has(symbol)) {
+        // Ensure cooldown is on disk for future calls
+        if (!log.coinCooldowns) log.coinCooldowns = {};
+        if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
+        if (!(log.coinCooldowns[symbol].scalp?.until > Date.now())) {
+          log.coinCooldowns[symbol].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: "recent-sell" };
+          saveLog(log);
         }
-      } catch (e) {
-        console.log(`⚠️ Exchange sell check failed: ${e.message} — proceeding with disk-only cooldown`);
+        _recentlySold.set(symbol, Date.now());
+        console.log(`🔒 EXCHANGE SELL LOCK — ${symbol} had SELL fill in last 35min on BitGet — blocking re-entry`);
+        console.log("═══════════════════════════════════════════════════════════\n");
+        pushSignal(symbol, "BLOCKED", `Recent sell on exchange — re-entry blocked 30min`);
+        return;
       }
     }
 
