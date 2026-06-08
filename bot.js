@@ -4412,7 +4412,13 @@ async function run(tvSignal = null, symbol = null) {
   const todayPnlPct = log.dayStartValue > 0 ? (currentPortfolio - log.dayStartValue) / log.dayStartValue * 100 : 0;
   const profitLockScale = todayPnlPct > 5 ? 0.40 : todayPnlPct > 3 ? 0.60 : todayPnlPct > 1.5 ? 0.80 : 1.0;
   if (profitLockScale < 1.0) console.log(`🔒 Profit lock: ${(profitLockScale*100).toFixed(0)}% position size (up ${todayPnlPct.toFixed(1)}% today — protecting gains)`);
-  const rawSize = currentPortfolio * sizePct * adaptive.sizeMultiplier * drawdownScale * regimeScale * bearScale * atrScale * greedScale * overconfidenceScale * profitLockScale;
+  // Regime directional tilt (user policy 2026-06-08): asymmetric risk by market regime —
+  // aggressive in a confirmed uptrend, cautious (capital-preservation) in sideways/ranging,
+  // defensive in bear. Stacks with the other scales. Regime detection lags, so this reacts to
+  // the regime rather than predicting it; revisit after forward data.
+  const regimeDirScale = regime.btcTrend === "bull" ? 1.35 : regime.btcTrend === "bear" ? 0.30 : 0.70;
+  console.log(`🧭 Regime tilt: ${(regimeDirScale*100).toFixed(0)}% size (${regime.btcTrend === "bull" ? "BULL — aggressive" : regime.btcTrend === "bear" ? "BEAR — defensive" : "RANGING — capital preservation"})`);
+  const rawSize = currentPortfolio * sizePct * adaptive.sizeMultiplier * drawdownScale * regimeScale * bearScale * atrScale * greedScale * overconfidenceScale * profitLockScale * regimeDirScale;
   const tradeSize = CONFIG.maxTradeSizeUSD ? Math.min(rawSize, CONFIG.maxTradeSizeUSD) : rawSize;
   if (drawdownScale < 1.0) console.log(`\n⚠️  Drawdown scaling: ${(drawdownScale * 100).toFixed(0)}% position size (down ${drawdown.drawdownPct.toFixed(1)}% today)`);
   if (regimeScale < 1.0)   console.log(`⚠️  Volatile regime: 50% position size`);
@@ -4722,6 +4728,15 @@ async function run(tvSignal = null, symbol = null) {
     if (curATRpct > VOL_GATE) {
       console.log(`🚫 VOLATILITY BLOCK — ${symbol} ATR/price ${(curATRpct * 100).toFixed(2)}% > ${(VOL_GATE * 100).toFixed(2)}% — high-vol coins underperform (research). Skipping entry.`);
       pushSignal(symbol, "BLOCKED", `High volatility — ATR/price ${(curATRpct * 100).toFixed(2)}%`);
+      return;
+    }
+
+    // Bear-regime safety gate (user policy 2026-06-08): in a confirmed bear regime, pause ALL new
+    // entries except high-conviction bear snap-backs (deeply oversold + momentum turning). Both
+    // mean-reversion and momentum lose in sustained downtrends — capital preservation first.
+    if (regime.btcTrend === "bear" && !bearSnapBack) {
+      console.log(`🐻 BEAR REGIME BLOCK — ${symbol}: new entries paused in bear (only high-conviction snap-backs allowed). Capital preservation.`);
+      pushSignal(symbol, "BLOCKED", `Bear regime — new entries paused`);
       return;
     }
 
