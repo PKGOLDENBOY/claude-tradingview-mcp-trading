@@ -2657,20 +2657,25 @@ async function reconcilePositions(log) {
       bitgetBalances[symbol] = qty * price;
     }
 
-    // Prune ghost positions across all stores — log says open but Bitget balance is dust (already stopped/sold)
+    // Prune ghost positions across all stores — Bitget balance is dust (already stopped/sold).
+    // Prune regardless of the `open` flag: a stale record (open falsy) with no real balance is a
+    // phantom that the old `if (!pos?.open) continue` guard left behind forever. Real holdings
+    // (>= $2) are always kept. A freshly-opened position is protected by a 5-min settle window so
+    // we never prune one before its buy fill is reflected in the balance.
     for (const store of ["positions", "swingPositions", "breakoutPositions", "sniperPositions", "ltPositions"]) {
       if (!log[store]) continue;
       for (const [symbol, pos] of Object.entries(log[store])) {
-        if (!pos?.open) continue;
+        if (!pos) continue; // null/corrupt — sanitizeLog handles these, but be defensive
         const actualUSD = bitgetBalances[symbol] ?? 0;
-        if (actualUSD < 2.0) {
-          delete log[store][symbol];
-          if (!log.coinCooldowns) log.coinCooldowns = {};
-          if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
-          log.coinCooldowns[symbol].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: "ghost" };
-          console.log(`🗑️  Ghost prune [${store}] — ${symbol} shows open but Bitget balance $${actualUSD.toFixed(4)} — removing`);
-          pruned++;
-        }
+        if (actualUSD >= 2.0) continue; // real holding — keep regardless of flag
+        const ageMs = pos.entryTime ? (Date.now() - new Date(pos.entryTime).getTime()) : Infinity;
+        if (pos.open && ageMs < 5 * 60 * 1000) continue; // fresh open position — let the fill settle
+        delete log[store][symbol];
+        if (!log.coinCooldowns) log.coinCooldowns = {};
+        if (!log.coinCooldowns[symbol]) log.coinCooldowns[symbol] = {};
+        log.coinCooldowns[symbol].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: "ghost" };
+        console.log(`🗑️  Ghost prune [${store}] — ${symbol} (open=${!!pos.open}) Bitget balance $${actualUSD.toFixed(4)} — removing`);
+        pruned++;
       }
     }
 
