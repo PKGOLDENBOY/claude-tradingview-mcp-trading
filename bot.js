@@ -4713,6 +4713,18 @@ async function run(tvSignal = null, symbol = null) {
   } else {
     // ── ENTRY FLOW ──────────────────────────────────────────────────────────
 
+    // Volatility gate (research 2026-06-08, out-of-sample validated on 25 coins / 23k samples):
+    // coins with ATR/price above ~1.05% have negative forward 4h returns (Q4–Q5: −0.12%, 43% win)
+    // vs positive below (Q1–Q2: +0.01%, 51% win). Block NEW entries on high-vol coins. Exit
+    // management is unaffected — it runs in the `position.open` branch above, never reaching here.
+    // Regime-aware caveat: validated in a ranging/fearful market; revisit after forward data.
+    const VOL_GATE = 0.0105;
+    if (curATRpct > VOL_GATE) {
+      console.log(`🚫 VOLATILITY BLOCK — ${symbol} ATR/price ${(curATRpct * 100).toFixed(2)}% > ${(VOL_GATE * 100).toFixed(2)}% — high-vol coins underperform (research). Skipping entry.`);
+      pushSignal(symbol, "BLOCKED", `High volatility — ATR/price ${(curATRpct * 100).toFixed(2)}%`);
+      return;
+    }
+
     // Post-sell lock — fastest gate, checked before anything else
     const soldAt = _recentlySold.get(symbol);
     if (soldAt && Date.now() - soldAt < POST_SELL_LOCK_MS) {
@@ -4835,12 +4847,16 @@ async function run(tvSignal = null, symbol = null) {
 
       const trendOk  = bullTrend1h;                             // 1H uptrend — momentum trades in downtrends fail
       // In bear regime, require 15%+ move — small pumps (1-5%) reverse fast in bear, big pumps have real momentum
-      const bearMoveMin = 15;
-      const regimeOk = regime.btcTrend !== "bear" || gainerInfo.change24h >= bearMoveMin;
-      console.log(`  Vol: ${volRatio.toFixed(1)}x avg | RSI(3): ${rsi3?.toFixed(1)} (ceil ${rsiCeil}) | StochRSI K: ${stochRsi?.k?.toFixed(1) ?? "—"} | Above EMA8: ${price > ema8 ? "yes" : "no"} | 1H trend: ${bullTrend1h ? "✅ up" : "🔴 down"} | BTC regime: ${regime.btcTrend}${regime.btcTrend === "bear" ? ` (need ${bearMoveMin}%+ move, got ${gainerInfo.change24h.toFixed(1)}%)` : ""}`);
+      // Momentum-path gate (research 2026-06-08, out-of-sample validated): high-RSI momentum
+      // entries are negative-EV outside a confirmed uptrend. RSI(3) Q4–Q5 forward 4h returns are
+      // −0.5%/−0.2%; chasing strength (relative-strength / 6h-momentum) had negative IC. The
+      // INU/MYX/VIRTUAL blowups were all momentum entries in a ranging market. So only allow this
+      // path when BTC is in a confirmed uptrend (TRENDING); block in RANGING/BEAR/VOLATILE.
+      const regimeOk = regime.btcTrend === "bull";
+      console.log(`  Vol: ${volRatio.toFixed(1)}x avg | RSI(3): ${rsi3?.toFixed(1)} (ceil ${rsiCeil}) | StochRSI K: ${stochRsi?.k?.toFixed(1) ?? "—"} | Above EMA8: ${price > ema8 ? "yes" : "no"} | 1H trend: ${bullTrend1h ? "✅ up" : "🔴 down"} | BTC regime: ${regime.btcTrend} (momentum allowed only in bull)`);
 
       if (!regimeOk) {
-        console.log(`🚫 MOMENTUM BLOCK — BTC bear regime, move only +${gainerInfo.change24h.toFixed(1)}% (need ${bearMoveMin}%+ to trade against the bear).`);
+        console.log(`🚫 MOMENTUM BLOCK — momentum entries are negative-EV outside a confirmed uptrend (regime: ${regime.regime}/${regime.btcTrend}). Skipping ${symbol} +${gainerInfo.change24h.toFixed(1)}% mover.`);
       } else if (rsiOk && stochOk && priceOk && volOk && notTooHot && trendOk) {
         console.log(`\n✅ MOMENTUM ENTRY — big mover conditions met. Position (40% size, 2% SL, trailing stop).`);
         pushSignal(symbol, "ENTRY", `Big mover +${gainerInfo.change24h.toFixed(1)}% — momentum entry`);
