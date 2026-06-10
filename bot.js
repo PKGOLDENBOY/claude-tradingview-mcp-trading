@@ -4740,6 +4740,19 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
 
+    // Daily loss-streak circuit breaker (user policy 2026-06-10): the %-based daily stop (-3%)
+    // misses "death by a thousand cuts" grinding days — many small losses that never reach -3%.
+    // After 6+ losing exits today on a clearly adverse day (losses >= 2x wins), pause NEW entries
+    // until tomorrow (UTC). Exit management is unaffected. Resets at the UTC day boundary.
+    const _lsDay = new Date().toISOString().slice(0, 10);
+    const _lsExits = (log.trades || []).filter(t => t.type === "exit" && t.orderPlaced && typeof t.pnlPct === "number" && t.timestamp?.startsWith(_lsDay));
+    const _lsL = _lsExits.filter(t => t.pnlPct < 0).length, _lsW = _lsExits.filter(t => t.pnlPct > 0).length;
+    if (_lsL >= 6 && _lsL >= _lsW * 2) {
+      console.log(`🛑 LOSS-STREAK BREAKER — ${_lsL}L/${_lsW}W today, conditions clearly adverse. Pausing new entries until tomorrow (UTC).`);
+      pushSignal(symbol, "BLOCKED", `Loss-streak breaker — ${_lsL}L/${_lsW}W today`);
+      return;
+    }
+
     // Post-sell lock — fastest gate, checked before anything else
     const soldAt = _recentlySold.get(symbol);
     if (soldAt && Date.now() - soldAt < POST_SELL_LOCK_MS) {
