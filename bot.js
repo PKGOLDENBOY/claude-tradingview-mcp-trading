@@ -8788,7 +8788,22 @@ async function monitorSniperPositions() {
     try {
       await placeBitGetOrder(symbol, "sell", null, price, String(pos.quantity));
     } catch (err) {
-      console.log(`❌ Sniper sell failed: ${err.message} — will retry next cycle`);
+      const isDust = err.message.startsWith("DUST:") || err.message.includes("Parameter verification exception size");
+      if (isDust) {
+        // Unsellable remainder (< $1 min order size). The DUST error proves the sellable balance
+        // is effectively gone — close the position in the log so we stop re-attempting the exit
+        // every cycle (previously this looped forever and flooded the logs). Mirrors the
+        // hard-stop dust cleanup above.
+        const freshLog = loadLog();
+        if (freshLog.sniperPositions?.[symbol]) freshLog.sniperPositions[symbol] = { ...pos, open: false };
+        if (!freshLog.coinCooldowns) freshLog.coinCooldowns = {};
+        if (!freshLog.coinCooldowns[symbol]) freshLog.coinCooldowns[symbol] = {};
+        freshLog.coinCooldowns[symbol].scalp = { until: Date.now() + 30 * 60 * 1000, pnlPct: pnlPct.toFixed(2) };
+        saveLog(freshLog);
+        console.log(`🗑️  Dust cleanup [sniper] — ${symbol} unsellable, closed in log (P&L: ${pnlPct.toFixed(2)}%)`);
+      } else {
+        console.log(`❌ Sniper sell failed: ${err.message} — will retry next cycle`);
+      }
       continue;
     }
 
