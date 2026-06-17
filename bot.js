@@ -2716,11 +2716,22 @@ async function reconcilePositions(log) {
       if (recentlySold) continue;
 
       if (!log.positions[symbol]?.open) {
-        // Use original entry price from trade history if available — avoids wrong P&L and stop-loss on reconciled positions
-        const originalEntry = (log.trades || []).filter(t => t.type === "entry" && t.symbol === symbol && t.orderPlaced).slice(-1)[0];
+        // Inherit the original entry price ONLY if that lot is still open — i.e. there is no
+        // exit recorded for this symbol after the last entry. If the lot was already closed
+        // (e.g. stopped out) but a residual balance remains, reusing the dead entry price
+        // double-counts the prior loss and re-adopts the position already underwater past its
+        // stop (this is how TRX compounded a -5% stop-out into a -10% emergency stop). In that
+        // case fall back to current market price as the cost basis for the leftover lot.
+        const lastEntry = (log.trades || []).filter(t => t.type === "entry" && t.symbol === symbol && t.orderPlaced).slice(-1)[0];
+        const closedSinceEntry = lastEntry && (log.trades || []).some(t =>
+          t.type === "exit" && t.symbol === symbol && t.orderPlaced &&
+          new Date(t.timestamp).getTime() > new Date(lastEntry.timestamp).getTime()
+        );
+        const originalEntry = (lastEntry && !closedSinceEntry) ? lastEntry : null;
         const entryPrice = originalEntry?.price ?? price;
         const entryTime  = originalEntry?.timestamp ?? new Date().toISOString();
-        console.log(`🔄 Reconcile: ${qty.toFixed(6)} ${asset.coin} ($${usdValue.toFixed(2)}) not in log — tracking @ $${entryPrice.toFixed(4)} entry${originalEntry ? " (from history)" : " (current price — no history)"}`);
+        const basisNote  = originalEntry ? "from history" : closedSinceEntry ? "current price — prior lot closed" : "current price — no history";
+        console.log(`🔄 Reconcile: ${qty.toFixed(6)} ${asset.coin} ($${usdValue.toFixed(2)}) not in log — tracking @ $${entryPrice.toFixed(4)} entry (${basisNote})`);
         log.positions[symbol] = {
           open: true, side: "long",
           entryPrice,
