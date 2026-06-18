@@ -235,6 +235,7 @@ async function emailDailySummary(log) {
 
 // Real-time price cache — updated by WebSocket stream, consumed by hard-stop monitor
 const livePrices = new Map(); // symbol → { price, timestamp }
+const _hardStopRestThrottle = new Map(); // symbol → last REST-fallback fetch ts (hard-stop blind-coverage)
 let priceStreamWs = null;
 const _processingStops = new Set(); // guard against double-exits
 const _processingEntries = new Set(); // guard against duplicate concurrent entries
@@ -3861,9 +3862,28 @@ async function checkLiveHardStops() {
     // Skip if main scan's run() is already processing this symbol — avoids concurrent sell + log-clobber race
     if (_runningSymbols.has(sym)) continue;
     const live = livePrices.get(sym);
-    if (!live || Date.now() - live.ts > 30000) continue; // stale — skip
-
-    const livePrice = live.price;
+    let livePrice;
+    if (live && Date.now() - live.ts <= 30000) {
+      livePrice = live.price;
+    } else {
+      // No fresh streamed price. This happens for thin/illiquid coins (ticks arrive sparsely so
+      // the WS cache goes stale) or during a momentary stream gap. Skipping here leaves the
+      // emergency stop BLIND — the loss then only gets caught by the slow 60s/5min poll, which
+      // is how TRX gapped to -10% before any stop fired. Fall back to a REST ticker so the -8%
+      // cap is evaluated every cycle regardless of stream health, throttled per-symbol so the
+      // 5s loop can't hammer the API.
+      const lastFetch = _hardStopRestThrottle.get(sym) || 0;
+      if (Date.now() - lastFetch < 8000) continue; // fetched within the last cycle — wait
+      _hardStopRestThrottle.set(sym, Date.now());
+      try {
+        const r = await fetch(`https://api.bitget.com/api/v2/spot/market/tickers?symbol=${sym}`, { signal: AbortSignal.timeout(4000) });
+        const j = await r.json();
+        const p = j.code === "00000" && j.data?.[0] ? parseFloat(j.data[0].lastPr) : null;
+        if (!p || !isFinite(p)) continue;
+        livePrice = p;
+        console.log(`  🛟 Hard-stop REST fallback — ${sym} stream stale, fetched $${p}`);
+      } catch { continue; }
+    }
     const pnlPct = (livePrice - pos.entryPrice) / pos.entryPrice * 100;
     const defaultSl = posStore === "swingPositions" ? (SWING.stopLoss ?? 0.05) : posStore === "breakoutPositions" ? 0.03 : 0.04;
     const slPct = pos.slPct ?? ((typeof BACKTEST !== "undefined" && BACKTEST[sym]?.stopLoss) ? BACKTEST[sym].stopLoss : defaultSl);
