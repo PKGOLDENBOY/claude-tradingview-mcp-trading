@@ -364,6 +364,15 @@ const LT_ENABLED    = process.env.LT_ENABLED !== "false";                       
 const LT_TRADE_SIZE = parseFloat(process.env.LT_TRADE_SIZE_USD  || "5");        // $ invested per coin
 const LT_TARGET_PCT = parseFloat(process.env.LT_TARGET_PCT      || "100");      // exit at +100% (2×)
 const LT_RESERVE    = parseFloat(process.env.LT_USDT_RESERVE    || "20");       // keep this much free for scalp
+// Inventory give-back guards — LT bags previously had no downside exit, so they marked the
+// account up on good days and bled it back on bad ones with no floor. These add: a spike-capture
+// trail (arms low so a rally that fades is banked, not surrendered), a catastrophic stop, and a
+// dead-money timeout. Moonshot ladder targets (+30/60/100%) are kept on top of these.
+const LT_TRAIL_ARM_PCT     = parseFloat(process.env.LT_TRAIL_ARM_PCT     || "15");   // arm spike-capture trail at +15%
+const LT_TRAIL_GIVEBACK    = parseFloat(process.env.LT_TRAIL_GIVEBACK    || "10");   // ...then exit on a 10% drop from peak
+const LT_CATASTROPHIC_STOP = parseFloat(process.env.LT_CATASTROPHIC_STOP || "-25");  // hard cut a bag down this far (%)
+const LT_DEADMONEY_DAYS    = parseFloat(process.env.LT_DEADMONEY_DAYS    || "21");   // cut dead money held this long...
+const LT_DEADMONEY_MINPCT  = parseFloat(process.env.LT_DEADMONEY_MINPCT  || "10");   // ...if still below +10%
 const LT_COINS = [
   // BitcoinTAF $25K Long Term Portfolio 2026 — matched to BitGet USDT pairs
   "ETHUSDT","ADAUSDT","AXSUSDT","AVAXUSDT","DOGEUSDT","ETCUSDT","FETUSDT",
@@ -3166,6 +3175,20 @@ async function runLongTermPortfolio() {
   if (!log.ltPositions) log.ltPositions = {};
   let changed = false;
 
+  // Regime gate — don't ACCUMULATE (new buys or DCA averaging-down) into a falling market.
+  // Existing bags still ride their normal exits (block-new-only policy). This stops the bot
+  // catching falling knives across a 45-coin basket during bear/ranging/extreme-fear.
+  let ltGateBlocked = false, gateReason = "";
+  try {
+    const reg = await detectMarketRegime();
+    const fg  = await fetchFearGreed();
+    const badRegime   = reg.regime === "RANGING" || reg.regime === "BEAR";
+    const extremeFear = fg && fg.value <= 25;
+    ltGateBlocked = badRegime || extremeFear;
+    if (ltGateBlocked) gateReason = [badRegime ? reg.regime : null, extremeFear ? `F&G ${fg.value}` : null].filter(Boolean).join(" + ");
+  } catch { /* regime fetch failed — fail open, don't block */ }
+  if (ltGateBlocked) console.log(`  🚧 LT accumulation gated — ${gateReason} (new buys + DCA paused; existing bags managed normally)`);
+
   // ── Manage held positions ──────────────────────────────────────────────────
   for (const [sym, pos] of Object.entries(log.ltPositions)) {
     if (!pos?.open) continue;
@@ -3177,6 +3200,42 @@ async function runLongTermPortfolio() {
     const holdDays = (Date.now() - new Date(pos.entryTime).getTime()) / 86400000;
     const remQty   = parseFloat(pos.remainingQty ?? pos.quantity);
     console.log(`  💎 ${sym.replace("USDT","").padEnd(8)} avg $${avgEntry.toFixed(6)} | $${price.toFixed(6)} | ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% | ${holdDays.toFixed(0)}d | rem:${remQty.toFixed(4)}`);
+
+    // ── Inventory give-back guards (take priority over the moonshot ladder) ─────
+    // Spike-capture trail: once a bag has run +LT_TRAIL_ARM_PCT it arms; if it then gives back
+    // LT_TRAIL_GIVEBACK% from its peak, bank the rest instead of riding it all the way down.
+    // This is the core give-back fix — converts a fading rally into cash before it round-trips.
+    if (price > (pos.peakPrice ?? 0)) { pos.peakPrice = price; changed = true; }
+    if (!pos.trailArmed && pnlPct >= LT_TRAIL_ARM_PCT) { pos.trailArmed = true; changed = true; console.log(`  🔫 LT trail armed — ${sym} reached +${pnlPct.toFixed(1)}%`); }
+    const drawFromPeak = pos.peakPrice ? (pos.peakPrice - price) / pos.peakPrice * 100 : 0;
+
+    let forcedExit = null;
+    if (pnlPct <= LT_CATASTROPHIC_STOP)                                    forcedExit = `Catastrophic stop ${pnlPct.toFixed(1)}%`;
+    else if (holdDays > LT_DEADMONEY_DAYS && pnlPct < LT_DEADMONEY_MINPCT) forcedExit = `Dead money — ${holdDays.toFixed(0)}d at ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%`;
+    else if (pos.trailArmed && drawFromPeak >= LT_TRAIL_GIVEBACK)          forcedExit = `Spike-capture trail — gave back ${drawFromPeak.toFixed(1)}% from peak (now +${pnlPct.toFixed(1)}%)`;
+
+    if (forcedExit) {
+      const sellQty = parseFloat(pos.remainingQty ?? pos.quantity);
+      if (sellQty > 0) {
+        try {
+          console.log(`  🛡️  LT FORCED EXIT — ${sym} | ${forcedExit} | selling ${sellQty.toFixed(6)}`);
+          await placeOrder(sym, "sell", null, price, String(sellQty));
+          const pnlUSD = (price - avgEntry) * sellQty;
+          pos.open = false; pos.exitPrice = price; pos.exitTime = new Date().toISOString(); pos.remainingQty = "0";
+          writeTradeCsv({ timestamp: new Date().toISOString(), type: "exit", symbol: sym, price, pnlPct, pnlUSD, orderPlaced: true, tradeType: "longterm", notes: `LT forced exit — ${forcedExit}` });
+          changed = true;
+          console.log(`  ✅ LT FORCED EXIT done — ${sym} ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% ($${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(2)})`);
+          sendEmail(`🛡️ LT EXIT — ${sym.replace("USDT","")} ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%`,
+            `<h2>🛡️ LT Inventory Guard Exit</h2><table style="font-size:16px;line-height:1.8">
+             <tr><td><b>Symbol</b></td><td>${sym}</td></tr>
+             <tr><td><b>Reason</b></td><td>${forcedExit}</td></tr>
+             <tr><td><b>P&L</b></td><td>${pnlUSD >= 0 ? "+" : ""}$${pnlUSD.toFixed(2)} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)</td></tr></table>`).catch(() => {});
+        } catch (e) { console.log(`  ❌ LT forced exit failed ${sym}: ${e.message}`); }
+      } else {
+        pos.open = false; changed = true;
+      }
+      continue;
+    }
 
     // ── Legacy position (no ladder): single exit ───────────────────────────
     if (!pos.ladder) {
@@ -3201,7 +3260,8 @@ async function runLongTermPortfolio() {
     if (e2 && !e2.filled) {
       const t1Price = pos.ladder.entry[0].price;
       const dropPct = (t1Price - price) / t1Price * 100;
-      if (dropPct >= (e2.triggerDropPct ?? 8)) {
+      if (ltGateBlocked && dropPct >= (e2.triggerDropPct ?? 8)) console.log(`  🚧 LT DCA skipped — ${sym} dipped ${dropPct.toFixed(1)}% but accumulation gated (${gateReason})`);
+      if (dropPct >= (e2.triggerDropPct ?? 8) && !ltGateBlocked) {
         const t2Size  = LT_TRADE_SIZE * 0.5;
         const usdtBal = await getBalance("USDT").catch(() => 0);
         if (usdtBal - LT_RESERVE >= t2Size) {
@@ -3289,6 +3349,11 @@ async function runLongTermPortfolio() {
   }
 
   // ── Scan and buy best qualifying coin ─────────────────────────────────────
+  if (ltGateBlocked) {
+    console.log(`  🚧 LT new-buy scan skipped — accumulation gated (${gateReason})`);
+    if (changed) saveLog(log);
+    return;
+  }
   let usdtBalance = 0;
   try { usdtBalance = await getBalance("USDT"); } catch (e) {
     console.log(`⚠️ LT: balance fetch failed — ${e.message}`);
