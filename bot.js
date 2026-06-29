@@ -325,6 +325,23 @@ async function failsLiquidityFloor(symbol) {
   return usd != null && usd < MIN_BOOK_DEPTH_USD;
 }
 
+// ── Global daily entry cap ────────────────────────────────────────────────────
+// Every trade is currently negative-EV (WR 35%, PF 0.37 even on liquid coins — edge analysis
+// 2026-06-29), so the single safest lever is to TRADE LESS: each entry avoided is bleed avoided.
+// The old per-path checkTradeLimits (entries+exits, cap 15) was bypassed by the mover/swing/LT
+// paths, so ~35 round-trips/day still happened. This is a HARD cap on new BUYS across ALL paths,
+// enforced at the buy chokepoints. Exits/sells are NEVER capped — we must always be able to close.
+const MAX_ENTRIES_PER_DAY = parseInt(process.env.MAX_ENTRIES_PER_DAY || "6", 10);
+function countTodaysEntries(log) {
+  const today = new Date().toISOString().slice(0, 10);
+  return (log?.trades || []).filter(t => t.type === "entry" && t.orderPlaced && t.timestamp?.startsWith(today)).length;
+}
+// True if today's entry budget is already spent. Reads the persisted log so it survives redeploys.
+function entryCapReached() {
+  try { return countTodaysEntries(loadLog()) >= MAX_ENTRIES_PER_DAY; }
+  catch { return false; } // fail-open on read error — don't freeze the bot
+}
+
 // Per-coin latest scan data — shown in dashboard coin detail view
 const coinSnapshots = {};
 
@@ -2528,6 +2545,10 @@ async function placeOrder(symbol, side, sizeUSD, price, quantityOverride = null)
       console.log(`⛔ BUY BLOCKED — ${symbol} book too thin ($${Math.round(d || 0).toLocaleString()} < $${MIN_BOOK_DEPTH_USD.toLocaleString()} ±0.5% depth). Skipping illiquid coin.`);
       return { blocked: true, code: "THIN_BOOK", reason: `Book depth $${Math.round(d || 0)} below floor` };
     }
+    if (entryCapReached()) {
+      console.log(`⛔ BUY BLOCKED — ${symbol}: daily entry cap reached (${MAX_ENTRIES_PER_DAY}/day). Trading less by design.`);
+      return { blocked: true, code: "ENTRY_CAP", reason: `Daily entry cap ${MAX_ENTRIES_PER_DAY} reached` };
+    }
     const soldAt = _recentlySold.get(symbol);
     if (soldAt && Date.now() - soldAt < POST_SELL_LOCK_MS) {
       const minsLeft = Math.ceil((POST_SELL_LOCK_MS - (Date.now() - soldAt)) / 60000);
@@ -4092,6 +4113,10 @@ async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
   if (await failsLiquidityFloor(symbol)) {
     const d = _depthCache.get(symbol)?.usd;
     console.log(`⛔ BUY BLOCKED — ${symbol} book too thin ($${Math.round(d || 0).toLocaleString()} < $${MIN_BOOK_DEPTH_USD.toLocaleString()} ±0.5% depth). Skipping illiquid coin.`);
+    return null;
+  }
+  if (entryCapReached()) {
+    console.log(`⛔ BUY BLOCKED — ${symbol}: daily entry cap reached (${MAX_ENTRIES_PER_DAY}/day). Trading less by design.`);
     return null;
   }
   try {
