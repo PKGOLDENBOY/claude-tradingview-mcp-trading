@@ -800,7 +800,11 @@ function calcVWAPSeries(candles) {
   });
 }
 
-function runBacktestSim(candles, rsiThreshold, takeProfit, stopLoss = 0.04) {
+function runBacktestSim(candles, rsiThreshold, takeProfit, stopLoss = 0.04, feeRT = null) {
+  // Round-trip taker fee (entry + exit). Live BitGet is 0.064%/side w/ BGB → 0.128% round-trip.
+  // Baking this in is the single biggest honesty fix: without it a +0.1% scalp counts as a "win"
+  // that is actually a net loss live — the root of the old 75%-backtest-vs-35%-live gap.
+  const fee = feeRT ?? getFeePct() * 2;
   const closes = candles.map(c => c.close);
   const ema8 = calcEMASeries(closes, 8);
   const rsi = calcRSI3Series(closes);
@@ -810,9 +814,17 @@ function runBacktestSim(candles, rsiThreshold, takeProfit, stopLoss = 0.04) {
   let inTrade = false, entry = 0, bar = 0;
   for (let i = 30; i < candles.length - 1; i++) {
     if (inTrade) {
-      const pct = (candles[i].close - entry) / entry;
-      if (pct >= takeProfit || pct <= -stopLoss || (i - bar) >= 24) {
-        trades.push({ pct: pct * 100, win: pct > 0 });
+      // Use intrabar high/low for fills, not close-only (a bar can hit TP or SL without closing there).
+      const hi = (candles[i].high - entry) / entry;
+      const lo = (candles[i].low  - entry) / entry;
+      let gross = null;
+      // Conservative: if a bar's range spans BOTH stop and target, assume the stop filled first.
+      if (lo <= -stopLoss) gross = -stopLoss;
+      else if (hi >= takeProfit) gross = takeProfit;
+      else if ((i - bar) >= 24) gross = (candles[i].close - entry) / entry; // 24-bar timeout exit
+      if (gross !== null) {
+        const net = gross - fee; // net of round-trip fees — this is what actually lands in the account
+        trades.push({ pct: net * 100, win: net > 0 });
         inTrade = false;
       }
       continue;
@@ -834,25 +846,28 @@ function optimiseCoin(symbol, candles) {
     for (const tp of [0.03, 0.04, 0.05, 0.06, 0.08, 0.10]) { // extended to 10% (mega-backtest winner)
       for (const sl of [0.02, 0.03, 0.04, 0.05, 0.06]) {
         if (tp <= sl) continue; // TP must be larger than SL
-        const trades = runBacktestSim(candles, rsi, tp, sl);
-        if (trades.length < 5) continue;
+        const trades = runBacktestSim(candles, rsi, tp, sl); // net-of-fee trades
+        if (trades.length < 8) continue; // need a real sample — 5 lucky bars over-fit
         const wins = trades.filter(t => t.win), losses = trades.filter(t => !t.win);
         const wr = wins.length / trades.length;
         const aw = wins.length > 0 ? wins.reduce((s, t) => s + t.pct, 0) / wins.length : 0;
         const al = losses.length > 0 ? losses.reduce((s, t) => s + t.pct, 0) / losses.length : 0;
-        const exp = wr * aw + (1 - wr) * al;
-        if (wr < 0.70 || exp <= 0) continue;
-        const score = wr * exp;
+        const exp = wr * aw + (1 - wr) * al; // net expectancy %/trade (fees already inside pct)
+        // Select on EXPECTANCY after fees, not raw win rate. A 35%-WR setup with big winners can be
+        // +EV; a 75%-WR setup of tiny scalps is -EV after fees (exactly what was happening live).
+        if (exp <= 0) continue; // must be profitable AFTER fees
+        const score = exp * Math.sqrt(trades.length); // reward edge AND sample size
         if (!best || score > best.score) {
           best = { rsiThreshold: rsi, takeProfit: tp, stopLoss: sl, trades: trades.length,
-            winRate: +(wr * 100).toFixed(1), expectancy: +exp.toFixed(2), score };
+            winRate: +(wr * 100).toFixed(1), expectancy: +exp.toFixed(3), score };
         }
       }
     }
   }
   const testedAt = new Date().toISOString();
-  if (!best) return { symbol, trades: 0, winRate: 0, recommendation: "SKIP", rsiThreshold: 25, takeProfit: 0.05, stopLoss: 0.04, testedAt };
-  return { symbol, ...best, recommendation: best.winRate >= 75 ? "TRADE" : "CAUTION", testedAt };
+  if (!best) return { symbol, trades: 0, winRate: 0, expectancy: 0, recommendation: "SKIP", rsiThreshold: 25, takeProfit: 0.05, stopLoss: 0.04, testedAt };
+  // In-sample +EV is necessary but NOT sufficient — only OOS validation (backtestCoin) can say TRADE.
+  return { symbol, ...best, recommendation: "CAUTION", testedAt };
 }
 
 async function backtestCoin(symbol) {
@@ -887,25 +902,26 @@ async function backtestCoin(symbol) {
     return BACKTEST[symbol];
   }
 
-  // Validate on out-of-sample (most recent 7 days)
+  // Validate on out-of-sample (most recent 7 days) — net of fees
   const oosTrades = runBacktestSim(outOfSample, inResult.rsiThreshold, inResult.takeProfit, inResult.stopLoss);
   const oosWins = oosTrades.filter(t => t.win).length;
   const oosWR   = oosTrades.length > 0 ? oosWins / oosTrades.length : 0;
-  const oosExp  = oosTrades.length > 0 ? oosTrades.reduce((s, t) => s + t.pct, 0) / oosTrades.length : 0;
+  const oosExp  = oosTrades.length > 0 ? oosTrades.reduce((s, t) => s + t.pct, 0) / oosTrades.length : 0; // net %/trade
 
-  const result = { ...inResult, symbol, oosWinRate: +(oosWR * 100).toFixed(1), oosTrades: oosTrades.length, walkForward: true };
+  const result = { ...inResult, symbol, oosWinRate: +(oosWR * 100).toFixed(1), oosExpectancy: +oosExp.toFixed(3), oosTrades: oosTrades.length, walkForward: true };
 
-  if (oosTrades.length >= 3 && oosWR < 0.50) {
-    // Parameters don't work on recent data — market conditions changed
-    result.recommendation = "SKIP";
-    console.log(`  🔴 Walk-forward FAILED — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}% on ${oosTrades.length} recent trades (need 50%+)`);
-  } else if (oosTrades.length >= 3 && oosWR < 0.60) {
+  // TRADE only with a real OOS sample (>=8 trades) that is profitable AFTER fees on unseen recent
+  // data. The old gate passed on 3 trades / raw WR — trivially luck, and the source of the false
+  // 75% confidence. Expectancy (not WR) is the criterion that actually predicts live P&L.
+  if (oosTrades.length >= 8 && oosExp > 0) {
+    result.recommendation = "TRADE";
+    console.log(`  ✅ Walk-forward PASSED — ${symbol}: OOS +${oosExp.toFixed(2)}%/trade net, WR ${(oosWR*100).toFixed(0)}% on ${oosTrades.length} trades`);
+  } else if (oosTrades.length >= 5 && oosExp > 0) {
     result.recommendation = "CAUTION";
-    console.log(`  ⚠️  Walk-forward CAUTION — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}% | exp ${oosExp >= 0 ? "+" : ""}${oosExp.toFixed(2)}%`);
-  } else if (oosTrades.length >= 3) {
-    console.log(`  ✅ Walk-forward PASSED — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}% on ${oosTrades.length} recent trades | exp +${oosExp.toFixed(2)}%`);
+    console.log(`  ⚠️  Walk-forward THIN — ${symbol}: OOS +${oosExp.toFixed(2)}%/trade net on only ${oosTrades.length} trades (need >=8 to trade)`);
   } else {
-    console.log(`  ℹ️  Walk-forward: only ${oosTrades.length} OOS trades — insufficient for validation`);
+    result.recommendation = "SKIP";
+    console.log(`  🔴 Walk-forward FAILED — ${symbol}: OOS ${oosExp >= 0 ? "+" : ""}${oosExp.toFixed(2)}%/trade net, ${oosTrades.length} trades (need >=8 & +EV after fees)`);
   }
 
   BACKTEST[symbol] = result;
