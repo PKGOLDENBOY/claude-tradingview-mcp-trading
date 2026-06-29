@@ -284,6 +284,14 @@ const _runningSymbols = new Set();
 const _recentlySold = new Map(); // symbol → timestamp of last sell
 const POST_SELL_LOCK_MS = 60 * 60 * 1000; // 60 min — 30min was too short, churn was eating profits
 
+// Hard blacklist — coins the bot must NEVER buy or re-adopt, on ANY path (scalp/swing/LT/mover/sniper).
+// ZEC bled ~$24 in 30 days: the bot DCA'd a month-long downtrend, and each "reconciled" re-adoption
+// reset the cost basis to the current price so the -19.6% bag was invisible to the 4% stop. Env-tunable.
+const HARD_BLACKLIST = new Set(
+  (process.env.BLACKLIST_COINS || "ZECUSDT")
+    .split(",").map(s => s.trim().toUpperCase()).filter(Boolean)
+);
+
 // Per-coin latest scan data — shown in dashboard coin detail view
 const coinSnapshots = {};
 
@@ -2478,6 +2486,10 @@ async function placeOrder(symbol, side, sizeUSD, price, quantityOverride = null)
     console.log(`🔒 placeOrder SELL — ${symbol} cooldown stamped`);
   }
   if (side === "buy") {
+    if (HARD_BLACKLIST.has(symbol.toUpperCase())) {
+      console.log(`⛔ BUY BLOCKED — ${symbol} is hard-blacklisted (never buy). Skipping.`);
+      return { blocked: true, code: "HARD_BLACKLIST", reason: "Coin is hard-blacklisted" };
+    }
     const soldAt = _recentlySold.get(symbol);
     if (soldAt && Date.now() - soldAt < POST_SELL_LOCK_MS) {
       const minsLeft = Math.ceil((POST_SELL_LOCK_MS - (Date.now() - soldAt)) / 60000);
@@ -2697,6 +2709,13 @@ async function reconcilePositions(log) {
       if (!price) continue;
       const usdValue = qty * price;
       if (usdValue < 5) continue; // skip dust < $5
+
+      // Hard blacklist — never re-adopt/track a blacklisted coin. Re-adoption reset the cost basis
+      // to current price each cycle, hiding the real loss from the stop and re-arming the scalper.
+      if (HARD_BLACKLIST.has(symbol)) {
+        console.log(`⛔ Reconcile skip ${symbol} — hard-blacklisted, not tracking residual bag`);
+        continue;
+      }
 
       // Primary guard: exchange fill history — survives Railway log wipes on restart
       if (recentlySoldOnExchange.has(symbol)) {
@@ -4028,6 +4047,10 @@ async function checkLiveHardStops() {
 // Places a limit buy at the specified price. Polls for fill up to 30s.
 // Falls back to market order if not filled (snap-back moves fast — don't miss the entry).
 async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
+  if (HARD_BLACKLIST.has(symbol.toUpperCase())) {
+    console.log(`⛔ BUY BLOCKED — ${symbol} is hard-blacklisted (never buy). Skipping limit buy.`);
+    return null;
+  }
   try {
     // Get symbol precision
     const symRes = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`);
@@ -8750,6 +8773,10 @@ async function sniperBuy(symbol) {
   console.log(`   SL: $${(price * (1 - SNIPER.stopLossPct)).toFixed(8)} (-${(SNIPER.stopLossPct * 100).toFixed(0)}%)`);
   console.log(`   Timeout: ${SNIPER.maxHoldMin} minutes`);
 
+  if (HARD_BLACKLIST.has(symbol.toUpperCase())) {
+    console.log(`⛔ SNIPER BUY BLOCKED — ${symbol} is hard-blacklisted (never buy). Skipping.`);
+    return;
+  }
   let qty = sizeUSD / price;
   let orderId = null;
   try {
