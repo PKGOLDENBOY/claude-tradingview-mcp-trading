@@ -287,10 +287,43 @@ const POST_SELL_LOCK_MS = 60 * 60 * 1000; // 60 min — 30min was too short, chu
 // Hard blacklist — coins the bot must NEVER buy or re-adopt, on ANY path (scalp/swing/LT/mover/sniper).
 // ZEC bled ~$24 in 30 days: the bot DCA'd a month-long downtrend, and each "reconciled" re-adoption
 // reset the cost basis to the current price so the -19.6% bag was invisible to the 4% stop. Env-tunable.
+// Proven repeat bleeders (illiquid microcaps that churned down) — see churn audit 2026-06-29.
+// The liquidity floor below is the structural fix; this is the immediate stopgap. Env overrides.
+const DEFAULT_BLACKLIST = "ZECUSDT,SKYAIUSDT,LABUSDT,BSBUSDT,ARXUSDT,MAGMAUSDT,UMXMUSDT,IDOLUSDT,UAIUSDT";
 const HARD_BLACKLIST = new Set(
-  (process.env.BLACKLIST_COINS || "ZECUSDT")
+  (process.env.BLACKLIST_COINS || DEFAULT_BLACKLIST)
     .split(",").map(s => s.trim().toUpperCase()).filter(Boolean)
 );
+
+// ── Liquidity floor ───────────────────────────────────────────────────────────
+// Every realized loser in the churn audit (2026-06-29) was an illiquid microcap with a thin
+// order book ($4K–$18K depth within ±0.5%); every liquid major was $134K+. BitGet 24h *volume*
+// is NOT a usable proxy (majors trade elsewhere, so their BitGet volume looks tiny) — order-book
+// DEPTH is. Block buys on any coin whose book is too thin to scalp without bleeding to slippage/dumps.
+const MIN_BOOK_DEPTH_USD = parseFloat(process.env.MIN_BOOK_DEPTH_USD || "75000"); // ±0.5% book depth floor
+const _depthCache = new Map(); // symbol -> { usd, ts }
+async function bookDepthUSD(symbol) {
+  if (acct().exchange !== "bitget") return null; // gate only defined for BitGet books
+  const c = _depthCache.get(symbol);
+  if (c && Date.now() - c.ts < 5 * 60 * 1000) return c.usd;
+  try {
+    const j = await (await fetch(`${acct().baseUrl}/api/v2/spot/market/orderbook?symbol=${symbol}&limit=50`)).json();
+    const bids = j.data?.bids || [], asks = j.data?.asks || [];
+    if (!bids.length || !asks.length) return null;
+    const mid = (parseFloat(bids[0][0]) + parseFloat(asks[0][0])) / 2;
+    const lo = mid * 0.995, hi = mid * 1.005;
+    let usd = 0;
+    for (const [p, q] of bids) if (parseFloat(p) >= lo) usd += parseFloat(p) * parseFloat(q);
+    for (const [p, q] of asks) if (parseFloat(p) <= hi) usd += parseFloat(p) * parseFloat(q);
+    _depthCache.set(symbol, { usd, ts: Date.now() });
+    return usd;
+  } catch { return null; } // fail-open on API hiccup — don't block trading on a transient error
+}
+// True if the coin is too thin to trade. Fail-open: null depth (API error / non-BitGet) => allowed.
+async function failsLiquidityFloor(symbol) {
+  const usd = await bookDepthUSD(symbol);
+  return usd != null && usd < MIN_BOOK_DEPTH_USD;
+}
 
 // Per-coin latest scan data — shown in dashboard coin detail view
 const coinSnapshots = {};
@@ -2490,6 +2523,11 @@ async function placeOrder(symbol, side, sizeUSD, price, quantityOverride = null)
       console.log(`⛔ BUY BLOCKED — ${symbol} is hard-blacklisted (never buy). Skipping.`);
       return { blocked: true, code: "HARD_BLACKLIST", reason: "Coin is hard-blacklisted" };
     }
+    if (await failsLiquidityFloor(symbol)) {
+      const d = _depthCache.get(symbol)?.usd;
+      console.log(`⛔ BUY BLOCKED — ${symbol} book too thin ($${Math.round(d || 0).toLocaleString()} < $${MIN_BOOK_DEPTH_USD.toLocaleString()} ±0.5% depth). Skipping illiquid coin.`);
+      return { blocked: true, code: "THIN_BOOK", reason: `Book depth $${Math.round(d || 0)} below floor` };
+    }
     const soldAt = _recentlySold.get(symbol);
     if (soldAt && Date.now() - soldAt < POST_SELL_LOCK_MS) {
       const minsLeft = Math.ceil((POST_SELL_LOCK_MS - (Date.now() - soldAt)) / 60000);
@@ -4049,6 +4087,11 @@ async function checkLiveHardStops() {
 async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
   if (HARD_BLACKLIST.has(symbol.toUpperCase())) {
     console.log(`⛔ BUY BLOCKED — ${symbol} is hard-blacklisted (never buy). Skipping limit buy.`);
+    return null;
+  }
+  if (await failsLiquidityFloor(symbol)) {
+    const d = _depthCache.get(symbol)?.usd;
+    console.log(`⛔ BUY BLOCKED — ${symbol} book too thin ($${Math.round(d || 0).toLocaleString()} < $${MIN_BOOK_DEPTH_USD.toLocaleString()} ±0.5% depth). Skipping illiquid coin.`);
     return null;
   }
   try {
