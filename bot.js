@@ -499,7 +499,9 @@ const ACCOUNTS = [
     portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD_2 || process.env.PORTFOLIO_VALUE_USD || "1000"),
     logFile:    join(STATE_DIR, "safety-check-log-2.json"),
   }] : []),
-  ...(process.env.BITMART_API_KEY && process.env.BITMART_SECRET_KEY && process.env.BITMART_MEMO ? [{
+  // BitMart disabled via BITMART_ENABLED=false (2026-07-06): account is empty and unused; the flag
+  // keeps the keys in env so it can be re-enabled instantly (set BITMART_ENABLED=true / remove the var).
+  ...(process.env.BITMART_ENABLED !== "false" && process.env.BITMART_API_KEY && process.env.BITMART_SECRET_KEY && process.env.BITMART_MEMO ? [{
     id: "BM", exchange: "bitmart",
     apiKey:     process.env.BITMART_API_KEY,
     secretKey:  process.env.BITMART_SECRET_KEY,
@@ -7644,7 +7646,8 @@ async function togglePause(){
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         status: "OK",
-        build: "2026-07-06-bitmart-v2",
+        build: "2026-07-06-bitmart-off",
+        accounts: ACCOUNTS.map(a => `${a.id}:${a.exchange}`),
         guards: { blacklist: [...HARD_BLACKLIST], entryCapPerDay: MAX_ENTRIES_PER_DAY, minBookDepthUSD: MIN_BOOK_DEPTH_USD },
       }));
       return;
