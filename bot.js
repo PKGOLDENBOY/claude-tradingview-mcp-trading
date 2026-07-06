@@ -2486,11 +2486,14 @@ function signBitMart(timestamp, body = "") {
 async function getBitMartBalance(coin) {
   const timestamp = Date.now().toString();
   const sign = signBitMart(timestamp);
-  const res = await fetch(`${acct().baseUrl}/account/v1/wallet`, {
+  // /account/v1/wallet returns an empty wallet (deprecated behaviour) — spot balances live at
+  // /spot/v1/wallet. The old endpoint made every BitMart balance read 0, breaking buy-confirm,
+  // sell-sizing and reconcile. Same structure ({data:{wallet:[{id,available,frozen}]}}).
+  const res = await fetch(`${acct().baseUrl}/spot/v1/wallet`, {
     headers: { "X-BM-KEY": acct().apiKey, "X-BM-SIGN": sign, "X-BM-TIMESTAMP": timestamp },
   });
   const data = await res.json();
-  if (data.code !== 1000) throw new Error(`BitMart balance error: ${data.message}`);
+  if (data.code !== 1000) throw new Error(`BitMart balance error [${data.code}]: ${data.msg || data.message || "unknown"}`);
   const asset = data.data?.wallet?.find(w => w.id === coin);
   return parseFloat(asset?.available ?? "0");
 }
@@ -2515,13 +2518,16 @@ async function placeBitMartOrder(symbol, side, sizeUSD, price, quantityOverride 
 
   const body = JSON.stringify(bodyObj);
   const sign = signBitMart(timestamp, body);
-  const res = await fetch(`${acct().baseUrl}/spot/v1/submit_order`, {
+  // BitMart deprecated /spot/v1/submit_order (returns code 30031) — ALL orders were silently failing.
+  // v2 is current. Errors arrive in `msg` (v1) or `message` (v2), so read both — the old code read only
+  // `.message` and logged "undefined", hiding the real reason (deprecation) for who knows how long.
+  const res = await fetch(`${acct().baseUrl}/spot/v2/submit_order`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-BM-KEY": acct().apiKey, "X-BM-SIGN": sign, "X-BM-TIMESTAMP": timestamp },
     body,
   });
   const data = await res.json();
-  if (data.code !== 1000) throw new Error(`BitMart order failed: ${data.message}`);
+  if (data.code !== 1000) throw new Error(`BitMart order failed [${data.code}]: ${data.msg || data.message || "unknown"}`);
 
   if (side === "buy") {
     const baseCoin = symbol.replace("USDT", "");
@@ -7638,7 +7644,7 @@ async function togglePause(){
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         status: "OK",
-        build: "2026-07-06-guards-v2",
+        build: "2026-07-06-bitmart-v2",
         guards: { blacklist: [...HARD_BLACKLIST], entryCapPerDay: MAX_ENTRIES_PER_DAY, minBookDepthUSD: MIN_BOOK_DEPTH_USD },
       }));
       return;
