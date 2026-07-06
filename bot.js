@@ -2496,6 +2496,10 @@ async function getBitMartBalance(coin) {
 }
 
 async function placeBitMartOrder(symbol, side, sizeUSD, price, quantityOverride = null) {
+  if (side === "buy" && HARD_BLACKLIST.has(symbol.toUpperCase())) {
+    console.log(`⛔ BUY BLOCKED [placeBitMartOrder] — ${symbol} is hard-blacklisted. Skipping.`);
+    return { blocked: true, code: "HARD_BLACKLIST", reason: "Coin is hard-blacklisted" };
+  }
   const bmSymbol = toBitMartSymbol(symbol);
   const timestamp = Date.now().toString();
 
@@ -3646,6 +3650,12 @@ async function getBitGetServerTime() {
 }
 
 async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride = null) {
+  // Defense-in-depth: block blacklisted BUYS at the lowest execution level too, so no caller can
+  // ever bypass the guard (blacklisted ZEC/MAGMA/UMXM were still being bought — belt AND braces).
+  if (side === "buy" && HARD_BLACKLIST.has(symbol.toUpperCase())) {
+    console.log(`⛔ BUY BLOCKED [placeBitGetOrder] — ${symbol} is hard-blacklisted. Skipping.`);
+    return { blocked: true, code: "HARD_BLACKLIST", reason: "Coin is hard-blacklisted" };
+  }
   const timestamp = await getBitGetServerTime();
   const path =
     CONFIG.tradeMode === "spot"
@@ -9066,6 +9076,8 @@ async function monitorSniperPositions() {
 
   server.listen(PORT, () => {
     console.log(`\n🌐 Webhook server listening on port ${PORT}`);
+    // Deploy-verification banner — confirms which guards the RUNNING code has (grep logs for GUARDS).
+    console.log(`🛡️  GUARDS ACTIVE — blacklist(${HARD_BLACKLIST.size}): ${[...HARD_BLACKLIST].join(",")} | entryCap ${MAX_ENTRIES_PER_DAY}/day | minBookDepth $${MIN_BOOK_DEPTH_USD}`);
     mergeCustomWatchlist();
     console.log(`   Symbols:     ${CONFIG.symbols.join(", ")}`);
     console.log(`   Polling:     every 5 minutes\n`);
