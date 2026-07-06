@@ -7632,10 +7632,15 @@ async function togglePause(){
     const urlObj = new URL(req.url, "http://localhost");
     const path = urlObj.pathname;
 
-    // Railway health check — must stay unprotected
+    // Railway health check — must stay unprotected. Reports the live guard config + build marker so a
+    // deploy can be verified instantly (curl /health) instead of inferring from trade behavior.
     if (req.method === "GET" && (path === "/health")) {
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("OK");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        status: "OK",
+        build: "2026-07-06-guards-v2",
+        guards: { blacklist: [...HARD_BLACKLIST], entryCapPerDay: MAX_ENTRIES_PER_DAY, minBookDepthUSD: MIN_BOOK_DEPTH_USD },
+      }));
       return;
     }
 
