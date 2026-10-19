@@ -1,0 +1,36 @@
+name: Recovery safety checks
+on:
+  push:
+    branches:
+      - safety/recovery-oct-2026
+  pull_request:
+    branches:
+      - main
+jobs:
+  syntax-and-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check syntax
+        run: node --check bot.js
+      - name: Check recovery safety gates
+        run: |
+          node --input-type=module <<'EOF'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          const src = readFileSync('bot.js', 'utf8');
+          for (const phrase of [
+            'LIVE_TRADING_ENABLED === "true"',
+            'requireExchangeWrites("BitGet order")',
+            'requireExchangeWrites("BitMart order")',
+            'requireExchangeWrites("BitGet limit buy")',
+            'requireExchangeWrites("BitGet limit sell")',
+            'requireExchangeWrites("Direct sniper buy")',
+            'WEBHOOK_SECRET',
+            'crypto.timingSafeEqual'
+          ]) assert(src.includes(phrase), 'Missing safety gate: ' + phrase);
+          console.log('Recovery gates present');
+          EOF
