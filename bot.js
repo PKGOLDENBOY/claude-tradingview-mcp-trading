@@ -4207,84 +4207,133 @@ async function checkLiveHardStops() {
   }
 }
 
-// ─── Limit order with market fallback ────────────────────────────────────────
+// ─── Limit buy — exchange-confirmed fill/cancellation only ────────────────────
+//
+// Never turn an ambiguous limit order into an extra market buy. The prior code
+// parsed an object where BitGet returns data[], ignored partial fills, and
+// could resend an entire order after a failed/unconfirmed cancellation.
+// See BitGet v2 Spot Get Order Info: status = filled/partially_filled/cancelled;
+// baseVolume is the actual executed base-coin quantity.
+async function readSpotOrderInfo(orderId) {
+  const ts = Date.now().toString();
+  const path = `/api/v2/spot/trade/orderInfo?orderId=${encodeURIComponent(orderId)}`;
+  const sig = signBitGet(ts, "GET", path);
+  const res = await fetch(`${acct().baseUrl}${path}`, {
+    headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sig,
+      "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
+    signal: AbortSignal.timeout(8000),
+  });
+  const json = await res.json();
+  const row = Array.isArray(json.data) ? json.data[0] : null;
+  if (!res.ok || json.code !== "00000" || !row) throw new Error("Cannot confirm BitGet limit order state");
+  const qty = Number(row.baseVolume);
+  if (!Number.isFinite(qty) || qty < 0) throw new Error("Invalid executed quantity from BitGet");
+  return { status: row.status, confirmedQty: qty };
+}
 
-// Places a limit buy at the specified price. Polls for fill up to 30s.
-// Falls back to market order if not filled (snap-back moves fast — don't miss the entry).
+function haltOnUnconfirmedOrder({symbol, clientOid, orderId, reason}) {
+  _tradingPaused = true;
+  try {
+    const log = loadLog();
+    log._tradingHaltReason = "UNCONFIRMED_BITGET_LIMIT_ORDER";
+    log.unconfirmedOrders = [...(log.unconfirmedOrders || []), {
+      symbol, side: "buy", clientOid, orderId, reason,
+      time: new Date().toISOString(),
+    }];
+    saveLog(log);
+  } catch (e) {
+    console.error("CRITICAL: Could not persist uncertain limit buy:", e.message);
+  }
+}
+
 async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
   requireExchangeWrites("BitGet limit buy");
-  if (HARD_BLACKLIST.has(symbol.toUpperCase())) {
-    console.log(`⛔ BUY BLOCKED — ${symbol} is hard-blacklisted (never buy). Skipping limit buy.`);
-    return null;
-  }
-  if (await failsLiquidityFloor(symbol)) {
-    const d = _depthCache.get(symbol)?.usd;
-    console.log(`⛔ BUY BLOCKED — ${symbol} book too thin ($${Math.round(d || 0).toLocaleString()} < $${MIN_BOOK_DEPTH_USD.toLocaleString()} ±0.5% depth). Skipping illiquid coin.`);
-    return null;
-  }
-  if (entryCapReached()) {
-    console.log(`⛔ BUY BLOCKED — ${symbol}: daily entry cap reached (${MAX_ENTRIES_PER_DAY}/day). Trading less by design.`);
-    return null;
-  }
+  if (HARD_BLACKLIST.has(symbol.toUpperCase()) || entryCapReached()) return null;
+  if (await failsLiquidityFloor(symbol)) return null;
+
+  // If exchange order details are ever unavailable, STOP instead of retrying
+  // another BUY. A market fallback is permitted only after verified zero fill.
+  const clientOid = "ab" + Date.now().toString(36) + crypto.randomBytes(6).toString("hex");
+  let orderId = null;
+  let submitted = false;
   try {
-    // Get symbol precision
-    const symRes = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`);
+    const symRes = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`, { signal: AbortSignal.timeout(8000) });
     const symData = await symRes.json();
-    const pricePrecision = parseInt(symData.data?.[0]?.pricePrecision ?? "4", 10);
-    const qtyPrecision   = parseInt(symData.data?.[0]?.quantityPrecision ?? "6", 10);
-    const limitPriceStr  = limitPrice.toFixed(pricePrecision);
+    if (!symRes.ok || symData.code !== "00000" || !symData.data?.[0])
+      throw new Error("Cannot confirm BitGet symbol precision");
+    const pricePrecision = Number(symData.data[0].pricePrecision);
+    const qtyPrecision = Number(symData.data[0].quantityPrecision);
+    if (!Number.isInteger(pricePrecision) || !Number.isInteger(qtyPrecision) ||
+        pricePrecision < 0 || pricePrecision > 15 || qtyPrecision < 0 || qtyPrecision > 15)
+      throw new Error("Invalid BitGet quantity precision");
     const qty = floorToDecimals(sizeUSD / limitPrice, qtyPrecision);
-    if (qty <= 0) return null;
-
-    const timestamp = Date.now().toString();
+    if (!Number.isFinite(qty) || qty <= 0) return null;
+    const ts = Date.now().toString();
     const path = "/api/v2/spot/trade/place-order";
-    const body = JSON.stringify({ symbol, side: "buy", orderType: "limit", force: "gtc", price: limitPriceStr, size: qty.toFixed(qtyPrecision) });
-    const signature = signBitGet(timestamp, "POST", path, body);
+    const body = JSON.stringify({ symbol, side: "buy", orderType: "limit",
+      force: "gtc", price: limitPrice.toFixed(pricePrecision),
+      size: qty.toFixed(qtyPrecision), clientOid });
+    const signature = signBitGet(ts, "POST", path, body);
+    // Flag as potentially submitted BEFORE issuing the POST, as network errors
+    // can occur after BitGet accepted the order but before we saw its reply.
+    submitted = true;
     const res = await fetch(`${acct().baseUrl}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": signature, "ACCESS-TIMESTAMP": timestamp, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
-      body,
+      method: "POST", signal: AbortSignal.timeout(10000),
+      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey,
+        "ACCESS-SIGN": signature, "ACCESS-TIMESTAMP": ts,
+        "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" }, body,
     });
-    const orderData = await res.json();
-    if (orderData.code !== "00000") throw new Error(orderData.msg);
-    const orderId = orderData.data.orderId;
-    console.log(`  📋 Limit BUY @ $${limitPriceStr} | id: ${orderId}`);
+    const placed = await res.json();
+    if (!res.ok || placed.code !== "00000" || !placed.data?.orderId) {
+      throw new Error("BitGet limit order submission not accepted/acknowledged");
+    }
+    orderId = placed.data.orderId;
+    console.log(`📋 Limit buy submitted ${symbol}; id:${orderId}`);
 
-    // Poll for fill — up to 30 seconds (10 × 3s)
+    let state;
     for (let i = 0; i < 10; i++) {
       await new Promise(r => setTimeout(r, 3000));
-      const ts2 = Date.now().toString();
-      const checkPath = `/api/v2/spot/trade/orderInfo?orderId=${orderId}&symbol=${symbol}`;
-      const checkSign = signBitGet(ts2, "GET", checkPath);
-      const checkRes = await fetch(`${acct().baseUrl}${checkPath}`, {
-        headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": checkSign, "ACCESS-TIMESTAMP": ts2, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
-      });
-      const checkData = await checkRes.json();
-      const status = checkData.data?.status;
-      if (status === "full_fill") {
-        const confirmedQty = parseFloat(checkData.data?.baseVolume ?? qty.toFixed(qtyPrecision));
-        console.log(`  ✅ Limit filled | qty: ${confirmedQty}`);
-        return { orderId, confirmedQty };
+      state = await readSpotOrderInfo(orderId);
+      if (state.status === "filled" || state.status === "full_fill") {
+        if (state.confirmedQty <= 0) throw new Error("Filled order had zero confirmed base volume");
+        return { orderId, confirmedQty: state.confirmedQty };
       }
-      if (status === "cancelled" || status === "cancel") break;
-      console.log(`  ⏳ Waiting for fill (${i + 1}/10)...`);
+      if (state.status === "cancelled" || state.status === "cancel") break;
     }
 
-    // Cancel unfilled order
-    const cancelTs = Date.now().toString();
-    const cancelPath = "/api/v2/spot/trade/cancel-order";
-    const cancelBody = JSON.stringify({ symbol, orderId });
-    const cancelSign = signBitGet(cancelTs, "POST", cancelPath, cancelBody);
-    await fetch(`${acct().baseUrl}${cancelPath}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": cancelSign, "ACCESS-TIMESTAMP": cancelTs, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
-      body: cancelBody,
-    });
-    console.log(`  ⚠️  Limit not filled — cancelled, falling back to market`);
+    if (state?.status !== "cancelled" && state?.status !== "cancel") {
+      const cancelTs = Date.now().toString();
+      const cancelPath = "/api/v2/spot/trade/cancel-order";
+      const cancelBody = JSON.stringify({ symbol, orderId });
+      const cancelSign = signBitGet(cancelTs, "POST", cancelPath, cancelBody);
+      const cancelled = await fetch(`${acct().baseUrl}${cancelPath}`, {
+        method: "POST", signal: AbortSignal.timeout(10000),
+        headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey,
+          "ACCESS-SIGN": cancelSign, "ACCESS-TIMESTAMP": cancelTs,
+          "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" }, body: cancelBody,
+      });
+      const cancelResult = await cancelled.json();
+      if (!cancelled.ok || cancelResult.code !== "00000") {
+        throw new Error("BitGet limit cancellation not confirmed");
+      }
+    }
+    const finalState = await readSpotOrderInfo(orderId);
+    if (finalState.status === "filled" || finalState.status === "full_fill") {
+      return { orderId, confirmedQty: finalState.confirmedQty };
+    }
+    if (finalState.status !== "cancelled" && finalState.status !== "cancel") {
+      throw new Error("BitGet limit order not confirmed cancelled after timeout");
+    }
+    if (finalState.confirmedQty > 0) {
+      console.log(`⚠️ Limit partially filled then cancelled: ${finalState.confirmedQty} ${symbol}`);
+      return { orderId, confirmedQty: finalState.confirmedQty };
+    }
+    console.log(`📋 Unfilled limit order verified cancelled: ${orderId}; market fallback permitted`);
     return null;
   } catch (err) {
-    console.log(`  ⚠️  Limit order error (${err.message}) — falling back to market`);
-    return null;
+    if (submitted) haltOnUnconfirmedOrder({symbol, clientOid, orderId, reason: err.message});
+    console.error(`⛔ Limit order failed CLOSED (no automatic duplicate market buy): ${err.message}`);
+    throw err;
   }
 }
 
