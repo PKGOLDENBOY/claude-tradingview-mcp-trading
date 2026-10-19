@@ -54,7 +54,9 @@ export async function historicalCandles(symbol, config={}) {
   const oldestAllowed = Math.floor((now-days*DAY)/HOUR)*HOUR;
   const fetcher=config.fetcher ?? fetch, wait=config.wait ?? sleep;
   const rows = new Map();
-  let endTime = Math.floor(now/HOUR)*HOUR-1;
+  // The endpoint rounds endTime to the candle interval and can exclude that candle.
+  // Query through the CURRENT interval boundary; normaliseCandles removes the forming bar.
+  let endTime = now;
   for(let page=0;page<maxPages;page++) {
     const query = "https://api.bitget.com/api/v3/market/history-candles?category=SPOT&symbol=" + symbol +
       "&interval=1H&limit=100&endTime=" + endTime;
@@ -65,7 +67,9 @@ export async function historicalCandles(symbol, config={}) {
     const earliest=candles[0].time;
     if(earliest>=endTime)throw new Error("Historical pagination made no progress: "+symbol);
     if(earliest<=oldestAllowed)break;
-    endTime=earliest-1;
+    // Deliberately overlap the previous oldest interval so API rounding cannot
+    // silently skip one hour at each 100-candle page boundary. Dedupe by time.
+    endTime=earliest+HOUR-1;
     // Keep GitHub Actions below BitGet's documented 20 req/s limit.
     if(config.spacingMs!==0)await wait(config.spacingMs ?? 220);
   }
@@ -75,8 +79,13 @@ export async function historicalCandles(symbol, config={}) {
   // Fail rather than fit indicators to a feed with major holes or duplicates.
   const expectedHours=(result.at(-1).time-result[0].time)/HOUR+1;
   const coverage=result.length/expectedHours;
-  if(coverage<0.93)throw new Error(symbol+" gap-heavy data: "+(coverage*100).toFixed(1)+"% coverage");
-  return {symbol,periodDays:days,candles:result,coverage,first:result[0].time,last:result.at(-1).time};
+  const missingBars=expectedHours-result.length;
+  // Missing even 1% of bars over 180d changes which intrabar stops are reached.
+  // Fail the research run closed when the feed is incomplete.
+  if(coverage<0.9995)throw new Error(symbol+" missing "+missingBars+
+    " hourly candles after pagination; coverage="+(coverage*100).toFixed(3)+"%");
+  return {symbol,periodDays:days,candles:result,coverage,missingBars,
+    first:result[0].time,last:result.at(-1).time};
 }
 
 function ema(values,period){
@@ -264,7 +273,7 @@ export async function main() {
   for(const symbol of UNIVERSE) {
     const d=await historicalCandles(symbol,{now,days:180});
     console.log("HISTORY_OK "+JSON.stringify({symbol,bars:d.candles.length,
-      first:new Date(d.first).toISOString(),last:new Date(d.last).toISOString(),coverage:d.coverage}));
+      first:new Date(d.first).toISOString(),last:new Date(d.last).toISOString(),coverage:d.coverage,missingBars:d.missingBars}));
     datasets.push(d);
   }
   if(datasets.length!==UNIVERSE.length)throw new Error("Partial universe: assessment must abort");
