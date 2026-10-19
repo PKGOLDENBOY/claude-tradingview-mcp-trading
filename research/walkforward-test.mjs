@@ -95,27 +95,33 @@ function choose(c,ind,cut) {
   return best;
 }
 let all=[];
+let baselineTrades=[];
 const results=[];
 for(const symbol of coins){
   try {
     const c=await getCandles(symbol);
     c.pop(); // do not use currently forming candle as a finalized result
     const cutoff=Math.floor(c.length*0.7),ind=prep(c);
+    // Independent fixed-parameter baseline: no optimization, evaluated unseen.
+    const baseline=run(c,ind,cutoff,c.length,50,0.04);
+    baselineTrades.push(...baseline);
     const best=choose(c,ind,cutoff);
     if(!best){
-      const o={symbol,candles:c.length,result:'SKIP',reason:'no training setup met >=5 trades, >=60% WR and positive net expectancy'};
+      const o={symbol,candles:c.length,result:'SKIP',fixedRuleOOS:stats(baseline),reason:'no training setup met >=5 trades, >=60% WR and positive net expectancy'};
       results.push(o);console.log(JSON.stringify(o));continue;
     }
     const trades=run(c,ind,cutoff,c.length,best.rsi,best.tp);
     all.push(...trades);
     const o={symbol,candles:c.length,trainSize:cutoff,testSize:c.length-cutoff,
       train:best.train,rsiGate:best.rsi,takeProfit:best.tp,
-      test:stats(trades),result:'TESTED',first:c[cutoff].ts,last:c.at(-1).ts};
+      test:stats(trades),fixedRuleOOS:stats(baseline),result:'TESTED',first:c[cutoff].ts,last:c.at(-1).ts};
     results.push(o);console.log(JSON.stringify(o));
   }catch(e){const o={symbol,result:'DATA_ERROR',reason:e.message};results.push(o);console.error(JSON.stringify(o));}
 }
 const tested=results.filter(x=>x.result==='TESTED');
-const aggregate={test:stats(all),totalSymbols:coins.length,testedSymbols:tested.length,
+const aggregate={test:stats(all),fixedRuleOOS:stats(baselineTrades),
+  fixedRuleParameters:{rsi3Below:50,takeProfitPct:4,stopLossPct:4},
+  totalSymbols:coins.length,testedSymbols:tested.length,
   skippedSymbols:results.filter(x=>x.result==='SKIP').length,
   failedSources:results.filter(x=>x.result==='DATA_ERROR').length,
   assumptions:{timeframe:'1h',bars:1000,trainShare:0.7,testShare:0.3,
@@ -123,6 +129,6 @@ const aggregate={test:stats(all),totalSymbols:coins.length,testedSymbols:tested.
     stopLossPct:4,maxHoldHours:24,
     intrabarPolicy:'assume stop hit before take profit',
     strategy:'Simplified VWAP+RSI3+EMA8 scalp only; NOT full deployed bot'},
-  conclusion:all.length>=10?'OOS_SAMPLE_PRESENT':'INSUFFICIENT_OOS_TRADES'};
+  conclusion: tested.length===0 ? 'NO_TRAINING_EDGE' : (all.length>=10?'OOS_SAMPLE_PRESENT':'INSUFFICIENT_OOS_TRADES')};
 console.log('OUT_OF_SAMPLE_RESULT_JSON '+JSON.stringify(aggregate));
-if(tested.length===0)process.exitCode=2;
+if(aggregate.failedSources>0)process.exitCode=2;
