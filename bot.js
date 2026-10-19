@@ -410,10 +410,9 @@ function checkOnboarding() {
   );
 }
 
-// ─── Backtest results — loaded once at startup ────────────────────────────
-const BACKTEST = existsSync("backtest_results.json")
-  ? JSON.parse(readFileSync("backtest_results.json", "utf8"))
-  : {};
+// Historical May backtests overfit a tiny in-sample window; preserve on disk
+// for audit only. Active trading criteria require new out-of-sample tests.
+const BACKTEST = {};
 
 const SWING_BACKTEST = {}; // in-memory cache, 24h TTL
 
@@ -422,7 +421,7 @@ const SWING_BACKTEST = {}; // in-memory cache, 24h TTL
 // ─── Long-Term Portfolio Config ───────────────────────────────────────────────
 // Based on BitcoinTAF $25K portfolio strategy: buy a diversified basket and
 // hold until the profit target is reached. Runs independently of scalp/swing.
-const LT_ENABLED    = process.env.LT_ENABLED !== "false";                       // disable via env if needed
+const LT_ENABLED    = process.env.LT_ENABLED === "true";                       // disable via env if needed
 const LT_TRADE_SIZE = parseFloat(process.env.LT_TRADE_SIZE_USD  || "5");        // $ invested per coin
 const LT_TARGET_PCT = parseFloat(process.env.LT_TARGET_PCT      || "100");      // exit at +100% (2×)
 const LT_RESERVE    = parseFloat(process.env.LT_USDT_RESERVE    || "20");       // keep this much free for scalp
@@ -453,7 +452,9 @@ const WATCHLIST = [...new Set([
 ])];
 
 // Recovery test mode: scanning only the selected symbols avoids excessive exchange API calls.
-const ENABLE_MOVER_DISCOVERY = process.env.ENABLE_MOVER_DISCOVERY !== "false";
+const ENABLE_MOVER_DISCOVERY = process.env.ENABLE_MOVER_DISCOVERY === "true";
+const ALLOW_NEW_SWING_ENTRIES = process.env.ALLOW_NEW_SWING_ENTRIES === "true";
+const ALLOW_NEW_BREAKOUT_ENTRIES = process.env.ALLOW_NEW_BREAKOUT_ENTRIES === "true";
 const PAPER_FEE_FRACTION = 0.001; // 0.10% per side in simulations
 const PAPER_SLIPPAGE_FRACTION = 0.001; // 0.10% per side in simulations
 const MAX_NEW_ORDER_RISK = 0.01; // 1% equity loss budget for a stopped trade
@@ -2560,23 +2561,23 @@ async function placeOrder(symbol, side, sizeUSD, price, quantityOverride = null)
   if (side === "buy") {
     if (HARD_BLACKLIST.has(symbol.toUpperCase())) {
       console.log(`⛔ BUY BLOCKED — ${symbol} is hard-blacklisted (never buy). Skipping.`);
-      return { blocked: true, code: "HARD_BLACKLIST", reason: "Coin is hard-blacklisted" };
+      throw new Error("BUY_BLOCKED_HARD_BLACKLIST: " + symbol);
     }
     if (await failsLiquidityFloor(symbol)) {
       const d = _depthCache.get(symbol)?.usd;
       console.log(`⛔ BUY BLOCKED — ${symbol} book too thin ($${Math.round(d || 0).toLocaleString()} < $${MIN_BOOK_DEPTH_USD.toLocaleString()} ±0.5% depth). Skipping illiquid coin.`);
-      return { blocked: true, code: "THIN_BOOK", reason: `Book depth $${Math.round(d || 0)} below floor` };
+      throw new Error("BUY_BLOCKED_THIN_BOOK: " + symbol + " depth " + d);
     }
     if (entryCapReached()) {
       console.log(`⛔ BUY BLOCKED — ${symbol}: daily entry cap reached (${MAX_ENTRIES_PER_DAY}/day). Trading less by design.`);
-      return { blocked: true, code: "ENTRY_CAP", reason: `Daily entry cap ${MAX_ENTRIES_PER_DAY} reached` };
+      throw new Error("BUY_BLOCKED_ENTRY_CAP: " + symbol);
     }
     const soldAt = _recentlySold.get(symbol);
     if (soldAt && Date.now() - soldAt < POST_SELL_LOCK_MS) {
       const minsLeft = Math.ceil((POST_SELL_LOCK_MS - (Date.now() - soldAt)) / 60000);
       console.log(`🔒 placeOrder BUY BLOCKED — ${symbol} sold ${Math.floor((Date.now() - soldAt) / 60000)}min ago — ${minsLeft}min remaining (stack trace follows)`);
       console.trace();
-      return { blocked: true, code: "POST_SELL_LOCK", reason: `Sold ${Math.floor((Date.now() - soldAt) / 60000)}min ago` };
+      throw new Error("BUY_BLOCKED_POST_SELL_LOCK: " + symbol);
     }
     console.log(`🔍 BUY ORDER PROCEEDING — ${symbol}`);
     console.trace();
@@ -8465,6 +8466,8 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
 
     // ── Entry check ─────────────────────────────────────────────────────────
+    // Existing swing positions are managed above; new entries require explicit opt-in.
+    if (!ALLOW_NEW_SWING_ENTRIES) return;
     // Paper simulation must honour the same entry cap, pause and loss breaker.
     // This check stays BELOW the open-position management block, so exits remain live.
     if (_tradingPaused || entryCapReached() || checkDailyDrawdown(log).paused) {
@@ -8701,6 +8704,8 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
 
     // ── Entry check ─────────────────────────────────────────────────────────
+    // Existing breakout positions are managed above; new entries require explicit opt-in.
+    if (!ALLOW_NEW_BREAKOUT_ENTRIES) return;
     // Paper simulation must honour the same entry cap, pause and loss breaker.
     // This check stays BELOW the open-position management block, so exits remain live.
     if (_tradingPaused || entryCapReached() || checkDailyDrawdown(log).paused) {
