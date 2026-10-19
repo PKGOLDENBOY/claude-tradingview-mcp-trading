@@ -7830,6 +7830,12 @@ async function togglePause(){
   }
 
   const server = http.createServer((req, res) => {
+    // The dashboard PIN currently arrives in query strings. Prevent its
+    // accidental forwarding via Referer and disable caching of private data.
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Cache-Control", "no-store");
     const urlObj = new URL(req.url, "http://localhost");
     const path = urlObj.pathname;
 
@@ -8254,8 +8260,22 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     // TradingView webhook
     if (req.method === "POST" && path === "/webhook") {
       let body = "";
-      req.on("data", (chunk) => (body += chunk.toString()));
+      let oversized = false;
+      req.on("data", (chunk) => {
+        if (oversized) return;
+        if (Buffer.byteLength(body) + chunk.length > 8192) {
+          oversized = true;
+          body = "";
+          return;
+        }
+        body += chunk.toString();
+      });
       req.on("end", async () => {
+        if (oversized) {
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Webhook payload too large" }));
+          return;
+        }
         try {
           const payload = JSON.parse(body);
           // TradingView cannot add custom headers; accept a per-alert JSON secret instead.
@@ -8336,8 +8356,22 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     // LT portfolio webhook — receives buy/sell signals from NeonGreenHF / DETONATOR A/B/C
     if (req.method === "POST" && path === "/lt-webhook") {
       let body = "";
-      req.on("data", (chunk) => (body += chunk.toString()));
+      let oversized = false;
+      req.on("data", (chunk) => {
+        if (oversized) return;
+        if (Buffer.byteLength(body) + chunk.length > 8192) {
+          oversized = true;
+          body = "";
+          return;
+        }
+        body += chunk.toString();
+      });
       req.on("end", async () => {
+        if (oversized) {
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Webhook payload too large" }));
+          return;
+        }
         try {
           const payload = JSON.parse(body);
           // TradingView cannot add custom headers; accept a per-alert JSON secret instead.
