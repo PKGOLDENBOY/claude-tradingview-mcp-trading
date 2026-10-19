@@ -20,6 +20,8 @@ import { execSync } from "child_process";
 import WebSocket from "ws";
 // ─── Email notifications (Resend — HTTP, no SMTP, works on Railway) ──────────
 
+const EXCHANGE_WRITES_ALLOWED = process.env.PAPER_TRADING === "false" && process.env.LIVE_TRADING_ENABLED === "true";
+function requireExchangeWrites(action) { if (!EXCHANGE_WRITES_ALLOWED) throw new Error("LIVE_TRADING_LOCKED: " + action); }
 const EMAIL_TO = process.env.NOTIFY_EMAIL || "joshualiversage01@gmail.com";
 
 async function sendEmail(subject, html) {
@@ -322,7 +324,7 @@ async function bookDepthUSD(symbol) {
 // True if the coin is too thin to trade. Fail-open: null depth (API error / non-BitGet) => allowed.
 async function failsLiquidityFloor(symbol) {
   const usd = await bookDepthUSD(symbol);
-  return usd != null && usd < MIN_BOOK_DEPTH_USD;
+  return usd == null || !Number.isFinite(usd) || usd < MIN_BOOK_DEPTH_USD;
 }
 
 // ── Global daily entry cap ────────────────────────────────────────────────────
@@ -331,7 +333,7 @@ async function failsLiquidityFloor(symbol) {
 // The old per-path checkTradeLimits (entries+exits, cap 15) was bypassed by the mover/swing/LT
 // paths, so ~35 round-trips/day still happened. This is a HARD cap on new BUYS across ALL paths,
 // enforced at the buy chokepoints. Exits/sells are NEVER capped — we must always be able to close.
-const MAX_ENTRIES_PER_DAY = parseInt(process.env.MAX_ENTRIES_PER_DAY || "6", 10);
+const MAX_ENTRIES_PER_DAY = parseInt(process.env.MAX_ENTRIES_PER_DAY || "0", 10);
 function countTodaysEntries(log) {
   const today = new Date().toISOString().slice(0, 10);
   return (log?.trades || []).filter(t => t.type === "entry" && t.orderPlaced && t.timestamp?.startsWith(today)).length;
@@ -339,7 +341,7 @@ function countTodaysEntries(log) {
 // True if today's entry budget is already spent. Reads the persisted log so it survives redeploys.
 function entryCapReached() {
   try { return countTodaysEntries(loadLog()) >= MAX_ENTRIES_PER_DAY; }
-  catch { return false; } // fail-open on read error — don't freeze the bot
+  catch { return true; } // fail closed when ledger is inaccessible
 }
 
 // Per-coin latest scan data — shown in dashboard coin detail view
@@ -458,7 +460,7 @@ const CONFIG = {
   maxTradeSizePct: (() => { const v = process.env.MAX_TRADE_SIZE_USD || "25%"; return v.trim().endsWith("%") ? parseFloat(v) / 100 : null; })(),
   maxTradeSizeUSD: (() => { const v = process.env.MAX_TRADE_SIZE_USD || "25%"; return v.trim().endsWith("%") ? null : parseFloat(v); })(),
   maxTradesPerDay: parseInt(process.env.MAX_TRADES_PER_DAY || "15"),
-  paperTrading: process.env.PAPER_TRADING !== "false",
+  paperTrading: !EXCHANGE_WRITES_ALLOWED,
   tradeMode: process.env.TRADE_MODE || "spot",
   bitget: {
     apiKey: process.env.BITGET_API_KEY,
@@ -591,7 +593,8 @@ function loadLog() {
     if (!log.dayStartValue) log.dayStartValue = log.portfolioValue;
     return log;
   } catch (e) {
-    // Corrupted log (e.g. process killed mid-write) — back it up and start fresh
+    if (EXCHANGE_WRITES_ALLOWED) throw new Error("Trading locked: corrupt state ledger: " + e.message);
+    // Only an isolated paper ledger can be reset on corruption.
     console.error(`⚠️ loadLog: JSON parse failed (${e.message}) — backing up corrupted file and starting fresh`);
     try { renameSync(sourceFile, sourceFile + ".bak." + Date.now()); } catch {}
     return fresh();
@@ -2501,6 +2504,7 @@ async function getBitMartBalance(coin) {
 }
 
 async function placeBitMartOrder(symbol, side, sizeUSD, price, quantityOverride = null) {
+  requireExchangeWrites("BitMart order");
   if (side === "buy" && HARD_BLACKLIST.has(symbol.toUpperCase())) {
     console.log(`⛔ BUY BLOCKED [placeBitMartOrder] — ${symbol} is hard-blacklisted. Skipping.`);
     return { blocked: true, code: "HARD_BLACKLIST", reason: "Coin is hard-blacklisted" };
@@ -3658,6 +3662,7 @@ async function getBitGetServerTime() {
 }
 
 async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride = null) {
+  requireExchangeWrites("BitGet order");
   // Defense-in-depth: block blacklisted BUYS at the lowest execution level too, so no caller can
   // ever bypass the guard (blacklisted ZEC/MAGMA/UMXM were still being bought — belt AND braces).
   if (side === "buy" && HARD_BLACKLIST.has(symbol.toUpperCase())) {
@@ -4140,6 +4145,7 @@ async function checkLiveHardStops() {
 // Places a limit buy at the specified price. Polls for fill up to 30s.
 // Falls back to market order if not filled (snap-back moves fast — don't miss the entry).
 async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
+  requireExchangeWrites("BitGet limit buy");
   if (HARD_BLACKLIST.has(symbol.toUpperCase())) {
     console.log(`⛔ BUY BLOCKED — ${symbol} is hard-blacklisted (never buy). Skipping limit buy.`);
     return null;
@@ -4218,6 +4224,7 @@ async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
 // ─── Resting TP helpers ───────────────────────────────────────────────────────
 
 async function placeLimitSell(symbol, qty, limitPrice) {
+  requireExchangeWrites("BitGet limit sell");
   try {
     const symRes = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`);
     const symData = await symRes.json();
@@ -4246,6 +4253,7 @@ async function placeLimitSell(symbol, qty, limitPrice) {
 }
 
 async function cancelOrder(symbol, orderId) {
+  requireExchangeWrites("Cancel order");
   try {
     const ts = Date.now().toString();
     const path = "/api/v2/spot/trade/cancel-order";
@@ -4262,6 +4270,7 @@ async function cancelOrder(symbol, orderId) {
 }
 
 async function cancelAllSymbolOrders(symbol) {
+  requireExchangeWrites("Cancel all orders");
   try {
     // Fetch open orders then cancel individually (bulk cancel endpoint is not available)
     const ts = Date.now().toString();
@@ -6101,11 +6110,12 @@ if (process.argv.includes("--tax-summary")) {
   const PORT = process.env.PORT || 3000;
 
   // ─── Dashboard PIN ───────────────────────────────────────────────────────────
-  const BOT_PIN = process.env.BOT_PIN || "2026";
+  const BOT_PIN = process.env.BOT_PIN || "";
+  const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "";
 
   function checkPin(url) {
     const pin = new URL(url, "http://localhost").searchParams.get("pin");
-    return pin === BOT_PIN;
+    return BOT_PIN.length >= 10 && typeof pin === "string" && pin.length === BOT_PIN.length && crypto.timingSafeEqual(Buffer.from(pin), Buffer.from(BOT_PIN));
   }
 
   async function buildStatusData() {
@@ -7646,7 +7656,9 @@ async function togglePause(){
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         status: "OK",
-        build: "2026-07-06-bitmart-off",
+        build: "2026-10-19-recovery-guard",
+        mode: CONFIG.paperTrading ? "PAPER_LOCKED" : "LIVE_AUTHORIZED",
+        exchangeWritesAllowed: EXCHANGE_WRITES_ALLOWED,
         accounts: ACCOUNTS.map(a => `${a.id}:${a.exchange}`),
         guards: { blacklist: [...HARD_BLACKLIST], entryCapPerDay: MAX_ENTRIES_PER_DAY, minBookDepthUSD: MIN_BOOK_DEPTH_USD },
       }));
@@ -8008,6 +8020,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
     // Status endpoint — also prints to Railway logs so you can read it there
     if (req.method === "GET" && path === "/status") {
+      if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({error:"Unauthorized"})); return; }
       const log = loadLog();
       const openPositions = Object.entries(log.positions || {}).filter(([, p]) => p?.open);
       const positionSummary = openPositions.map(([sym, p]) => {
@@ -8042,6 +8055,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
     // TradingView webhook
     if (req.method === "POST" && path === "/webhook") {
+      if (!WEBHOOK_SECRET || req.headers["x-webhook-secret"] !== WEBHOOK_SECRET) { res.writeHead(401); res.end(JSON.stringify({error:"Unauthorized webhook"})); return; }
       let body = "";
       req.on("data", (chunk) => (body += chunk.toString()));
       req.on("end", async () => {
@@ -8119,6 +8133,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
     // LT portfolio webhook — receives buy/sell signals from NeonGreenHF / DETONATOR A/B/C
     if (req.method === "POST" && path === "/lt-webhook") {
+      if (!WEBHOOK_SECRET || req.headers["x-webhook-secret"] !== WEBHOOK_SECRET) { res.writeHead(401); res.end(JSON.stringify({error:"Unauthorized webhook"})); return; }
       let body = "";
       req.on("data", (chunk) => (body += chunk.toString()));
       req.on("end", async () => {
@@ -8817,6 +8832,8 @@ async function checkUpcomingListings() {
 }
 
 async function sniperBuy(symbol) {
+  requireExchangeWrites("New listing sniper");
+  if (process.env.SNIPER_ENABLED !== "true") return;
   // Block sniper entries during bear regime or crash block — new listings crash hardest in bear markets
   const regime = _regimeCache?.value;
   if (regime?.btcTrend === "bear") {
@@ -8893,6 +8910,7 @@ async function sniperBuy(symbol) {
     const ts = await getBitGetServerTime();
     const path = "/api/v2/spot/trade/place-order";
     const body = JSON.stringify({ symbol, side: "buy", orderType: "market", size: sizeUSD.toFixed(2) });
+    requireExchangeWrites("Direct sniper buy");
     const sig = signBitGet(ts, "POST", path, body);
     const res = await fetch(`${acct().baseUrl}${path}`, {
       method: "POST",
@@ -9090,6 +9108,7 @@ async function monitorSniperPositions() {
 
   server.listen(PORT, () => {
     console.log(`\n🌐 Webhook server listening on port ${PORT}`);
+    console.log(`🔒 EXCHANGE WRITES: ${EXCHANGE_WRITES_ALLOWED ? "AUTHORIZED" : "LOCKED"} | mode: ${CONFIG.paperTrading ? "PAPER" : "LIVE"}`);
     // Deploy-verification banner — confirms which guards the RUNNING code has (grep logs for GUARDS).
     console.log(`🛡️  GUARDS ACTIVE — blacklist(${HARD_BLACKLIST.size}): ${[...HARD_BLACKLIST].join(",")} | entryCap ${MAX_ENTRIES_PER_DAY}/day | minBookDepth $${MIN_BOOK_DEPTH_USD}`);
     mergeCustomWatchlist();
