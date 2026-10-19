@@ -450,6 +450,8 @@ const WATCHLIST = [...new Set([
   ...(process.env.WATCHLIST || "").split(",").map(s => s.trim().toUpperCase()).filter(Boolean),
 ])];
 
+// Recovery test mode: scanning only the selected symbols avoids excessive exchange API calls.
+const ENABLE_MOVER_DISCOVERY = process.env.ENABLE_MOVER_DISCOVERY !== "false";
 const CONFIG = {
   symbols: (process.env.SYMBOLS || process.env.SYMBOL || "NEARUSDT,BNBUSDT,LINKUSDT,SOLUSDT,INJUSDT,ADAUSDT,DOTUSDT,ZECUSDT,KAVAUSDT,AXSUSDT")
     .replace(/^SYMBOLS=/i, "")
@@ -9221,7 +9223,11 @@ async function monitorSniperPositions() {
 
       // Start price stream immediately, then refresh top movers and restart with updated symbols
       startPriceStream(CONFIG.symbols);
-      refreshTopMovers().then(() => startPriceStream(CONFIG.symbols)).catch(e => console.error("refreshTopMovers failed:", e.message));
+      if (ENABLE_MOVER_DISCOVERY) {
+        refreshTopMovers().then(() => startPriceStream(CONFIG.symbols)).catch(e => console.error("refreshTopMovers failed:", e.message));
+      } else {
+        console.log("🧪 Controlled paper test: dynamic movers disabled; only configured symbols scanned");
+      }
 
       for (const account of ACCOUNTS) {
         await _accountStore.run(account, async () => {
@@ -9288,12 +9294,14 @@ async function monitorSniperPositions() {
 
   // Swap to fresh top movers every 4 hours (restarts price stream with new symbols)
   setInterval(async () => {
+    if (!ENABLE_MOVER_DISCOVERY) return;
     await refreshTopMovers();
     startPriceStream(CONFIG.symbols);
   }, 4 * 60 * 60 * 1000);
 
-  // Quick gainer scan every 15 minutes — adds any new 3%+ mover immediately, no 4h wait
+  // Quick gainer scan every 15 minutes — optional for controlled paper trials.
   setInterval(async () => {
+    if (!ENABLE_MOVER_DISCOVERY) return;
     try {
       const res  = await fetch("https://api.bitget.com/api/v2/spot/market/tickers");
       const json = await res.json();
