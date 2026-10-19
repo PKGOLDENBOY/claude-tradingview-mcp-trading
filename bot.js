@@ -3996,7 +3996,7 @@ function openPositionSymbols() {
     for (const store of ["positions", "swingPositions", "breakoutPositions", "sniperPositions", "ltPositions"]) {
       const obj = log[store];
       if (!obj) continue;
-      for (const [sym, pos] of Object.entries(obj)) if (pos) syms.add(sym);
+      for (const [sym, pos] of Object.entries(obj)) if (pos?.open) syms.add(sym);
     }
     return [...syms];
   } catch { return []; }
@@ -4114,7 +4114,13 @@ async function checkLiveHardStops() {
     _recentlySold.set(sym, Date.now()); // lock immediately before placing sell
 
     try {
-      const pnlUSD = (livePrice - pos.entryPrice) * parseFloat(pos.quantity);
+      const simulatedStop = CONFIG.paperTrading ? paperExit({
+        entryFillPrice: pos.entryPrice, exitMarketPrice: livePrice,
+        quantity: Number(pos.quantity), entryFeeUsd: Number(pos.entryFeeUsd || 0),
+        feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+      }) : null;
+      const pnlUSD = simulatedStop?.pnlUsd ?? ((livePrice - pos.entryPrice) * Number(pos.quantity));
+      const realizedPct = simulatedStop?.pnlPct ?? pnlPct;
       if (!CONFIG.paperTrading) {
         if (pos.tpOrderId) {
           await cancelOrder(sym, pos.tpOrderId);
@@ -4137,7 +4143,11 @@ async function checkLiveHardStops() {
       log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
       log.trades.push({
         timestamp: new Date().toISOString(), type: "exit", symbol: sym,
-        price: livePrice, entryPrice: pos.entryPrice, pnlPct, pnlUSD,
+        price: simulatedStop?.exitFillPrice ?? livePrice, entryPrice: pos.entryPrice,
+        pnlPct: realizedPct, pnlUSD, feeAdjusted: Boolean(simulatedStop),
+        exitFeeUSD: simulatedStop?.exitFeeUsd ?? 0,
+        tradeType: posStore === "swingPositions" ? "swing" :
+          posStore === "breakoutPositions" ? "breakout" : (pos.entryType || "scalp"),
         indicators: {}, exitReasons: [reason],
         shouldExit: true, quantity: pos.quantity,
         orderPlaced: true, paperTrading: CONFIG.paperTrading,
