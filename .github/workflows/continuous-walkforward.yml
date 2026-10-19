@@ -1,0 +1,37 @@
+name: Independent walk-forward strategy training
+on:
+  push:
+    branches: [research/continuous-walkforward-20261019]
+    paths:
+      - 'research/walkforward-train.mjs'
+      - 'test/walkforward-train.test.mjs'
+      - '.github/workflows/continuous-walkforward.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies without script hooks
+        run: npm ci --ignore-scripts
+      - name: Verify no look-ahead and honest execution assumptions
+        run: |
+          node --check research/walkforward-train.mjs
+          node --test test/walkforward-train.test.mjs
+      - name: Collect 180 days of public SPOT data and evaluate untouched holdout
+        run: node research/walkforward-train.mjs
+      - name: Archive timestamped research evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: walkforward-research-${{ github.run_number }}-${{ github.run_attempt }}
+          path: research/out/*.json
+          if-no-files-found: ignore
+          retention-days: 30
