@@ -3760,19 +3760,46 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
 //   3. trades.csv relative (local dev)
 function resolveCSVPath() {
   if (process.env.STATE_FILE) {
-    return process.env.STATE_FILE.replace(/[^/\\]+$/, "trades.csv");
+    return process.env.STATE_FILE.replace(/[^/\\]+$/, CONFIG.paperTrading ? "trades-paper.csv" : "trades.csv");
   }
   try {
     // mkdirSync is a no-op if /data already exists; creates it if not.
     // On Railway with a mounted volume /data is persistent; without one it's ephemeral but at
     // least consistent across the process lifetime (won't silently write to /app/).
     mkdirSync("/data", { recursive: true });
-    return "/data/trades.csv";
+    return CONFIG.paperTrading ? "/data/trades-paper.csv" : "/data/trades.csv";
   } catch {
-    return "trades.csv";
+    return CONFIG.paperTrading ? "trades-paper.csv" : "trades.csv";
   }
 }
 const CSV_FILE = resolveCSVPath();
+
+// Read-only recovery inventory. This NEVER mutates or reclassifies real exchange trades.
+function historicalRecoverySummary() {
+  const originalState = join(STATE_DIR, "safety-check-log.json");
+  const originalCsv = join(STATE_DIR, "trades.csv");
+  const result = {
+    historicalStateFound: existsSync(originalState),
+    historicalCsvFound: existsSync(originalCsv),
+    activeStateFile: LOG_FILE,
+    simulatedCsvFile: CONFIG.paperTrading ? CSV_FILE : null,
+    totalsAreExchangeVerified: false,
+  };
+  if (result.historicalStateFound) {
+    try {
+      const state = JSON.parse(readFileSync(originalState, "utf8"));
+      const trades = Array.isArray(state.trades) ? state.trades : [];
+      const exits = trades.filter(t => t.type === "exit" && t.orderPlaced === true);
+      const entries = trades.filter(t => t.type === "entry" && t.orderPlaced === true);
+      result.botLogEntries = entries.length;
+      result.botLogExits = exits.length;
+      result.botReportedExitPnlUSD = Number(exits.reduce((sum, t) => sum + (Number.isFinite(Number(t.pnlUSD)) ? Number(t.pnlUSD) : 0), 0).toFixed(2));
+      result.openRecordCounts = Object.fromEntries(["positions", "swingPositions", "breakoutPositions", "sniperPositions", "ltPositions"].map(k => [k, Object.values(state[k] || {}).filter(p => p?.open).length]));
+      result.note = "Bot-estimated log figures, NOT net account performance. Verify against BitGet deposits, withdrawals and actual balances.";
+    } catch (err) { result.historicalStateError = err.message.slice(0, 120); }
+  }
+  return result;
+}
 
 // Always ensure trades.csv exists with headers — open it in Excel/Sheets any time
 function initCsv() {
@@ -8019,6 +8046,13 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
 
     // Status endpoint — also prints to Railway logs so you can read it there
+    if (req.method === "GET" && path === "/api/recovery") {
+      if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Unauthorized" })); return; }
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(historicalRecoverySummary()));
+      return;
+    }
+
     if (req.method === "GET" && path === "/status") {
       if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({error:"Unauthorized"})); return; }
       const log = loadLog();
@@ -9118,7 +9152,8 @@ async function monitorSniperPositions() {
     console.log(`\n🌐 Webhook server listening on port ${PORT}`);
     console.log(`🔒 EXCHANGE WRITES: ${EXCHANGE_WRITES_ALLOWED ? "AUTHORIZED" : "LOCKED"} | mode: ${CONFIG.paperTrading ? "PAPER" : "LIVE"}`);
     // Deploy-verification banner — confirms which guards the RUNNING code has (grep logs for GUARDS).
-    console.log(`🛡️  GUARDS ACTIVE — blacklist(${HARD_BLACKLIST.size}): ${[...HARD_BLACKLIST].join(",")} | entryCap ${MAX_ENTRIES_PER_DAY}/day | minBookDepth $${MIN_BOOK_DEPTH_USD}`);
+    console.log(`🛡️  GUARDS ACTIVE — blacklist(${HARD_BLACKLIST.size}): ${[...HARD_BLACKLIST].join(",")} | entryCap ${MAX_ENTRIES_PER_DAY}/day | minBookDepth ${MIN_BOOK_DEPTH_USD}`);
+    console.log("🔎 RECOVERY INVENTORY " + JSON.stringify(historicalRecoverySummary()));
     mergeCustomWatchlist();
     console.log(`   Symbols:     ${CONFIG.symbols.join(", ")}`);
     console.log(`   Polling:     every 5 minutes\n`);
