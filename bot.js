@@ -8633,7 +8633,12 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       if (bkPos.targetPrice && price >= bkPos.targetPrice) exitReasons.push(`Target hit +${pnlPct.toFixed(1)}%`);
 
       if (exitReasons.length > 0) {
-        const pnlUSD = (price - bkPos.entryPrice) * parseFloat(bkPos.quantity);
+        const simulated = CONFIG.paperTrading ? paperExit({
+          entryFillPrice: bkPos.entryPrice, exitMarketPrice: price,
+          quantity: Number(bkPos.quantity), entryFeeUsd: Number(bkPos.entryFeeUsd || 0),
+          feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+        }) : null;
+        const pnlUSD = simulated?.pnlUsd ?? ((price - bkPos.entryPrice) * Number(bkPos.quantity));
         console.log(`\n🚀 BREAKOUT EXIT — ${symbol} | ${exitReasons.join(" | ")} | P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`);
         if (!CONFIG.paperTrading) {
           try { await placeOrder(symbol, "sell", null, price, bkPos.quantity); }
@@ -8643,7 +8648,9 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         }
         const exitEntry = {
           timestamp: new Date().toISOString(), type: "exit", symbol, timeframe: "1H",
-          price, pnlPct, pnlUSD: +pnlUSD.toFixed(4), reasons: exitReasons,
+          price: simulated?.exitFillPrice ?? price,
+          pnlPct: simulated?.pnlPct ?? pnlPct, pnlUSD: +pnlUSD.toFixed(4), reasons: exitReasons,
+          exitFeeUSD: simulated?.exitFeeUsd ?? 0, feeAdjusted: Boolean(simulated),
           orderPlaced: true, paperTrading: CONFIG.paperTrading, tradeType: "breakout",
         };
         if (!CONFIG.paperTrading && bkPos.tpOrderId) {
@@ -8738,7 +8745,11 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     console.log(`   Vol: ${(vol.current/vol.avg*100).toFixed(0)}% of avg | Ichimoku: ${ichimoku ? (ichimoku.aboveCloud ? "above cloud ✅" : "in cloud ⚠️") : "n/a"}`);
     if (heat.heatPct > 0) console.log(`   Portfolio heat: ${heat.heatPct}% of 8% max`);
 
-    let qty = bkSize / price;
+    const paperBkFill = CONFIG.paperTrading ? paperEntry({
+      marketPrice: price, notionalUsd: bkSize,
+      feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+    }) : null;
+    let qty = paperBkFill?.quantity ?? (bkSize / price);
     let orderId = `PAPER-BK-${Date.now()}`;
     if (!CONFIG.paperTrading) {
       try {
@@ -8757,7 +8768,8 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     const bkTpPct = (targetPrice - price) / price;
     const bkSlPct = 0.03;
     log.breakoutPositions = { ...(log.breakoutPositions || {}), [symbol]: {
-      open: true, side: "long", entryPrice: price, highWatermark: price,
+      open: true, side: "long", entryPrice: paperBkFill?.fillPrice ?? price, highWatermark: price,
+      entryFeeUsd: paperBkFill?.entryFeeUsd ?? 0,
       entryTime: new Date().toISOString(), quantity: qty.toFixed(6),
       orderId, tradeType: "breakout", breakoutLevel: rangeHigh,
       targetPrice, rangeLow, rangeHigh, tpPct: bkTpPct, slPct: bkSlPct,
@@ -8771,7 +8783,9 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
     const entryLog = {
       timestamp: new Date().toISOString(), type: "entry", symbol, timeframe: "1H",
-      price, tradeSize: bkSize, indicators: { ema8, ema21, range, volRatio: vol.current/vol.avg },
+      price: paperBkFill?.fillPrice ?? price, tradeSize: bkSize,
+      paperEntryFeeUsd: paperBkFill?.entryFeeUsd ?? 0,
+      indicators: { ema8, ema21, range, volRatio: vol.current/vol.avg },
       liquidity: liquiditySnapshot(symbol),
       breakoutLevel: rangeHigh, targetPrice, orderPlaced: true,
       paperTrading: CONFIG.paperTrading, tradeType: "breakout",
