@@ -6205,6 +6205,65 @@ if (process.argv.includes("--tax-summary")) {
     return BOT_PIN.length >= 10 && typeof pin === "string" && pin.length === BOT_PIN.length && crypto.timingSafeEqual(Buffer.from(pin), Buffer.from(BOT_PIN));
   }
 
+  // Close only simulated holdings. Live close-all is intentionally unavailable
+  // until exchange inventory and every strategy's order state are reconciled.
+  async function closeAllPaperPositions() {
+    if (!CONFIG.paperTrading) throw new Error("Real-money close-all is disabled; manage BitGet positions directly");
+    const stores = [["scalp", "positions"], ["swing", "swingPositions"],
+      ["breakout", "breakoutPositions"], ["sniper", "sniperPositions"], ["lt", "ltPositions"]];
+    const report = { closed: [], skipped: [] };
+    for (const [strategy, store] of stores) {
+      const current = loadLog();
+      for (const [sym, snapshot] of Object.entries(current[store] || {})) {
+        if (!snapshot?.open) continue;
+        if (_runningSymbols.has(sym) || _processingStops.has(sym)) {
+          report.skipped.push(sym + ":" + strategy + " busy"); continue;
+        }
+        _runningSymbols.add(sym);
+        try {
+          const log = loadLog();
+          const position = log[store]?.[sym];
+          if (!position?.open) continue;
+          const streamed = livePrices.get(sym);
+          const snap = coinSnapshots[sym];
+          let mark = streamed && Date.now() - streamed.ts <= 30000 ? streamed.price
+            : snap?.price && (Date.now() - Date.parse(snap.updatedAt)) < 60000 ? Number(snap.price) : null;
+          if (!mark) {
+            try {
+              const bars = await fetchCandles(sym, "1m", 2);
+              mark = bars.at(-1)?.close || null;
+            } catch (err) {
+              report.skipped.push(sym + ":" + strategy + " price unavailable: " + err.message);
+              continue;
+            }
+          }
+          const sale = paperExit({
+            entryFillPrice: Number(position.entryPrice), exitMarketPrice: Number(mark),
+            quantity: Number(position.quantity), entryFeeUsd: Number(position.entryFeeUsd || 0),
+            feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+          });
+          const trade = {
+            timestamp: new Date().toISOString(), type: "exit", symbol: sym,
+            tradeType: strategy, paperTrading: true, feeAdjusted: true,
+            quantity: position.quantity, entryPrice: position.entryPrice,
+            price: sale.exitFillPrice, pnlPct: sale.pnlPct, pnlUSD: sale.pnlUsd,
+            exitFeeUSD: sale.exitFeeUsd, shouldExit: true, orderPlaced: true,
+            orderId: "PAPER-MANUAL-" + Date.now(),
+            exitReasons: ["User requested close of all paper holdings"],
+          };
+          delete log[store][sym];
+          log.portfolioValue = (Number(log.portfolioValue) || CONFIG.portfolioValue) + sale.pnlUsd;
+          log.trades.push(trade);
+          saveLog(log);
+          writeTradeCsv(trade);
+          report.closed.push({ symbol: sym, strategy, pnlUSD: sale.pnlUsd });
+        } catch (err) { report.skipped.push(sym + ":" + strategy + " " + err.message); }
+        finally { _runningSymbols.delete(sym); }
+      }
+    }
+    return report;
+  }
+
   async function buildStatusData() {
     const log = loadLog();
     const today = new Date().toISOString().slice(0, 10);
@@ -6390,6 +6449,7 @@ if (process.argv.includes("--tax-summary")) {
     const lastTradeAt = (log.trades || []).filter(t => t.orderPlaced && t.timestamp).slice(-1)[0]?.timestamp || null;
     return {
       portfolioValue, usdtBalance, openPositions,
+      paperTrading: CONFIG.paperTrading,
       valuationEstimated: Boolean(paperMark), paperStaleQuotes: paperMark?.staleQuotes ?? 0,
       isExchangeVerified: !CONFIG.paperTrading && liveAssets.length > 0,
       paperPerformance: CONFIG.paperTrading ? paperStats(log.trades) : null,
@@ -6908,7 +6968,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Segoe UI',sa
   <form method="POST" action="/action?pin=${pin}&action=scan" style="display:contents"><button class="btn btn-blue" type="submit">⚡ Scan All Coins Now</button></form>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
     <form method="POST" action="/action?pin=${pin}&action=${d.paused?"resume":"pause"}" style="display:contents"><button class="btn btn-grey" type="submit">${d.paused?"▶ Resume":"⏸ Pause"}</button></form>
-    <form method="POST" action="/action?pin=${pin}&action=sell-all" style="display:contents" onsubmit="return confirm('Sell ALL open positions now?')"><button class="btn btn-red" type="submit">🚨 Sell All</button></form>
+    <form method="POST" action="/action?pin=${pin}&action=sell-all" style="display:contents" onsubmit="return confirm('Close ALL simulated positions? This changes only paper records.')"><button class="btn btn-red" type="submit" ${d.paperTrading?"":"disabled"}>${d.paperTrading?"Close Paper Positions":"Live positions: use BitGet"}</button></form>
   </div>
 </div>
 <div style="text-align:center;color:#5B6478;font-size:11px;margin:18px 0 4px">Refreshing in <span id="refresh-in">15s</span></div>
@@ -7867,12 +7927,9 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         (async () => { for (const sym of CONFIG.symbols) await run(null, sym).catch((err) => { console.error(`Webhook scan ${sym}:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); }); })();
       } else if (action === "sell-all") {
         redirect();
-        (async () => {
-          const log = loadLog();
-          const open = Object.entries(log.positions || {}).filter(([, p]) => p && p.open).map(([sym]) => sym);
-          console.log(`\n🚨 Dashboard sell-all: ${open.join(", ")}`);
-          for (const sym of open) await run("SELL", sym).catch(e => console.error(`Force sell ${sym}:`, e.message));
-        })();
+        closeAllPaperPositions()
+          .then(result => console.log("📋 Paper close all completed: " + JSON.stringify(result)))
+          .catch(err => console.error("Paper close-all refused: " + err.message));
       } else if (action === "add-coin") {
         const addSym = (urlObj.searchParams.get("symbol") || "").toUpperCase();
         if (addSym && addSym.endsWith("USDT")) {
@@ -7889,7 +7946,8 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         }
         res.writeHead(302, { Location: `/coin?symbol=${addSym}&pin=${pin}` }); res.end();
       } else if (action === "clear-position") {
-        // Remove a stale position from the log without placing a sell order
+        if (!CONFIG.paperTrading) { console.warn("🚫 Live position clearing blocked"); redirect(); return; }
+        // Remove a stale paper position from the log without placing a sell order
         const cpSym = (urlObj.searchParams.get("symbol") || "").toUpperCase();
         if (cpSym) {
           const cpLog = loadLog();
@@ -8071,20 +8129,16 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       return;
     }
 
-    // Sell all open positions
+    // Intentionally paper-only; never silently liquidate real account via UI.
     if (req.method === "POST" && path === "/api/sell-all") {
       if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Wrong PIN" })); return; }
-      (async () => {
-        const log = loadLog();
-        const open = Object.entries(log.positions || {}).filter(([, p]) => p && p.open).map(([sym]) => sym);
-        if (open.length === 0) { res.writeHead(200); res.end(JSON.stringify({ message: "No open positions to sell" })); return; }
+      closeAllPaperPositions().then(report => {
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ message: `Selling ${open.length} position(s)...` }));
-        console.log(`\n🚨 Dashboard: force sell-all triggered (${open.join(", ")})`);
-        for (const sym of open) {
-          await run("SELL", sym).catch(e => console.error(`Force sell ${sym}:`, e.message));
-        }
-      })().catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+        res.end(JSON.stringify(report));
+      }).catch(err => {
+        res.writeHead(CONFIG.paperTrading ? 500 : 403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      });
       return;
     }
 
