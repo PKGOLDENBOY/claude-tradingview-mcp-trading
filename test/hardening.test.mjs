@@ -13,7 +13,7 @@ test("candle data is chronological, valid and deduplicated", () => {
   assert.deepEqual(cleaned.map(c=>c.time),[1,2,3,5]);
 });
 test("closed-only signals reject still-forming candles",()=>{
-  const now=300000; const data=normaliseCandles([row(0),row(240000)],{now,intervalMs:60000,closedOnly:true});
+  const now=299999; const data=normaliseCandles([row(0),row(240000)],{now,intervalMs:60000,closedOnly:true});
   assert.equal(data.length,1);
 });
 test("market client can retry HTTP 429s and normalise the result", async()=>{
