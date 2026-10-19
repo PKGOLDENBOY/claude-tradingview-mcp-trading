@@ -1,0 +1,42 @@
+name: Risk hardening CI
+on:
+  push:
+    branches:
+      - fix/risk-and-data-hardening-20261019
+  pull_request:
+    branches:
+      - main
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Validate source syntax
+        run: |
+          node --check bot.js
+          node --check lib/market-data.mjs
+          node --check lib/risk-engine.mjs
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+      - name: Execute independent regression suites
+        run: node --test test/*.test.mjs
+      - name: Check production never defaults to live exchange orders
+        run: |
+          node --input-type=module <<'EOF'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          const source = fs.readFileSync('bot.js','utf8');
+          assert(source.includes('LIVE_TRADING_ENABLED === "true"'));
+          assert(source.includes('PAPER_TRADING === "false"'));
+          assert(source.includes('requireExchangeWrites("BitGet order")'));
+          assert(source.includes('requireExchangeWrites("BitMart order")'));
+          assert(source.includes('requireExchangeWrites("BitGet limit sell")'));
+          console.log('Exchange write lock source audit passed');
+          EOF
