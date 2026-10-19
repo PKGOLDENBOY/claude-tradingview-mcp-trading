@@ -8055,12 +8055,16 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
     // TradingView webhook
     if (req.method === "POST" && path === "/webhook") {
-      if (!WEBHOOK_SECRET || req.headers["x-webhook-secret"] !== WEBHOOK_SECRET) { res.writeHead(401); res.end(JSON.stringify({error:"Unauthorized webhook"})); return; }
       let body = "";
       req.on("data", (chunk) => (body += chunk.toString()));
       req.on("end", async () => {
         try {
           const payload = JSON.parse(body);
+          // TradingView cannot add custom headers; accept a per-alert JSON secret instead.
+          const presented = req.headers["x-webhook-secret"] || payload.secret;
+          if (!WEBHOOK_SECRET || typeof presented !== "string" || presented.length !== WEBHOOK_SECRET.length || !crypto.timingSafeEqual(Buffer.from(presented), Buffer.from(WEBHOOK_SECRET))) {
+            res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({error:"Unauthorized webhook"})); return;
+          }
           const action = (payload.action || "").toUpperCase();
           const sym = (payload.symbol || CONFIG.symbols[0]).toUpperCase();
           if (!["BUY", "SELL"].includes(action)) {
@@ -8133,12 +8137,16 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
     // LT portfolio webhook — receives buy/sell signals from NeonGreenHF / DETONATOR A/B/C
     if (req.method === "POST" && path === "/lt-webhook") {
-      if (!WEBHOOK_SECRET || req.headers["x-webhook-secret"] !== WEBHOOK_SECRET) { res.writeHead(401); res.end(JSON.stringify({error:"Unauthorized webhook"})); return; }
       let body = "";
       req.on("data", (chunk) => (body += chunk.toString()));
       req.on("end", async () => {
         try {
           const payload = JSON.parse(body);
+          // TradingView cannot add custom headers; accept a per-alert JSON secret instead.
+          const presented = req.headers["x-webhook-secret"] || payload.secret;
+          if (!WEBHOOK_SECRET || typeof presented !== "string" || presented.length !== WEBHOOK_SECRET.length || !crypto.timingSafeEqual(Buffer.from(presented), Buffer.from(WEBHOOK_SECRET))) {
+            res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({error:"Unauthorized webhook"})); return;
+          }
           const action  = (payload.action || "").toUpperCase();
           const sym     = (payload.symbol || "").toUpperCase().replace(/[^A-Z]/g, "");
           const source  = payload.source || "indicator";
