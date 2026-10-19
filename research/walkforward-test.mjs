@@ -18,12 +18,23 @@ async function getCandles(symbol) {
       .sort((a,b) => a.ts - b.ts);
   } catch (e) {
     console.log('Binance fallback for ' + symbol + ': ' + e.message);
-    const url2 = 'https://api.bitget.com/api/v2/spot/market/candles?symbol=' + symbol + '&granularity=1H&limit=1000';
-    const r2 = await fetch(url2,{signal:AbortSignal.timeout(14000)});
-    if (!r2.ok) throw new Error('BitGet HTTP ' + r2.status);
-    const d = await r2.json();
-    if (!Array.isArray(d.data) || d.data.length < 550) throw new Error('Insufficient BitGet candles: ' + (d.data?.length || 0));
-    return d.data.map(k=>({ts:+k[0],open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]})).sort((a,b)=>a.ts-b.ts);
+    // v3 accepts SPOT, interval=1H and up to 1000 bars; v2 uses granularity=1h.
+    const candidates = [
+      'https://api.bitget.com/api/v3/market/candles?category=SPOT&symbol=' + symbol + '&interval=1H&limit=1000',
+      'https://api.bitget.com/api/v2/spot/market/candles?symbol=' + symbol + '&granularity=1h&limit=1000'
+    ];
+    let lastError = '';
+    for (const candidate of candidates) {
+      try {
+        const r2 = await fetch(candidate, {signal:AbortSignal.timeout(14000)});
+        if (!r2.ok) throw new Error('HTTP ' + r2.status);
+        const d = await r2.json();
+        if (d.code !== '00000' || !Array.isArray(d.data) || d.data.length < 550)
+          throw new Error('bad response ' + String(d.code||'none') + ' bars:' + (d.data?.length||0));
+        return d.data.map(k=>({ts:+k[0],open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]})).sort((a,b)=>a.ts-b.ts);
+      } catch (f) { lastError = f.message; }
+    }
+    throw new Error('BitGet candle endpoints unavailable: ' + lastError);
   }
 }
 function prep(c) {
