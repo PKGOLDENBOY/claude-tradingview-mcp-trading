@@ -343,8 +343,11 @@ function countTodaysEntries(log) {
 }
 // True if today's entry budget is already spent. Reads the persisted log so it survives redeploys.
 function entryCapReached() {
-  try { return countTodaysEntries(loadLog()) >= MAX_ENTRIES_PER_DAY; }
-  catch { return true; } // fail closed when ledger is inaccessible
+  try {
+    const state = loadLog();
+    if (state._tradingHaltReason || (state.unconfirmedOrders || []).length > 0) return true;
+    return countTodaysEntries(state) >= MAX_ENTRIES_PER_DAY;
+  } catch { return true; } // fail closed when ledger is inaccessible
 }
 
 // Per-coin latest scan data — shown in dashboard coin detail view
@@ -2436,8 +2439,13 @@ async function getSpotBalance(coin) {
     },
   });
   const data = await res.json();
-  const asset = data.data?.find(a => a.coin === coin);
-  return parseFloat(asset?.available ?? "0");
+  if (!res.ok || data.code !== "00000" || !Array.isArray(data.data)) {
+    throw new Error("BitGet balance unavailable: fail closed rather than assume zero");
+  }
+  const asset = data.data.find(a => a.coin === coin);
+  const amount = Number(asset?.available ?? "0");
+  if (!Number.isFinite(amount) || amount < 0) throw new Error("Invalid BitGet spot balance");
+  return amount;
 }
 
 async function getSpotBalanceTotal(coin) {
@@ -3649,6 +3657,11 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
     console.log(`⛔ BUY BLOCKED [placeBitGetOrder] — ${symbol} is hard-blacklisted. Skipping.`);
     return { blocked: true, code: "HARD_BLACKLIST", reason: "Coin is hard-blacklisted" };
   }
+  // Capture pre-trade inventory BEFORE sending a market order.
+  // Previously this was sampled after placement, making successful fills appear
+  // as zero and leading to invented quantities and potential duplicate buys.
+  const spotBuyBalanceBefore = CONFIG.tradeMode === "spot" && side === "buy"
+    ? await getSpotBalance(symbol.replace("USDT", "")) : null;
   const timestamp = await getBitGetServerTime();
   const path =
     CONFIG.tradeMode === "spot"
@@ -3709,7 +3722,7 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
   // For spot BUY: verify coins actually landed — track incremental gain only (not dust)
   if (CONFIG.tradeMode === "spot" && side === "buy") {
     const baseCoin = symbol.replace("USDT", "");
-    const balanceBefore = await getSpotBalance(baseCoin);
+    const balanceBefore = spotBuyBalanceBefore;
     // Retry up to 3 times with increasing delays (some coins settle slowly)
     let received = 0;
     for (const delay of [3000, 4000, 5000]) {
@@ -3719,11 +3732,19 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
       if (received > 0) break;
     }
     const minExpected = sizeUSD / price * 0.90; // allow 10% slippage
-    if (received < minExpected) {
-      // Log the position anyway using estimated qty — don't throw, order was placed
-      const estimatedQty = sizeUSD / price;
-      console.log(`⚠️  Balance check uncertain — using estimated qty ${estimatedQty.toFixed(6)} ${baseCoin} (received: ${received.toFixed(6)})`);
-      return { ...data.data, confirmedQty: estimatedQty };
+    if (received <= 0 || received < minExpected) {
+      // Do not fabricate a base-asset quantity when a real fill cannot be verified.
+      // Freeze further buys; a human must reconcile the exchange order ID.
+      _tradingPaused = true;
+      const state = loadLog();
+      state._tradingHaltReason = "UNCONFIRMED_BITGET_BUY_FILL";
+      state.unconfirmedOrders = [...(state.unconfirmedOrders || []), {
+        symbol, side, orderId: data.data?.orderId ?? null, clientOid: data.data?.clientOid ?? null,
+        observedQty: received, expectedMinimumQty: minExpected, time: new Date().toISOString(),
+      }];
+      saveLog(state);
+      throw new Error("UNCONFIRMED_BITGET_BUY_FILL: order " + (data.data?.orderId || "unknown") +
+        " was submitted but received quantity " + received + " is unverified; further buys halted");
     }
     console.log(`✅ Balance confirmed: +${received.toFixed(6)} ${baseCoin} received (pre-existing: ${balanceBefore.toFixed(6)})`);
     return { ...data.data, confirmedQty: received };
