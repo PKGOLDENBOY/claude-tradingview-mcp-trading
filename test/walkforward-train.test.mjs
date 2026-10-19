@@ -79,7 +79,7 @@ test("report distinguishes trade-level returns from account profits",()=>{
   assert.equal(s.n,2);
   assert.equal(s.tradedSymbols,2);
   assert.equal(s.expectancyNetPct,-0.5);
-  assert.match(s.note,/NOT account P&L/);
+  assert.match(s.note,/not account P&L/i);
 });
 test("parameter search is deliberately small and fixed; no automatic live promotion",()=>{
   assert.equal(PARAMETERS.length,8);
