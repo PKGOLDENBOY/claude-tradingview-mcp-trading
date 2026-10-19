@@ -23,6 +23,34 @@ test("history pagination retrieves older than 100 hours, sorted without duplicat
   assert.ok(result.candles.every((c,i)=>i===0||c.time>result.candles[i-1].time));
   assert.equal(result.candles.at(-1).time + HOUR<=now,true,"last partial candle must be excluded");
 });
+test("exclusive API page boundaries lose zero candles under intentional overlap",async()=>{
+  const now=200*HOUR;
+  const requested=[];
+  const fetcher=async(url)=>{
+    const end=Math.floor(Number(new URL(url).searchParams.get("endTime"))/HOUR)*HOUR;
+    requested.push(end);
+    return {ok:true,status:200,json:async()=>({code:"00000",
+      // Strictly BEFORE the rounded end: earliest-1 pagination would skip an hour.
+      data:Array.from({length:100},(_,i)=>[String(end-(i+1)*HOUR),"100","101","99","100","5","500"])})};
+  };
+  const r=await historicalCandles("BTCUSDT",{days:7,now,minBars:165,maxPages:4,
+    fetcher,spacingMs:0,wait:async()=>{}});
+  assert.equal(r.candles.length,168);
+  assert.equal(r.missingBars,0);
+  assert.ok(requested.length>=2);
+  assert.ok(r.candles.every((c,i)=>i===0||c.time-r.candles[i-1].time===HOUR));
+});
+test("historical data gaps make training fail rather than give a false edge",async()=>{
+  const now=200*HOUR;
+  const fetcher=async url=>{
+    const end=Math.floor(Number(new URL(url).searchParams.get("endTime"))/HOUR)*HOUR;
+    return {ok:true,status:200,json:async()=>({code:"00000",
+      data:Array.from({length:100},(_,i)=>[String(end-(i+1)*HOUR),"100","101","99","100","5","500"])
+        .filter(row=>Number(row[0])!==86*HOUR)})};
+  };
+  await assert.rejects(historicalCandles("BTCUSDT",{days:7,now,minBars:150,maxPages:4,
+    fetcher,spacingMs:0,wait:async()=>{}}),/missing 1 hourly candles/);
+});
 test("missing historical data fails research closed, rather than inventing signals",async()=>{
   const fetcher=async()=>({ok:true,status:200,json:async()=>({code:"00000",data:[]})});
   await assert.rejects(historicalCandles("BTCUSDT",{now:200*HOUR,days:7,minBars:130,fetcher,spacingMs:0,wait:async()=>{}}),
