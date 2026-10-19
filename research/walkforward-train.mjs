@@ -280,7 +280,17 @@ export async function main() {
   const result=trainOnDatasets(datasets,now);
   const folder=process.env.RESEARCH_OUTPUT_DIR || "research/out";
   mkdirSync(folder,{recursive:true});
-  const file=folder+"/evaluation-"+new Date(now).toISOString().slice(0,10)+".json";
+  // Save the exact public dataset used for reproducibility and other independent
+  // research models. No credentials, balances or account identifiers are included.
+  const day=new Date(now).toISOString().slice(0,10);
+  const snapshot=folder+"/market-candles-"+day+".json";
+  writeFileSync(snapshot,JSON.stringify({
+    asOf:new Date(now).toISOString(),source:"BitGet public SPOT history-candles",
+    timeframe:"1H",closedOnly:true,periodDays:180,
+    datasets:datasets.map(d=>({symbol:d.symbol,
+      bars:d.candles.map(c=>[c.time,c.open,c.high,c.low,c.close,c.volume])}))
+  }));
+  const file=folder+"/evaluation-"+day+".json";
   writeFileSync(file,JSON.stringify(result,null,2)+"\n");
   console.log("WALK_FORWARD_RESULT "+JSON.stringify({
     status:result.status,trainPassed:result.trainingCandidates,
