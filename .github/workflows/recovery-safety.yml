@@ -16,6 +16,8 @@ jobs:
           node-version: '22'
       - name: Check syntax
         run: node --check bot.js
+      - name: Run behavioral regression tests
+        run: node --test test/recovery.test.mjs
       - name: Check recovery safety gates
         run: |
           node --input-type=module <<'EOF'
