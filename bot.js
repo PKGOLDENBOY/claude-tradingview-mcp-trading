@@ -8600,7 +8600,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     log.swingPositions = { ...(log.swingPositions || {}), [symbol]: {
       open: true, side: "long", entryPrice: paperSwingFill?.fillPrice ?? price, highWatermark: price,
       entryFeeUsd: paperSwingFill?.entryFeeUsd ?? 0,
-      entryTime: new Date().toISOString(), quantity: qty.toFixed(6),
+      entryTime: new Date().toISOString(), quantity: CONFIG.paperTrading ? qty.toFixed(8) : qty.toFixed(6),
       orderId, tradeType: "swing", partialExitDone: false,
       tpPct: btResult.takeProfit, slPct: btResult.stopLoss,
     }};
@@ -8835,7 +8835,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     log.breakoutPositions = { ...(log.breakoutPositions || {}), [symbol]: {
       open: true, side: "long", entryPrice: paperBkFill?.fillPrice ?? price, highWatermark: price,
       entryFeeUsd: paperBkFill?.entryFeeUsd ?? 0,
-      entryTime: new Date().toISOString(), quantity: qty.toFixed(6),
+      entryTime: new Date().toISOString(), quantity: CONFIG.paperTrading ? qty.toFixed(8) : qty.toFixed(6),
       orderId, tradeType: "breakout", breakoutLevel: rangeHigh,
       targetPrice, rangeLow, rangeHigh, tpPct: bkTpPct, slPct: bkSlPct,
     }};
