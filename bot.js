@@ -18,6 +18,7 @@ import { AsyncLocalStorage } from "async_hooks";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import WebSocket from "ws";
+import { startBitgetHeartbeat } from "./lib/bitget-ws-heartbeat.mjs";
 import { fetchMarketCandles } from "./lib/market-data.mjs";
 import { safePositionNotional, paperEntry, paperExit, paperStats, paperPortfolioValuation } from "./lib/risk-engine.mjs";
 import { simulateSwingTrades, swingTradeMetrics } from "./lib/swing-backtest.mjs";
@@ -4035,14 +4036,20 @@ function startPriceStream(symbols) {
   const streamSymbols = [...new Set([...(symbols || []), ...openPositionSymbols()])];
   const ws = new WebSocket("wss://ws.bitget.com/v2/ws/public");
   priceStreamWs = ws;
+  let heartbeat = null;
 
   ws.on("open", () => {
     console.log(`\n📡 WebSocket connected — streaming ${streamSymbols.length} symbols (${openPositionSymbols().length} open positions included)`);
     const args = streamSymbols.map(s => ({ instType: "SPOT", channel: "ticker", instId: s }));
     ws.send(JSON.stringify({ op: "subscribe", args }));
+    heartbeat = startBitgetHeartbeat(ws, {
+      onPong: () => console.log("✅ BitGet WebSocket heartbeat confirmed (plain-text pong)"),
+      onStale: () => console.error("⛔ BitGet WebSocket heartbeat timed out — reconnecting"),
+    });
   });
 
   ws.on("message", (data) => {
+    if (heartbeat?.handleMessage(data.toString())) return;
     try {
       const msg = JSON.parse(data.toString());
       if (msg.event === "pong" || msg.op === "pong") return;
@@ -4053,19 +4060,18 @@ function startPriceStream(symbols) {
     } catch {}
   });
 
-  ws.on("close", () => {
+  ws.on("close", (code) => {
+    heartbeat?.stop();
     if (generation !== _wsGeneration) return; // intentionally replaced — don't reconnect
-    console.log("⚠️  WebSocket disconnected — reconnecting in 5s");
+    console.log("⚠️  WebSocket disconnected (code " + code + ") — reconnecting in 5s");
     setTimeout(() => startPriceStream(CONFIG.symbols), 5000);
   });
 
   ws.on("error", (err) => console.error("WebSocket error:", err.message));
 
-  // BitGet requires a ping within every 30s or the server closes the connection
-  const ping = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ op: "ping" }));
-    else clearInterval(ping);
-  }, 25000);
+  // A plain-text "ping" is sent every 25s by startBitgetHeartbeat.
+  // If no plain-text "pong" arrives within 70s the stale connection is
+  // terminated so the existing generation-safe close handler reconnects.
 
   return ws;
 }
