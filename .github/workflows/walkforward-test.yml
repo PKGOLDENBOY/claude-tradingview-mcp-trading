@@ -1,0 +1,19 @@
+name: Out-of-sample strategy research
+on:
+  push:
+    branches:
+      - research/walkforward-test-oct2026
+  workflow_dispatch:
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate research script
+        run: node --check research/walkforward-test.mjs
+      - name: Run read-only historical test
+        run: node research/walkforward-test.mjs
