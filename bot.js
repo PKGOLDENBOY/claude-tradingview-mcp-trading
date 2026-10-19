@@ -4730,7 +4730,13 @@ async function run(tvSignal = null, symbol = null) {
     if (!position.partialExitDone && livePnlPct >= 2.5) {
       const originalQty = parseFloat(position.quantity);
       const halfQty = originalQty * 0.5;
-      const partialPnlUSD = (price - position.entryPrice) * halfQty;
+      const partialFeeShare = Number(position.entryFeeUsd || 0) * 0.5;
+      const simulatedPartial = CONFIG.paperTrading ? paperExit({
+        entryFillPrice: position.entryPrice, exitMarketPrice: price, quantity: halfQty,
+        entryFeeUsd: partialFeeShare,
+        feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+      }) : null;
+      const partialPnlUSD = simulatedPartial?.pnlUsd ?? ((price - position.entryPrice) * halfQty);
       console.log(`\n📊 PARTIAL TP — up ${livePnlPct.toFixed(2)}%, selling 50% to lock gains`);
       console.log(`   Selling ${halfQty.toFixed(6)} ${symbol} | Locking ~$${partialPnlUSD >= 0 ? "+" : ""}${partialPnlUSD.toFixed(4)}`);
 
@@ -4754,12 +4760,13 @@ async function run(tvSignal = null, symbol = null) {
       if (partialOk) {
         log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + partialPnlUSD;
         // Reload fresh to prevent concurrent writes clobbering other positions
-        try { const _fp = loadLog(); log.positions = { ...(_fp.positions || {}), [symbol]: { ...(_fp.positions?.[symbol] || position), quantity: halfQty.toFixed(6), partialExitDone: true, partialExitPrice: price } }; } catch { log.positions[symbol] = { ...position, quantity: halfQty.toFixed(6), partialExitDone: true, partialExitPrice: price }; }
+        try { const _fp = loadLog(); log.positions = { ...(_fp.positions || {}), [symbol]: { ...(_fp.positions?.[symbol] || position), quantity: halfQty.toFixed(6), entryFeeUsd: partialFeeShare, partialExitDone: true, partialExitPrice: price } }; } catch { log.positions[symbol] = { ...position, quantity: halfQty.toFixed(6), entryFeeUsd: partialFeeShare, partialExitDone: true, partialExitPrice: price }; }
         position = log.positions[symbol]; // use updated position for the rest of this cycle
         const partialEntry = {
           timestamp: new Date().toISOString(), type: "exit", symbol,
           timeframe: CONFIG.timeframe, price, entryPrice: position.entryPrice,
-          pnlPct: livePnlPct, pnlUSD: partialPnlUSD,
+          pnlPct: simulatedPartial?.pnlPct ?? livePnlPct, pnlUSD: partialPnlUSD,
+          feeAdjusted: Boolean(simulatedPartial), exitFeeUSD: simulatedPartial?.exitFeeUsd ?? 0,
           indicators: { ema8, vwap, rsi3 },
           exitReasons: [`Partial TP — locked 50% at +${livePnlPct.toFixed(2)}%`],
           shouldExit: true, quantity: halfQty.toFixed(6),
@@ -4848,16 +4855,22 @@ async function run(tvSignal = null, symbol = null) {
 
     console.log("\n── Decision ─────────────────────────────────────────────\n");
 
-    const pnlPct = ((price - position.entryPrice) / position.entryPrice) * 100;
-    const pnlUSD = (price - position.entryPrice) * parseFloat(position.quantity);
+    const simulatedExit = CONFIG.paperTrading ? paperExit({
+      entryFillPrice: position.entryPrice, exitMarketPrice: price,
+      quantity: Number(position.quantity), entryFeeUsd: Number(position.entryFeeUsd || 0),
+      feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+    }) : null;
+    const pnlPct = simulatedExit?.pnlPct ?? (((price - position.entryPrice) / position.entryPrice) * 100);
+    const pnlUSD = simulatedExit?.pnlUsd ?? ((price - position.entryPrice) * Number(position.quantity));
 
     const logEntry = {
       timestamp: new Date().toISOString(),
       type: "exit",
       symbol,
       timeframe: CONFIG.timeframe,
-      price,
+      price: simulatedExit?.exitFillPrice ?? price,
       entryPrice: position.entryPrice,
+      feeAdjusted: Boolean(simulatedExit), exitFeeUSD: simulatedExit?.exitFeeUsd ?? 0,
       pnlPct,
       pnlUSD,
       indicators: { ema8, vwap, rsi3 },
@@ -5587,7 +5600,7 @@ async function run(tvSignal = null, symbol = null) {
     else if (!weeklyOkForSwing) console.log(`  📊 Strategy: SCALP — weekly trend bearish, no swing`);
     else if (openSwingCount >= SWING.maxOpen) console.log(`  📊 Strategy: SCALP — max swing positions (${SWING.maxOpen}) already open`);
 
-    if (!vwapBounceMode && !(log.swingPositions || {})[symbol]?.open &&
+    if (process.env.INLINE_SWING_ENABLED === "true" && !vwapBounceMode && !(log.swingPositions || {})[symbol]?.open &&
         openSwingCount < SWING.maxOpen && !swingOffHours && weeklyOkForSwing) {
       const swingSetup = scoreSwingSetup(
         closes4h, candlesDay.map(c => c.close), closesWeek,
@@ -6040,7 +6053,7 @@ async function run(tvSignal = null, symbol = null) {
       ].filter(Boolean).length;
       const maxBonus = 8;
       const confidenceMultiplier = bonusSignals >= 6 ? 1.0 : bonusSignals >= 4 ? 0.90 : bonusSignals >= 2 ? 0.75 : 0.60;
-      const finalTradeSize = tradeSize * confidenceMultiplier;
+      const finalTradeSize = Math.min(tradeSize * confidenceMultiplier, sizedOrder(currentPortfolio, 0.05));
       logEntry.tradeSize = finalTradeSize;
       logEntry.entryConfidence = claudeAnalysis?.confidence ?? Math.round(confidenceMultiplier * 100);
       console.log(`\n📊 Confidence score: ${bonusSignals}/${maxBonus} bonus signals → ${(confidenceMultiplier * 100).toFixed(0)}% position size ($${finalTradeSize.toFixed(2)})`);
@@ -6074,7 +6087,10 @@ async function run(tvSignal = null, symbol = null) {
         } else {
           console.log(`  ✅ Slippage: ${slippage.toFixed(3)}% (< 0.3% — price stable, executing)`);
         }
-      } catch { /* non-critical — proceed on fetch failure */ }
+       } catch (err) {
+        console.log("🚫 ENTRY BLOCKED — unable to validate recent market price: " + err.message);
+        slippageOk = false;
+      }
 
       const posTpPct = bearSnapBack ? 0.03 : entryType === "momentum" ? 0.10 : (btResult?.takeProfit ?? 0.08);
       const posSlPct = bearSnapBack ? 0.02 : (btResult?.stopLoss ?? 0.04);
@@ -6084,11 +6100,22 @@ async function run(tvSignal = null, symbol = null) {
         return;
       }
       if (slippageOk && CONFIG.paperTrading) {
-        console.log(`\n📋 PAPER TRADE — would buy ${symbol} ~$${finalTradeSize.toFixed(2)} at market`);
-        console.log(`   (Set PAPER_TRADING=false in .env to place real orders)`);
+        const simBuy = paperEntry({
+          marketPrice: price, notionalUsd: finalTradeSize,
+          feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+        });
+        console.log(`\n📋 PAPER TRADE — simulated buy ${symbol} ${finalTradeSize.toFixed(2)} at ${simBuy.fillPrice.toFixed(6)} including slippage`);
         logEntry.orderPlaced = true;
         logEntry.orderId = `PAPER-${Date.now()}`;
-        log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (finalTradeSize / price).toFixed(6), orderId: logEntry.orderId, entryType, bearMarket: bullTrendWeekly === false, bearSnapBack, tpPct: posTpPct, slPct: posSlPct } };
+        logEntry.price = simBuy.fillPrice;
+        logEntry.paperEntryFeeUsd = simBuy.entryFeeUsd;
+        log.positions = { ...(log.positions || {}), [symbol]: {
+          open: true, side: "long", entryPrice: simBuy.fillPrice, highWatermark: price,
+          entryFeeUsd: simBuy.entryFeeUsd,
+          entryTime: new Date().toISOString(), quantity: simBuy.quantity.toFixed(8),
+          orderId: logEntry.orderId, entryType, bearMarket: bullTrendWeekly === false,
+          bearSnapBack, tpPct: posTpPct, slPct: posSlPct,
+        } };
       } else if (slippageOk) {
         console.log(`\n🔴 PLACING LIVE ORDER — $${finalTradeSize.toFixed(2)} BUY ${symbol}`);
         try {
