@@ -27,6 +27,8 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
       - name: Execute independent regression suites
         run: node --test test/*.test.mjs
+      - name: GET-only BitGet market-data smoke check
+        run: node test/market-smoke.mjs
       - name: Check production never defaults to live exchange orders
         run: |
           node --input-type=module <<'EOF'
