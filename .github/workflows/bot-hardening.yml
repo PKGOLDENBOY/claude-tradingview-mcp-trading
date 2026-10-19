@@ -1,0 +1,28 @@
+name: Bot hardening verification
+on:
+  push:
+    branches: [fix/risk-and-data-hardening-20261019]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install reproducible dependencies
+        run: npm ci --ignore-scripts
+      - name: Syntax checks
+        run: |
+          node --check bot.js
+          node --check lib/market-data.mjs
+          node --check lib/risk-engine.mjs
+      - name: Regression tests
+        run: node --test test/*.test.mjs
+      - name: Audit high and critical vulnerabilities
+        run: npm audit --omit=dev --audit-level=high
