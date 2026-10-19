@@ -3810,8 +3810,7 @@ async function readOnlyBitGetSnapshot() {
 // Always ensure trades.csv exists with headers — open it in Excel/Sheets any time
 function initCsv() {
   if (!existsSync(CSV_FILE)) {
-    const funnyNote = `,,,,,,,,,,,"NOTE","Hey, if you're at this stage of the video, you must be enjoying it... perhaps you could hit subscribe now? :)"`;
-    writeFileSync(CSV_FILE, CSV_HEADERS + "\n" + funnyNote + "\n");
+    writeFileSync(CSV_FILE, CSV_HEADERS + "\n");
     console.log(
       `📄 Created ${CSV_FILE} — open in Google Sheets or Excel to track trades.`,
     );
@@ -3879,17 +3878,21 @@ function writeTradeCsv(logEntry) {
     const pnlStr = logEntry.pnlPct !== undefined
       ? ` P&L: ${logEntry.pnlPct >= 0 ? "+" : ""}${logEntry.pnlPct.toFixed(2)}%`
       : "";
-    if (!logEntry.shouldExit) {
+    if (!logEntry.orderPlaced) {
       mode = "HELD";
       orderId = "HELD";
       notes = claudeTag ?? `Holding${pnlStr}`;
     } else {
-      const val = (parseFloat(logEntry.quantity) * logEntry.price);
+      const qty = Number(logEntry.quantity || 0);
+      const val = qty * Number(logEntry.price || 0);
       side = "SELL";
       quantity = logEntry.quantity;
       totalUSD = val.toFixed(2);
-      fee = (val * getFeePct()).toFixed(4);
-      netAmount = (val - val * getFeePct()).toFixed(2);
+      const exitFee = logEntry.feeAdjusted === true
+        ? Number(logEntry.exitFeeUSD || 0)
+        : val * (logEntry.paperTrading ? PAPER_FEE_FRACTION : getFeePct());
+      fee = exitFee.toFixed(6);
+      netAmount = (val - exitFee).toFixed(4);
       orderId = logEntry.orderId || "";
       mode = logEntry.paperTrading ? "PAPER" : "LIVE";
       notes = claudeTag ?? `Exit: ${logEntry.exitReasons?.join("; ")}${pnlStr}`;
@@ -3904,10 +3907,10 @@ function writeTradeCsv(logEntry) {
     notes = claudeTag ?? `Failed: ${failed}`;
   } else if (logEntry.paperTrading) {
     side = "BUY";
-    quantity = (logEntry.tradeSize / logEntry.price).toFixed(6);
+    quantity = (logEntry.tradeSize / logEntry.price).toFixed(8);
     totalUSD = logEntry.tradeSize.toFixed(2);
-    fee = (logEntry.tradeSize * 0.001).toFixed(4);
-    netAmount = (logEntry.tradeSize - parseFloat(fee)).toFixed(2);
+    fee = Number(logEntry.paperEntryFeeUsd ?? (logEntry.tradeSize * PAPER_FEE_FRACTION)).toFixed(6);
+    netAmount = (logEntry.tradeSize - parseFloat(fee)).toFixed(4);
     orderId = logEntry.orderId || "";
     mode = "PAPER";
     notes = claudeTag ?? "All conditions met";
@@ -3929,13 +3932,13 @@ function writeTradeCsv(logEntry) {
     logEntry.symbol,
     side,
     quantity,
-    logEntry.price.toFixed(2),
+    Number(logEntry.price).toFixed(8),
     totalUSD,
     fee,
     netAmount,
     orderId,
     mode,
-    `"${notes}"`,
+    `"${String(notes).replace(/"/g, '""')}"`,
   ].join(",");
 
   if (!existsSync(CSV_FILE)) {
@@ -8468,6 +8471,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         const exitEntry = {
           timestamp: new Date().toISOString(), type: "exit", symbol,
           timeframe: SWING.tf, price: simulated?.exitFillPrice ?? price,
+          quantity: swingPos.quantity, entryPrice: swingPos.entryPrice, orderId: swingPos.orderId,
           pnlPct: simulated?.pnlPct ?? pnlPct, pnlUSD,
           exitFeeUSD: simulated?.exitFeeUsd ?? 0, feeAdjusted: Boolean(simulated),
           reasons: exitReasons, orderPlaced: true,
@@ -8707,6 +8711,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         const exitEntry = {
           timestamp: new Date().toISOString(), type: "exit", symbol, timeframe: "1H",
           price: simulated?.exitFillPrice ?? price,
+          quantity: bkPos.quantity, entryPrice: bkPos.entryPrice, orderId: bkPos.orderId,
           pnlPct: simulated?.pnlPct ?? pnlPct, pnlUSD: +pnlUSD.toFixed(4), reasons: exitReasons,
           exitFeeUSD: simulated?.exitFeeUsd ?? 0, feeAdjusted: Boolean(simulated),
           orderPlaced: true, paperTrading: CONFIG.paperTrading, tradeType: "breakout",
