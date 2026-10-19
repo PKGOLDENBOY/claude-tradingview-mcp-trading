@@ -8335,18 +8335,40 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         saveLog(log);
       }
 
-      // Partial exit at +5%
+      // Partial profit is an actual realized exit, not just a quantity reduction.
       if (!swingPos.partialExitDone && pnlPct >= SWING.partialAt * 100) {
-        const partialQty = parseFloat(swingPos.quantity) * SWING.partialQty;
-        console.log(`\n📈 SWING PARTIAL TP — ${symbol} +${pnlPct.toFixed(2)}% | selling 30%`);
-        if (!CONFIG.paperTrading) {
-          try { await placeOrder(symbol, "sell", null, price, partialQty.toFixed(6)); }
-          catch (e) { console.log(`  ⚠️ Partial failed: ${e.message}`); }
+        const beforeQty = Number(swingPos.quantity);
+        const partialQty = Number((beforeQty * SWING.partialQty).toFixed(6));
+        if (partialQty > 0) {
+          console.log(`\n📈 SWING PARTIAL TP — ${symbol} +${pnlPct.toFixed(2)}% | selling 30%`);
+          if (!CONFIG.paperTrading) {
+            try { await placeOrder(symbol, "sell", null, price, partialQty.toFixed(6)); }
+            catch (e) { console.log(`  ⚠️ Partial failed: ${e.message}`); return; }
+          }
+          const proportionalBuyFee = Number(swingPos.entryFeeUsd || 0) * (partialQty / beforeQty);
+          const partialFill = CONFIG.paperTrading ? paperExit({
+            entryFillPrice: swingPos.entryPrice, exitMarketPrice: price, quantity: partialQty,
+            entryFeeUsd: proportionalBuyFee,
+            feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+          }) : null;
+          const realizedUSD = partialFill?.pnlUsd ?? ((price - swingPos.entryPrice) * partialQty);
+          swingPos.quantity = (beforeQty - partialQty).toFixed(6);
+          swingPos.entryFeeUsd = Math.max(0, Number(swingPos.entryFeeUsd || 0) - proportionalBuyFee);
+          swingPos.partialExitDone = true;
+          log.swingPositions[symbol] = swingPos;
+          log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + realizedUSD;
+          const partialRecord = {
+            timestamp: new Date().toISOString(), type: "exit", symbol,
+            tradeType: "swing", timeframe: SWING.tf, paperTrading: CONFIG.paperTrading,
+            partial: true, orderPlaced: true, quantity: partialQty,
+            price: partialFill?.exitFillPrice ?? price, pnlUSD: realizedUSD,
+            pnlPct: partialFill?.pnlPct ?? pnlPct, feeAdjusted: Boolean(partialFill),
+            exitFeeUSD: partialFill?.exitFeeUsd ?? 0,
+          };
+          log.trades.push(partialRecord);
+          saveLog(log);
+          writeTradeCsv(partialRecord);
         }
-        swingPos.quantity = (parseFloat(swingPos.quantity) - partialQty).toFixed(6);
-        swingPos.partialExitDone = true;
-        log.swingPositions[symbol] = swingPos;
-        saveLog(log);
       }
 
       // Stepped profit lock on ATR trail
@@ -8371,7 +8393,12 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       if (!dailyBull && pnlPct < -1)        exitReasons.push(`Daily trend reversed at ${pnlPct.toFixed(1)}%`);
 
       if (exitReasons.length > 0) {
-        const pnlUSD = (price - swingPos.entryPrice) * parseFloat(swingPos.quantity);
+        const simulated = CONFIG.paperTrading ? paperExit({
+          entryFillPrice: swingPos.entryPrice, exitMarketPrice: price,
+          quantity: Number(swingPos.quantity), entryFeeUsd: Number(swingPos.entryFeeUsd || 0),
+          feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+        }) : null;
+        const pnlUSD = simulated?.pnlUsd ?? ((price - swingPos.entryPrice) * Number(swingPos.quantity));
         console.log(`\n📈 SWING EXIT — ${symbol} | ${exitReasons.join(" | ")}`);
         console.log(`   P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% ($${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(4)}) | Held ${holdH.toFixed(1)}h`);
 
@@ -8384,7 +8411,9 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
         const exitEntry = {
           timestamp: new Date().toISOString(), type: "exit", symbol,
-          timeframe: SWING.tf, price, pnlPct, pnlUSD,
+          timeframe: SWING.tf, price: simulated?.exitFillPrice ?? price,
+          pnlPct: simulated?.pnlPct ?? pnlPct, pnlUSD,
+          exitFeeUSD: simulated?.exitFeeUsd ?? 0, feeAdjusted: Boolean(simulated),
           reasons: exitReasons, orderPlaced: true,
           paperTrading: CONFIG.paperTrading, tradeType: "swing",
         };
@@ -8482,7 +8511,11 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     console.log(`   TP: +${(btResult.takeProfit * 100).toFixed(0)}% | Stop: -${(btResult.stopLoss * 100).toFixed(0)}% | Size: $${swingSize.toFixed(2)}`);
     if (dblBtm?.detected) console.log(`   🔔 Double bottom${dblBtm.strongConfirmation ? " + RSI divergence" : ""}`);
 
-    let qty = swingSize / price;
+    const paperSwingFill = CONFIG.paperTrading ? paperEntry({
+      marketPrice: price, notionalUsd: swingSize,
+      feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+    }) : null;
+    let qty = paperSwingFill?.quantity ?? (swingSize / price);
     let orderId = `PAPER-SWING-${Date.now()}`;
 
     if (!CONFIG.paperTrading) {
@@ -8503,7 +8536,8 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
 
     log.swingPositions = { ...(log.swingPositions || {}), [symbol]: {
-      open: true, side: "long", entryPrice: price, highWatermark: price,
+      open: true, side: "long", entryPrice: paperSwingFill?.fillPrice ?? price, highWatermark: price,
+      entryFeeUsd: paperSwingFill?.entryFeeUsd ?? 0,
       entryTime: new Date().toISOString(), quantity: qty.toFixed(6),
       orderId, tradeType: "swing", partialExitDone: false,
       tpPct: btResult.takeProfit, slPct: btResult.stopLoss,
@@ -8518,7 +8552,8 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
     const entryLog = {
       timestamp: new Date().toISOString(), type: "entry", symbol,
-      timeframe: SWING.tf, price, tradeSize: swingSize,
+      timeframe: SWING.tf, price: paperSwingFill?.fillPrice ?? price, tradeSize: swingSize,
+      paperEntryFeeUsd: paperSwingFill?.entryFeeUsd ?? 0,
       indicators: { rsi3, rsi14, vwap, ema8, ema21, adx: adx?.adx },
       liquidity: liquiditySnapshot(symbol),
       score, entryConfidence: Math.round(Math.min(score, 9) / 9 * 100),
