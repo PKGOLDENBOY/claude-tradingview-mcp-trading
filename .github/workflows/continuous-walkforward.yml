@@ -5,8 +5,13 @@ on:
     paths:
       - 'research/walkforward-train.mjs'
       - 'test/walkforward-train.test.mjs'
+      - 'research/train-ml.mjs'
+      - 'test/ml-training.test.mjs'
       - '.github/workflows/continuous-walkforward.yml'
   workflow_dispatch:
+concurrency:
+  group: alpha-research-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -24,9 +29,12 @@ jobs:
       - name: Verify no look-ahead and honest execution assumptions
         run: |
           node --check research/walkforward-train.mjs
-          node --test test/walkforward-train.test.mjs
+          node --check research/train-ml.mjs
+          node --test test/walkforward-train.test.mjs test/ml-training.test.mjs
       - name: Collect 180 days of public SPOT data and evaluate untouched holdout
         run: node research/walkforward-train.mjs
+      - name: Train conservative statistical model and validate without lookahead
+        run: node research/train-ml.mjs
       - name: Archive timestamped research evidence
         if: always()
         uses: actions/upload-artifact@v4
