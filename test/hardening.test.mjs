@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createCandleClient, normaliseCandles } from "../lib/market-data.mjs";
-import { safePositionNotional, paperEntry, paperExit, paperStats } from "../lib/risk-engine.mjs";
+import { safePositionNotional, paperEntry, paperExit, paperStats, paperPortfolioValuation } from "../lib/risk-engine.mjs";
 
 function row(ts, price = 100) {
   return [String(ts),String(price),String(price+1),String(price-1),String(price), "10"];
@@ -77,4 +77,49 @@ test("paper dashboard metrics never present an open position as closed profit",(
   assert.equal(a.feeAdjustedExits,2);
   assert.equal(a.wins,1);
   assert.ok(Math.abs(a.realizedPnlUsd-0.45)<1e-8);
+});
+
+test("paper equity does NOT double-count holdings on top of starting capital",()=>{
+  const portfolio=paperPortfolioValuation({
+    portfolioValue:100,
+    positions:{BTCUSDT:{open:true,entryPrice:100.1,quantity:0.1,entryFeeUsd:0.01}}
+  },{BTCUSDT:{price:100,updatedAt:new Date().toISOString()}},
+  {startingEquityUsd:100});
+  assert.ok(portfolio.equityUsd>99.9 && portfolio.equityUsd<100);
+  assert.ok(portfolio.cashUsd>89.9 && portfolio.cashUsd<90.1);
+  assert.ok(portfolio.openLiquidationValueUsd>9.9);
+  assert.ok(portfolio.unrealizedPnlUSD<0);
+  assert.equal(portfolio.staleQuotes,0);
+});
+test("paper equity accounts for swing + breakout and flags old marks",()=>{
+  const log={portfolioValue:100,swingPositions:{BTCUSDT:{open:true,entryPrice:100,quantity:0.1}},
+    breakoutPositions:{ETHUSDT:{open:true,entryPrice:100,quantity:0.1}}};
+  const x=paperPortfolioValuation(log,{BTCUSDT:{price:110,updatedAt:new Date().toISOString()}});
+  assert.equal(x.positions.length,2);
+  assert.equal(x.staleQuotes,1);
+  assert.ok(x.cashUsd<81 && x.cashUsd>79);
+  assert.ok(x.equityUsd<110 && x.equityUsd>100);
+});
+test("paper allocation report flags positions that exceed virtual cash",()=>{
+  const log={portfolioValue:100,positions:{BTCUSDT:{open:true,entryPrice:100,quantity:1.5}}};
+  const x=paperPortfolioValuation(log,{BTCUSDT:{price:100,updatedAt:new Date().toISOString()}});
+  assert.equal(x.overAllocated,true);
+  assert.ok(x.cashUsd<0);
+});
+test("market data refuses repeated 429s rather than hammering fallback endpoints",async()=>{
+  let requests=0;
+  const client=createCandleClient({fetcher:async()=>{requests++;return{status:429,ok:false,headers:{get:()=>null}};},
+    pause:async()=>{},spacingMs:0,cache:new Map(),maxRetries:1});
+  await assert.rejects(client("BTCUSDT","1H",10),/429/);
+  assert.equal(requests,2);
+});
+test("parallel identical candle requests share one in-flight HTTP request",async()=>{
+  let requests=0;
+  const client=createCandleClient({fetcher:async()=>{requests++;await Promise.resolve();
+    return{status:200,ok:true,json:async()=>({code:"00000",data:[row(1000),row(2000)]})};},
+    pause:async()=>{},spacingMs:0,cache:new Map(),maxRetries:0});
+  const [a,b,c]=await Promise.all(["BTCUSDT","BTCUSDT","BTCUSDT"].map(sym=>client(sym,"1H")));
+  assert.equal(requests,1);
+  assert.deepEqual(a,b);
+  assert.deepEqual(b,c);
 });
