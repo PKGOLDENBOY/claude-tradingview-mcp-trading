@@ -18,6 +18,8 @@ import { AsyncLocalStorage } from "async_hooks";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import WebSocket from "ws";
+import { fetchMarketCandles } from "./lib/market-data.mjs";
+import { safePositionNotional, paperEntry, paperExit, paperStats } from "./lib/risk-engine.mjs";
 // ─── Email notifications (Resend — HTTP, no SMTP, works on Railway) ──────────
 
 const EXCHANGE_WRITES_ALLOWED = process.env.PAPER_TRADING === "false" && process.env.LIVE_TRADING_ENABLED === "true";
@@ -452,6 +454,19 @@ const WATCHLIST = [...new Set([
 
 // Recovery test mode: scanning only the selected symbols avoids excessive exchange API calls.
 const ENABLE_MOVER_DISCOVERY = process.env.ENABLE_MOVER_DISCOVERY !== "false";
+const PAPER_FEE_FRACTION = 0.001; // 0.10% per side in simulations
+const PAPER_SLIPPAGE_FRACTION = 0.001; // 0.10% per side in simulations
+const MAX_NEW_ORDER_RISK = 0.01; // 1% equity loss budget for a stopped trade
+function sizedOrder(portfolioUsd, stopFraction) {
+  return safePositionNotional({
+    portfolioUsd, stopFraction,
+    absoluteLimitUsd: CONFIG.maxTradeSizeUSD,
+    fractionLimit: CONFIG.maxTradeSizePct ?? 0.15,
+    riskFraction: MAX_NEW_ORDER_RISK,
+    feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+    minSizeUsd: 5,
+  });
+}
 const CONFIG = {
   symbols: (process.env.SYMBOLS || process.env.SYMBOL || "NEARUSDT,BNBUSDT,LINKUSDT,SOLUSDT,INJUSDT,ADAUSDT,DOTUSDT,ZECUSDT,KAVAUSDT,AXSUSDT")
     .replace(/^SYMBOLS=/i, "")
@@ -1212,34 +1227,7 @@ async function refreshTopMovers() {
 // ─── Market Data (BitGet public API — free, no auth) ────────────────────────
 
 async function fetchCandles(symbol, interval, limit = 100) {
-  const intervalMap = {
-    "1m": "1min",
-    "3m": "3min",
-    "5m": "5min",
-    "15m": "15min",
-    "30m": "30min",
-    "1H": "1h",
-    "4H": "4h",
-    "1D": "1day",
-    "1W": "1week",
-  };
-  const granularity = intervalMap[interval] || "1h";
-
-  const url = `https://api.bitget.com/api/v2/spot/market/candles?symbol=${symbol}&granularity=${granularity}&limit=${Math.min(limit, 1000)}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
-  if (!res.ok) throw new Error(`BitGet market data error: ${res.status}`);
-  const json = await res.json();
-  if (json.code !== "00000") throw new Error(`BitGet API error: ${json.msg}`);
-
-  // BitGet returns oldest-first (ascending) — no reverse needed
-  return json.data.map((k) => ({
-    time: parseInt(k[0]),
-    open: parseFloat(k[1]),
-    high: parseFloat(k[2]),
-    low: parseFloat(k[3]),
-    close: parseFloat(k[4]),
-    volume: parseFloat(k[5]),
-  }));
+  return fetchMarketCandles(symbol, interval, limit);
 }
 
 // ─── Indicator Calculations ──────────────────────────────────────────────────
@@ -8485,7 +8473,8 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     if (entryCapReached()) { pushSignal(symbol, "BLOCKED", "Swing entry cap reached"); return; }
 
     const portfolio  = log.portfolioValue || acct().portfolioValue;
-    const swingSize  = portfolio * SWING.sizePct;
+    const swingSize = Math.min(portfolio * SWING.sizePct, sizedOrder(portfolio, btResult.stopLoss ?? SWING.stopLoss));
+    if (!swingSize) { console.log("🛡️  Swing skipped: notional below exchange minimum after risk cap"); return; }
 
     console.log(`\n📈 SWING ENTRY — ${symbol} | Score:${score}/10 | BT:${btResult.recommendation}`);
     console.log(`   Weekly: ${weeklyBull ? "✅ bullish" : "❌"} RSI:${weeklyRsi14.toFixed(0)} | Daily: ${dailyBull ? "✅ uptrend" : "❌"} RSI:${dailyRsi14.toFixed(0)} ${dailyAbove50 ? "above 50MA ✅" : "below 50MA ⚠️"}`);
@@ -8704,7 +8693,8 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
 
     const portfolio = log.portfolioValue || acct().portfolioValue;
-    const bkSize = portfolio * 0.15;
+    const bkSize = sizedOrder(portfolio, 0.03);
+    if (!bkSize) { console.log("🛡️  Breakout skipped: notional below exchange minimum after risk cap"); return; }
     if (entryCapReached()) { pushSignal(symbol, "BLOCKED", "Breakout entry cap reached"); return; }
 
     console.log(`\n🚀 BREAKOUT ENTRY — ${symbol} | Regime:${regime.regime}`);
