@@ -3761,6 +3761,8 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
 //   2. /data/trades.csv — create /data if it doesn't exist yet (Railway volume or ephemeral)
 //   3. trades.csv relative (local dev)
 function resolveCSVPath() {
+  // An isolated trial can keep its own CSV instead of mixing with past simulations.
+  if (CONFIG.paperTrading && process.env.PAPER_CSV_FILE) return process.env.PAPER_CSV_FILE;
   if (process.env.STATE_FILE) {
     return process.env.STATE_FILE.replace(/[^/\\]+$/, CONFIG.paperTrading ? "trades-paper.csv" : "trades.csv");
   }
