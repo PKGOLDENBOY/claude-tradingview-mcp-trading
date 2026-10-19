@@ -20,6 +20,7 @@ import { execSync } from "child_process";
 import WebSocket from "ws";
 import { fetchMarketCandles } from "./lib/market-data.mjs";
 import { safePositionNotional, paperEntry, paperExit, paperStats } from "./lib/risk-engine.mjs";
+import { simulateSwingTrades, swingTradeMetrics } from "./lib/swing-backtest.mjs";
 // ─── Email notifications (Resend — HTTP, no SMTP, works on Railway) ──────────
 
 const EXCHANGE_WRITES_ALLOWED = process.env.PAPER_TRADING === "false" && process.env.LIVE_TRADING_ENABLED === "true";
@@ -827,12 +828,11 @@ function runBacktestSim(candles, rsiThreshold, takeProfit, stopLoss = 0.04, feeR
   // Round-trip taker fee (entry + exit). Live BitGet is 0.064%/side w/ BGB → 0.128% round-trip.
   // Baking this in is the single biggest honesty fix: without it a +0.1% scalp counts as a "win"
   // that is actually a net loss live — the root of the old 75%-backtest-vs-35%-live gap.
-  const fee = feeRT ?? getFeePct() * 2;
+  const fee = feeRT ?? (Math.max(getFeePct(), PAPER_FEE_FRACTION) * 2 + PAPER_SLIPPAGE_FRACTION * 2);
   const closes = candles.map(c => c.close);
   const ema8 = calcEMASeries(closes, 8);
   const rsi = calcRSI3Series(closes);
   const vwap = calcVWAPSeries(candles);
-  const avgVol = candles.slice(0, 20).reduce((s, c) => s + c.volume, 0) / 20;
   const trades = [];
   let inTrade = false, entry = 0, bar = 0;
   for (let i = 30; i < candles.length - 1; i++) {
@@ -854,6 +854,7 @@ function runBacktestSim(candles, rsiThreshold, takeProfit, stopLoss = 0.04, feeR
     }
     const p = candles[i].close, rv = rsi[i];
     if (rv === null || rv === undefined) continue;
+    const avgVol = candles.slice(i - 20, i).reduce((sum, c) => sum + c.volume, 0) / 20;
     if (p > vwap[i] && p > ema8[i] && rv < rsiThreshold &&
         Math.abs((p - vwap[i]) / vwap[i]) < 0.03 &&
         candles[i].volume > avgVol * 0.8) {
@@ -904,7 +905,7 @@ async function backtestCoin(symbol) {
   // 2. Validate those parameters on the most recent 7 days (out-of-sample)
   // 3. Only trade if the strategy holds on recent market conditions
   // This prevents over-fitting to conditions that no longer exist
-  const candles = await fetchCandles(symbol, "1H", 800); // ~33 days of hourly data
+  const candles = await fetchMarketCandles(symbol, "1H", 800, { closedOnly: true }); // only finalized candles
 
   if (candles.length < 200) {
     // Not enough history for walk-forward — use simple backtest
@@ -954,32 +955,17 @@ async function backtestCoin(symbol) {
 // ─── Swing Backtest ──────────────────────────────────────────────────────────
 
 function runSwingBacktestSim(candles4h, rsiThreshold, takeProfit = 0.10, stopLoss = 0.05) {
-  // Mega-backtest validated signal: dip-buy below VWAP in uptrend (69% OOS WR)
   const closes = candles4h.map(c => c.close);
-  const ema8   = calcEMASeries(closes, 8);
-  const ema21  = calcEMASeries(closes, 21);
-  const rsi3   = calcRSI3Series(closes);
-  const vwap   = calcVWAPSeries(candles4h);
-  const maxBars = 48; // 48 × 4H = 8 days (mega-backtest winner)
-  const trades = [];
-  let inTrade = false, entry = 0, bar = 0;
-  for (let i = 30; i < candles4h.length - 1; i++) {
-    if (inTrade) {
-      const pct = (candles4h[i].close - entry) / entry;
-      if (pct >= takeProfit || pct <= -stopLoss || (i - bar) >= maxBars) {
-        trades.push({ pct: pct * 100, win: pct > 0 });
-        inTrade = false;
-      }
-      continue;
-    }
-    const p = candles4h[i].close, rv = rsi3[i];
-    if (rv === null || rv === undefined) continue;
-    // Buy the dip: price at/below VWAP + uptrend (EMA8 > EMA21) + RSI oversold
-    if (p <= vwap[i] * 1.01 && ema8[i] > ema21[i] && rv < rsiThreshold) {
-      inTrade = true; entry = candles4h[i + 1].open; bar = i + 1;
-    }
-  }
-  return trades;
+  const indicators = {
+    ema8: calcEMASeries(closes, 8),
+    ema21: calcEMASeries(closes, 21),
+    rsi3: calcRSI3Series(closes),
+    vwap: calcVWAPSeries(candles4h),
+  };
+  return simulateSwingTrades(candles4h, rsiThreshold, takeProfit, stopLoss, indicators, {
+    feeFraction: PAPER_FEE_FRACTION,
+    slippageFraction: PAPER_SLIPPAGE_FRACTION, maxHoldBars: 48,
+  });
 }
 
 function optimiseSwingCoin(candles4h) {
@@ -989,14 +975,14 @@ function optimiseSwingCoin(candles4h) {
       for (const sl of [0.04, 0.05, 0.06]) { // mega-backtest winner: 5%
         if (tp / sl < 1.5) continue; // enforce minimum R:R
         const trades = runSwingBacktestSim(candles4h, rsi, tp, sl);
-        if (trades.length < 3) continue;
+        if (trades.length < 8) continue; // reject tiny lucky training samples
         const wins = trades.filter(t => t.win), losses = trades.filter(t => !t.win);
         const wr  = wins.length / trades.length;
         const aw  = wins.length   > 0 ? wins.reduce((s, t) => s + t.pct, 0)   / wins.length   : 0;
         const al  = losses.length > 0 ? losses.reduce((s, t) => s + t.pct, 0) / losses.length : 0;
         const exp = wr * aw + (1 - wr) * al;
         if (wr < 0.55 || exp <= 0) continue;
-        const score = wr * exp;
+        const score = exp * Math.sqrt(trades.length);
         if (!best || score > best.score) {
           best = { rsiThreshold: rsi, takeProfit: tp, stopLoss: sl,
             trades: trades.length, winRate: +(wr * 100).toFixed(1),
@@ -1006,7 +992,7 @@ function optimiseSwingCoin(candles4h) {
     }
   }
   if (!best) return { trades: 0, winRate: 0, recommendation: "SKIP", rsiThreshold: 35, takeProfit: 0.08, stopLoss: 0.04 };
-  return { ...best, recommendation: best.winRate >= 65 ? "TRADE" : "CAUTION" };
+  return { ...best, recommendation: "CAUTION" }; // Train only; OOS must still pass.
 }
 
 async function backtestSwingCoin(symbol) {
@@ -1016,12 +1002,12 @@ async function backtestSwingCoin(symbol) {
   }
 
   let candles;
-  try { candles = await fetchCandles(symbol, "4H", 200); }
+  try { candles = await fetchMarketCandles(symbol, "4H", 800, { closedOnly: true }); }
   catch { return { recommendation: "SKIP", trades: 0 }; }
   if (!candles || candles.length < 60) return { recommendation: "SKIP", trades: 0 };
 
   // Walk-forward: last 7 days (42 × 4H bars) as out-of-sample
-  const oosSize    = Math.min(42, Math.floor(candles.length * 0.25));
+  const oosSize    = Math.floor(candles.length * 0.25); // unseen ~30+ days; need sample
   const inSample   = candles.slice(0, candles.length - oosSize);
   const outSample  = candles.slice(candles.length - oosSize);
 
@@ -1039,14 +1025,17 @@ async function backtestSwingCoin(symbol) {
   const result = { ...inResult, symbol, oosWinRate: +(oosWR * 100).toFixed(1),
     oosTrades: oosTrades.length, testedAt: new Date().toISOString() };
 
-  if (oosTrades.length >= 2 && oosWR < 0.45) {
+  const oosQuality = swingTradeMetrics(oosTrades);
+  result.oosNetExpectancyPct = +oosQuality.expectancyPct.toFixed(3);
+  result.oosProfitFactor = Number.isFinite(oosQuality.profitFactor) ? +oosQuality.profitFactor.toFixed(3) : null;
+  // Reject tiny OOS samples, or an apparent edge that disappears after costs.
+  if (oosTrades.length >= 8 && oosQuality.expectancyPct > 0.2 &&
+      oosQuality.profitFactor > 1.2 && oosQuality.winRate >= 0.55) {
+    result.recommendation = "TRADE";
+    console.log(`  ✅ Swing OOS gate PASSED — ${symbol}: ${oosTrades.length} trades; net expectancy +${oosQuality.expectancyPct.toFixed(2)}%/trade after costs`);
+  } else {
     result.recommendation = "SKIP";
-    console.log(`  🔴 Swing WF FAILED — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}% (need 45%+)`);
-  } else if (oosTrades.length >= 2 && oosWR < 0.55) {
-    result.recommendation = "CAUTION";
-    console.log(`  ⚠️  Swing WF CAUTION — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}%`);
-  } else if (oosTrades.length >= 2) {
-    console.log(`  ✅ Swing WF PASSED — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}% | exp +${oosExp.toFixed(2)}%`);
+    console.log(`  🛑 Swing OOS gate FAILED — ${symbol}: ${oosTrades.length} trades; net ${oosQuality.expectancyPct.toFixed(2)}%/trade after costs (require >=8 and positive net edge)`);
   }
 
   SWING_BACKTEST[symbol] = result;
