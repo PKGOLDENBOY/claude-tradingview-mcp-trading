@@ -4457,7 +4457,15 @@ async function run(tvSignal = null, symbol = null) {
   const learnedSource = log?.learnedThresholds?.[symbol]?.basedOnTrades >= 5 ? "live" : "backtest";
   console.log(`\nStrategy: ${rules.strategy.name} v4`);
   console.log(`Symbol: ${symbol} | TF: ${entryTF}${bt ? ` (${learnedSource}: WR ${log?.learnedThresholds?.[symbol]?.winRate ?? bt.winRate}%, RSI gate <${coinRsiThreshold})` : " (default)"}`);
-  const withinLimits = checkTradeLimits(log);
+  // The daily cap applies to simulated and live buys across every strategy.
+  // Existing positions must still be monitored and allowed to exit.
+  const isNewScalpEntry = !((log.positions || {})[symbol]?.open) && tvSignal !== "SELL";
+  if (isNewScalpEntry && entryCapReached()) {
+    console.log(`⛔ ENTRY CAP — no new ${CONFIG.paperTrading ? "paper" : "live"} entries (${countTodaysEntries(log)}/${MAX_ENTRIES_PER_DAY} today)`);
+    pushSignal(symbol, "BLOCKED", "Global daily entry cap reached");
+    return;
+  }
+  const withinLimits = !isNewScalpEntry || checkTradeLimits(log);
   if (!withinLimits) {
     console.log("\nBot stopping — trade limits reached for today.");
     pushSignal(symbol, "BLOCKED", "Daily trade limit reached");
@@ -4465,7 +4473,7 @@ async function run(tvSignal = null, symbol = null) {
   }
 
   // Manual pause via dashboard
-  if (_tradingPaused && tvSignal !== "SELL") {
+  if (_tradingPaused && isNewScalpEntry) {
     console.log("\n⏸ Trading paused via dashboard — skipping entry");
     pushSignal(symbol, "BLOCKED", "Trading paused via dashboard");
     return;
@@ -4473,7 +4481,7 @@ async function run(tvSignal = null, symbol = null) {
 
   // Daily stop loss (3%) — halt on losses. Daily target (3%) is a milestone, not a ceiling.
   const drawdown = checkDailyDrawdown(log);
-  if (drawdown.paused) {
+  if (drawdown.paused && isNewScalpEntry) {
     console.log(`\n🛑 DAILY STOP LOSS — down ${drawdown.drawdownPct.toFixed(2)}% today ($${Math.abs(drawdown.totalLoss).toFixed(2)} lost). No more trades until tomorrow.`);
     pushSignal(symbol, "BLOCKED", `Daily stop — down ${drawdown.drawdownPct.toFixed(1)}% today`);
     console.log("═══════════════════════════════════════════════════════════\n");
@@ -5167,6 +5175,7 @@ async function run(tvSignal = null, symbol = null) {
       if (!regimeOk) {
         console.log(`🚫 MOMENTUM BLOCK — momentum entries are negative-EV outside a confirmed uptrend (regime: ${regime.regime}/${regime.btcTrend}). Skipping ${symbol} +${gainerInfo.change24h.toFixed(1)}% mover.`);
       } else if (rsiOk && stochOk && priceOk && volOk && notTooHot && trendOk) {
+        if (entryCapReached()) { pushSignal(symbol, "BLOCKED", "Momentum entry cap reached"); return; }
         console.log(`\n✅ MOMENTUM ENTRY — big mover conditions met. Position (40% size, 2% SL, trailing stop).`);
         pushSignal(symbol, "ENTRY", `Big mover +${gainerInfo.change24h.toFixed(1)}% — momentum entry`);
         const momSize = Math.min(currentPortfolio * sizePct * 0.40, CONFIG.maxTradeSizeUSD ?? Infinity);
@@ -5596,6 +5605,7 @@ async function run(tvSignal = null, symbol = null) {
       console.log(`\n  📊 ${swingSetup.score >= 5 ? "🔄 SWING" : "📉 SCALP"} selected — ${swingLabel}`);
 
       if (swingSetup.score >= 5) {
+        if (entryCapReached()) { pushSignal(symbol, "BLOCKED", "Swing entry cap reached"); return; }
         console.log(`   Swing targets +${(SWING.takeProfit * 100).toFixed(0)}% over 1-5 days vs scalp's +1% — better R:R here`);
         const swingSize = (log.portfolioValue || acct().portfolioValue) * SWING.sizePct;
         let qty = swingSize / price;
@@ -6077,6 +6087,10 @@ async function run(tvSignal = null, symbol = null) {
       const posTpPct = bearSnapBack ? 0.03 : entryType === "momentum" ? 0.10 : (btResult?.takeProfit ?? 0.08);
       const posSlPct = bearSnapBack ? 0.02 : (btResult?.stopLoss ?? 0.04);
 
+      if (slippageOk && entryCapReached()) {
+        console.log("⛔ Scalp entry cap reached while calculating signal; skipping order");
+        return;
+      }
       if (slippageOk && CONFIG.paperTrading) {
         console.log(`\n📋 PAPER TRADE — would buy ${symbol} ~$${finalTradeSize.toFixed(2)} at market`);
         console.log(`   (Set PAPER_TRADING=false in .env to place real orders)`);
@@ -8403,6 +8417,12 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
 
     // ── Entry check ─────────────────────────────────────────────────────────
+    // Paper simulation must honour the same entry cap, pause and loss breaker.
+    // This check stays BELOW the open-position management block, so exits remain live.
+    if (_tradingPaused || entryCapReached() || checkDailyDrawdown(log).paused) {
+      pushSignal(symbol, "BLOCKED", "Entry blocked: pause, daily cap or loss breaker");
+      return;
+    }
     if (openSwingCount >= SWING.maxOpen) return;
 
     // Cross-strategy dedup — don't swing if scalp or breakout already open on same coin
@@ -8458,6 +8478,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     if (btResult.recommendation === "TRADE")    score++;  // backtest says go
 
     if (score < 3) return; // need at least 3 confirmations across all timeframes
+    if (entryCapReached()) { pushSignal(symbol, "BLOCKED", "Swing entry cap reached"); return; }
 
     const portfolio  = log.portfolioValue || acct().portfolioValue;
     const swingSize  = portfolio * SWING.sizePct;
@@ -8618,6 +8639,12 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
 
     // ── Entry check ─────────────────────────────────────────────────────────
+    // Paper simulation must honour the same entry cap, pause and loss breaker.
+    // This check stays BELOW the open-position management block, so exits remain live.
+    if (_tradingPaused || entryCapReached() || checkDailyDrawdown(log).paused) {
+      pushSignal(symbol, "BLOCKED", "Entry blocked: pause, daily cap or loss breaker");
+      return;
+    }
     const openBreakouts = Object.values(log.breakoutPositions || {}).filter(p => p?.open).length;
     if (openBreakouts >= 5) return;
 
@@ -8674,6 +8701,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
     const portfolio = log.portfolioValue || acct().portfolioValue;
     const bkSize = portfolio * 0.15;
+    if (entryCapReached()) { pushSignal(symbol, "BLOCKED", "Breakout entry cap reached"); return; }
 
     console.log(`\n🚀 BREAKOUT ENTRY — ${symbol} | Regime:${regime.regime}`);
     console.log(`   Consolidation: $${rangeLow.toFixed(4)}–$${rangeHigh.toFixed(4)} | Breakout @ $${price.toFixed(4)}`);
