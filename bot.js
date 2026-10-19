@@ -19,7 +19,7 @@ import crypto from "crypto";
 import { execSync } from "child_process";
 import WebSocket from "ws";
 import { fetchMarketCandles } from "./lib/market-data.mjs";
-import { safePositionNotional, paperEntry, paperExit, paperStats } from "./lib/risk-engine.mjs";
+import { safePositionNotional, paperEntry, paperExit, paperStats, paperPortfolioValuation } from "./lib/risk-engine.mjs";
 import { simulateSwingTrades, swingTradeMetrics } from "./lib/swing-backtest.mjs";
 // ─── Email notifications (Resend — HTTP, no SMTP, works on Railway) ──────────
 
@@ -6309,12 +6309,24 @@ if (process.argv.includes("--tax-summary")) {
       const trailStop = trailActive ? hwm * (1 - SNIPER.trailPct) : null;
       openPositions.push({ coin: baseCoin, sym, qty, usdVal, price: snapPrice, entryPrice: pos.entryPrice, pnlPct, pnlUSD, minsOpen, entryType: "sniper", minsLeft, trailActive, trailStop, slPct: SNIPER.stopLossPct });
     }
-    const portfolioValue = usdtBalance + openPositionValue;
+    // A paper ledger already includes starting capital and realized P&L:
+    // do NOT add gross open holdings to it a second time.
+    const paperMark = CONFIG.paperTrading ? paperPortfolioValuation(log, coinSnapshots, {
+      feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+      startingEquityUsd: CONFIG.portfolioValue,
+    }) : null;
+    if (paperMark) {
+      usdtBalance = paperMark.cashUsd;
+      openPositionValue = paperMark.openLiquidationValueUsd;
+      openPositions.length = 0;
+      openPositions.push(...paperMark.positions);
+    }
+    const portfolioValue = paperMark ? paperMark.equityUsd : usdtBalance + openPositionValue;
     _livePortfolioValue = portfolioValue; // keep heat gate in sync with dashboard
     const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
     const adaptiveMode = getAdaptiveMode(log.trades || []);
     const heat = calcPortfolioHeat(log, portfolioValue);
-    const unrealizedPnlUSD = openPositions.reduce((s, p) => s + (p.pnlUSD ?? 0), 0);
+    const unrealizedPnlUSD = paperMark?.unrealizedPnlUSD ?? openPositions.reduce((s, p) => s + (p.pnlUSD ?? 0), 0);
     const todayGainUSD = totalPnlUSD + unrealizedPnlUSD;
     const allExits = (log.trades || []).filter(t => t.type === "exit" && t.pnlPct !== undefined && t.orderPlaced);
     const allWins = allExits.filter(t => t.pnlPct > 0);
@@ -6365,6 +6377,9 @@ if (process.argv.includes("--tax-summary")) {
     const lastTradeAt = (log.trades || []).filter(t => t.orderPlaced && t.timestamp).slice(-1)[0]?.timestamp || null;
     return {
       portfolioValue, usdtBalance, openPositions,
+      valuationEstimated: Boolean(paperMark), paperStaleQuotes: paperMark?.staleQuotes ?? 0,
+      isExchangeVerified: !CONFIG.paperTrading && liveAssets.length > 0,
+      paperPerformance: CONFIG.paperTrading ? paperStats(log.trades) : null,
       regime: regimeMatch?.regime || "RANGING",
       paused: _tradingPaused || drawdown.paused,
       pauseReason: drawdown.paused ? "Drawdown limit hit" : _tradingPaused ? "Manually paused" : null,
@@ -7964,7 +7979,17 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           openPositions.push({ coin: asset.coin, qty, usdVal, entryPrice: null, pnlPct: null });
         }
 
-        const portfolioValue = usdtBalance + openPositionValue;
+        const paperMark = CONFIG.paperTrading ? paperPortfolioValuation(log, coinSnapshots, {
+          feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+          startingEquityUsd: CONFIG.portfolioValue,
+        }) : null;
+        if (paperMark) {
+          usdtBalance = paperMark.cashUsd;
+          openPositionValue = paperMark.openLiquidationValueUsd;
+          openPositions.length = 0;
+          openPositions.push(...paperMark.positions);
+        }
+        const portfolioValue = paperMark?.equityUsd ?? (usdtBalance + openPositionValue);
         const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
         const regime = regimeMatch?.regime || "RANGING";
 
@@ -7976,6 +8001,10 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           portfolioValue,
           usdtBalance,
           openPositions,
+          valuationEstimated: Boolean(paperMark),
+          paperStaleQuotes: paperMark?.staleQuotes ?? 0,
+          paperPerformance: CONFIG.paperTrading ? paperStats(log.trades) : null,
+          realMoneyOrdersAllowed: EXCHANGE_WRITES_ALLOWED,
           todayTrades: todayTrades.length,
           todayPnlUSD: totalPnlUSD,
           winRate: winRate ? `${winRate.wins}/${winRate.sample} (${(winRate.winRate * 100).toFixed(0)}%)` : "not enough data",
