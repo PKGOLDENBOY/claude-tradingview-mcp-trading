@@ -3801,6 +3801,30 @@ function historicalRecoverySummary() {
   return result;
 }
 
+// Optional signed GET-only balance snapshot, independent of the bot's synthetic P&L.
+// This does NOT place trades, update orders, or overwrite any ledger.
+async function readOnlyBitGetSnapshot() {
+  const account = ACCOUNTS.find(a => a.exchange === "bitget");
+  if (!account?.apiKey || !account?.secretKey || !account?.passphrase)
+    return { ok: false, reason: "BitGet credentials incomplete" };
+  const path = "/api/v2/account/all-account-balance";
+  try {
+    const ts = Date.now().toString();
+    const sig = crypto.createHmac("sha256", account.secretKey).update(ts + "GET" + path).digest("base64");
+    const res = await fetch(account.baseUrl + path, {
+      method: "GET", signal: AbortSignal.timeout(10000),
+      headers: { "ACCESS-KEY": account.apiKey, "ACCESS-SIGN": sig,
+        "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": account.passphrase, "locale": "en-US" },
+    });
+    const data = await res.json();
+    if (!res.ok || data.code !== "00000" || !Array.isArray(data.data))
+      return { ok: false, code: String(data.code || res.status), reason: String(data.msg || "Exchange response invalid").slice(0, 130) };
+    const accountBalances = data.data.map(a => ({ accountType: String(a.accountType || "unknown"), usdBalance: Number(a.usdtBalance || 0) }));
+    const usdTotal = accountBalances.reduce((sum, a) => sum + (Number.isFinite(a.usdBalance) ? a.usdBalance : 0), 0);
+    return { ok: true, timestamp: new Date().toISOString(), officialTotalUsd: Number(usdTotal.toFixed(2)), accountBalances, note: "Read-only exchange valuation. Not net P&L: deposits and withdrawals must be reconciled." };
+  } catch (err) { return { ok: false, reason: String(err.message).slice(0, 140) }; }
+}
+
 // Always ensure trades.csv exists with headers — open it in Excel/Sheets any time
 function initCsv() {
   if (!existsSync(CSV_FILE)) {
@@ -9154,6 +9178,9 @@ async function monitorSniperPositions() {
     // Deploy-verification banner — confirms which guards the RUNNING code has (grep logs for GUARDS).
     console.log(`🛡️  GUARDS ACTIVE — blacklist(${HARD_BLACKLIST.size}): ${[...HARD_BLACKLIST].join(",")} | entryCap ${MAX_ENTRIES_PER_DAY}/day | minBookDepth ${MIN_BOOK_DEPTH_USD}`);
     console.log("🔎 RECOVERY INVENTORY " + JSON.stringify(historicalRecoverySummary()));
+    if (process.env.READ_ONLY_ACCOUNT_AUDIT === "true") {
+      readOnlyBitGetSnapshot().then(summary => console.log("🔎 EXCHANGE READ-ONLY SNAPSHOT " + JSON.stringify(summary))).catch(err => console.log("🔎 EXCHANGE SNAPSHOT ERROR " + err.message));
+    }
     mergeCustomWatchlist();
     console.log(`   Symbols:     ${CONFIG.symbols.join(", ")}`);
     console.log(`   Polling:     every 5 minutes\n`);
