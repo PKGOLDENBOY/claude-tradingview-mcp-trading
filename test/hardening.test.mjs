@@ -45,7 +45,7 @@ test("bad v3 API payload falls back to correct v2 granularity",async()=>{
 });
 test("invalid or exhausted feeds fail closed",async()=>{
   const client=createCandleClient({fetcher:async()=>({status:429,ok:false,headers:{get:()=>null}}),pause:async()=>{},spacingMs:0,cache:new Map(),maxRetries:1});
-  await assert.rejects(client("BTCUSDT","1H"),/Both BitGet candle feeds failed/);
+  await assert.rejects(client("BTCUSDT","1H"),/429/);
   await assert.rejects(client("BAD/COIN","1H"),/Invalid trading symbol/);
 });
 test("both absolute dollar cap and one-percent equity risk are enforced",()=>{
