@@ -4518,14 +4518,24 @@ async function cancelAllSymbolOrders(symbol) {
 async function getOrderStatus(symbol, orderId) {
   try {
     const ts = Date.now().toString();
-    const path = `/api/v2/spot/trade/orderInfo?orderId=${orderId}&symbol=${symbol}`;
+    const path = `/api/v2/spot/trade/orderInfo?orderId=${encodeURIComponent(orderId)}`;
     const sign = signBitGet(ts, "GET", path);
     const res = await fetch(`${acct().baseUrl}${path}`, {
-      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
+      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign,
+        "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, locale: "en-US" },
+      signal: AbortSignal.timeout(8000),
     });
     const data = await res.json();
-    return data.data ?? null;
-  } catch {
+    // BitGet v2 orderInfo returns data as an ARRAY, never a standalone object.
+    const row = Array.isArray(data.data) ? data.data[0] : null;
+    if (!res.ok || data.code !== "00000" || !row || String(row.orderId) !== String(orderId))
+      throw new Error("BitGet TP order information not verified");
+    const baseVolume = Number(row.baseVolume);
+    if (!Number.isFinite(baseVolume) || baseVolume < 0)
+      throw new Error("Invalid TP executed base quantity");
+    return { ...row, confirmedQty:baseVolume };
+  } catch (err) {
+    console.warn("TP order status unknown " + symbol + ": " + err.message);
     return null;
   }
 }
@@ -4542,11 +4552,25 @@ async function checkTpOrders() {
     if (_processingStops.has(sym) || _runningSymbols.has(sym)) continue;
     const orderData = await getOrderStatus(sym, pos.tpOrderId);
     if (!orderData) continue;
-    // Treat partial fills that left dust as full exits — remaining $<1 is unsellable anyway
-    const isFull = orderData.status === "full_fill";
-    const isPartialDust = orderData.status === "partial_fill" && parseFloat(orderData.priceAvg || 0) > 0 &&
-      (parseFloat(pos.quantity) * parseFloat(orderData.priceAvg || 0) - parseFloat(orderData.accBaseVolume || 0) * parseFloat(orderData.priceAvg || 0)) < 1.0;
-    if (!isFull && !isPartialDust) continue;
+    // Do not record partial TP fills as complete exits. A partially filled
+    // resting sell must be reconciled before another sell of that inventory.
+    const originalQty = Number(pos.quantity);
+    const precision = await getQuantityPrecision(sym).catch(() => null);
+    if (!Number.isFinite(originalQty) || originalQty<=0 ||
+        precision === null) continue;
+    const isFull = confirmSpotSellFill({
+      status:orderData.status, confirmedQty:orderData.confirmedQty,
+      requestedQty:originalQty, precision,
+    });
+    if (!isFull) {
+      if (orderData.confirmedQty > 0) {
+        const state = loadLog();
+        if (!(state.unconfirmedOrders || []).some(o => String(o.orderId) === String(pos.tpOrderId)))
+          haltOnUnconfirmedSell({symbol:sym,orderId:pos.tpOrderId,requestedQty:originalQty,
+            reason:"Resting TP order partially filled; reconcile before additional sells"});
+      }
+      continue;
+    }
 
     _processingStops.add(sym);
     try {
