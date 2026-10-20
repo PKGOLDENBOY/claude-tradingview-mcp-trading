@@ -1,0 +1,89 @@
+name: Five-week read-only long-term backtest
+on:
+  push:
+    branches: [fix/alphabot-safety-audit-20261020]
+    paths:
+      - .github/workflows/longterm-five-week.yml
+      - lib/longterm-shadow-engine.mjs
+      - scripts/longterm-5w-backtest.mjs
+      - test/longterm-shadow.test.mjs
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      LT_BACKTEST_DAYS: "35"
+      LT_BACKTEST_END_UTC: "2026-10-20T00:00:00.000Z"
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Verify scripts and risk constraints
+        run: |
+          node --check scripts/longterm-5w-backtest.mjs
+          node --check lib/longterm-shadow-engine.mjs
+          node --test test/longterm-shadow.test.mjs
+      - name: Backtest completed 35 days with public BitGet data (NO ORDERS)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/longterm-5w-backtest.mjs > /tmp/lt5w.log 2>&1 || { tail -n 35 /tmp/lt5w.log; exit 1; }
+          tail -n 4 /tmp/lt5w.log | cut -c 1-10000
+      - name: Summarize and validate the observed result
+        shell: bash
+        run: |
+          node --input-type=module <<'EOF'
+          import fs from 'node:fs';
+          const lines=fs.readFileSync('/tmp/lt5w.log','utf8').split(/\r?\n/).filter(Boolean);
+          const final=lines.map(s=>{try{return JSON.parse(s)}catch{return null}}).findLast(x=>x?.tag==='LT_5W_FINAL');
+          if(!final)throw Error('No final market backtest result');
+          const report={
+            dateRange:[final.from,final.to],requestedSymbols:final.dataCoverage.requested,
+            eligibleSymbols:final.dataCoverage.eligible,
+            excludedSymbols:final.dataCoverage.exclusions,
+            initialUSD:final.simulation.initialUSD,
+            simulatedPortfolioUSD:final.simulation.markToMarketUSD,
+            combinedSimulatedPnlUSD:final.simulation.combinedSimulatedPnlUSD,
+            combinedReturnPct:final.simulation.combinedReturnPct,
+            simulatedBuys:final.simulation.simulatedBuys,
+            simulatedSells:final.simulation.simulatedSells,
+            realizedPnlUSD:final.simulation.realizedPnlUSD,
+            openPositions:final.simulation.openPositions,
+            closedPositions:final.simulation.completeExits,
+            winRatePct:final.winRatePct,
+            maxDrawdownPct:final.maxDrawdownPct,
+            btcBuyHoldAfterEstimatedCostsPct:final.benchmarkBTC?.afterEstimatedCostsPct,
+            weekly:final.weekly,
+            dataErrors:final.api.fetchErrors,
+            requestCount:final.api.apiRequests,
+            regimeAndSignalGates:final.counters,
+            reasons:final.closedByReason,
+            topAssets:final.topAssets,
+            worstAssets:final.worstAssets,
+            tradeEvents:final.totalEvents,
+            limitations:final.limitations,
+            orderRequests:0
+          };
+          fs.mkdirSync('reports',{recursive:true});
+          fs.writeFileSync('reports/lt-2026-09-15-to-2026-10-20.json',JSON.stringify({report,raw:final},null,2));
+          console.log('FIVE_WEEK_SUMMARY '+JSON.stringify(report));
+          if(final.dataCoverage.eligible<8)throw Error('Insufficient historical market coverage: only '+final.dataCoverage.eligible+' assets. See exclusions.');
+          if(final.simulation.markToMarketUSD===null)throw Error('Portfolio valuation incomplete');
+          if(final.api.fetchErrors>20)throw Error('Too many public market data errors: '+final.api.fetchErrors);
+          EOF
+      - name: Keep report artifact, even when coverage is insufficient
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alphabot-lt-five-week-history-20261020
+          path: |
+            reports/lt-2026-09-15-to-2026-10-20.json
+            /tmp/lt5w.log
+          if-no-files-found: warn
