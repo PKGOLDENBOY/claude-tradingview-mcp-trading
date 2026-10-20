@@ -869,7 +869,7 @@ function calcRSI3Series(closes) {
 
 function calcVWAPSeries(candles) {
   return candles.map((_, i) => {
-    const w = candles.slice(Math.max(0, i - 23), i + 1);
+    const w = candles.slice(Math.max(0, i - 19), i + 1);
     const tv = w.reduce((s, c) => s + ((c.high + c.low + c.close) / 3) * c.volume, 0);
     const v = w.reduce((s, c) => s + c.volume, 0);
     return v > 0 ? tv / v : candles[i].close;
@@ -883,6 +883,7 @@ function runBacktestSim(candles, rsiThreshold, takeProfit, stopLoss = 0.04, feeR
   const fee = feeRT ?? (Math.max(getFeePct(), PAPER_FEE_FRACTION) * 2 + PAPER_SLIPPAGE_FRACTION * 2);
   const closes = candles.map(c => c.close);
   const ema8 = calcEMASeries(closes, 8);
+  const ema21 = calcEMASeries(closes, 21);
   const rsi = calcRSI3Series(closes);
   const vwap = calcVWAPSeries(candles);
   const trades = [];
@@ -907,9 +908,10 @@ function runBacktestSim(candles, rsiThreshold, takeProfit, stopLoss = 0.04, feeR
     const p = candles[i].close, rv = rsi[i];
     if (rv === null || rv === undefined) continue;
     const avgVol = candles.slice(i - 20, i).reduce((sum, c) => sum + c.volume, 0) / 20;
-    if (p > vwap[i] && p > ema8[i] && rv < rsiThreshold &&
-        Math.abs((p - vwap[i]) / vwap[i]) < 0.03 &&
-        candles[i].volume > avgVol * 0.8) {
+    const vol3=(candles[i].volume+candles[i-1].volume+candles[i-2].volume)/3;
+    if (p > vwap[i] && p > ema8[i] && ema8[i] > ema21[i] && rv < rsiThreshold &&
+        Math.abs((p - vwap[i]) / vwap[i]) < 0.015 &&
+        candles[i].volume > avgVol && vol3 >= avgVol) {
       inTrade = true; entry = candles[i+1].open; bar = i + 1;
     }
   }
@@ -957,7 +959,10 @@ async function backtestCoin(symbol) {
   // 2. Validate those parameters on the most recent 7 days (out-of-sample)
   // 3. Only trade if the strategy holds on recent market conditions
   // This prevents over-fitting to conditions that no longer exist
-  const candles = await fetchMarketCandles(symbol, "1H", 800, { closedOnly: true }); // only finalized candles
+  const simTF = ["5m","15m","30m","1H"].includes(CONFIG.timeframe) ? CONFIG.timeframe : "15m";
+  const candles = await fetchMarketCandles(symbol, simTF, 1000, { closedOnly: true });
+  // BitGet caps one fetch at 1000 candles. OOS may span only ~2.6 days for 15m.
+
 
   if (candles.length < 200) {
     // Not enough history for walk-forward — use simple backtest
@@ -967,7 +972,8 @@ async function backtestCoin(symbol) {
     return result;
   }
 
-  const oosSize = Math.min(7 * 24, Math.floor(candles.length * 0.25)); // 7 days or 25%
+  const perDay = { "5m":288,"15m":96,"30m":48,"1H":24 }[simTF];
+  const oosSize = Math.min(7 * perDay, Math.floor(candles.length * 0.25));
   const inSample    = candles.slice(0, candles.length - oosSize);
   const outOfSample = candles.slice(candles.length - oosSize);
 
@@ -984,7 +990,9 @@ async function backtestCoin(symbol) {
   const oosWR   = oosTrades.length > 0 ? oosWins / oosTrades.length : 0;
   const oosExp  = oosTrades.length > 0 ? oosTrades.reduce((s, t) => s + t.pct, 0) / oosTrades.length : 0; // net %/trade
 
-  const result = { ...inResult, symbol, oosWinRate: +(oosWR * 100).toFixed(1), oosExpectancy: +oosExp.toFixed(3), oosTrades: oosTrades.length, walkForward: true };
+  const result = { ...inResult, symbol, timeframe:simTF, oosDays:+(oosSize/perDay).toFixed(2),
+    oosWinRate: +(oosWR * 100).toFixed(1), oosExpectancy: +oosExp.toFixed(3),
+    oosTrades: oosTrades.length, walkForward: true };
 
   // TRADE only with a real OOS sample (>=8 trades) that is profitable AFTER fees on unseen recent
   // data. The old gate passed on 3 trades / raw WR — trivially luck, and the source of the false
@@ -5937,10 +5945,11 @@ async function run(tvSignal = null, symbol = null) {
         console.log(`  🚫 ${symbol}: no valid setup found (65%+ WR, 5+ trades)`);
       }
     } catch (e) {
-      console.log(`  ⚠️  Backtest failed (${e.message}) — proceeding with caution`);
-      btResult = null;
+      console.log(`  ⛔ Backtest unavailable (${e.message}) — no new entry`);
+      pushSignal(symbol, "BLOCKED", "BACKTEST_UNAVAILABLE: " + e.message);
+      return;
     }
-    if (btResult && btResult.recommendation !== "TRADE") {
+    if (!btResult || btResult.recommendation !== "TRADE" || btResult.walkForward !== true || btResult.oosTrades < 8) {
       console.log(`🚫 BACKTEST BLOCK — ${symbol} WR ${btResult.winRate}% over ${btResult.trades} trades (need 75%+ TRADE rating). Skipping.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       pushSignal(symbol, "BLOCKED", `Backtest WR ${btResult.winRate}% — need 75%+ TRADE rating (got ${btResult.recommendation})`);
@@ -8803,7 +8812,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
     // ── Backtest gate ────────────────────────────────────────────────────────
     const btResult = await backtestSwingCoin(symbol);
-    if (btResult.recommendation === "SKIP") return;
+    if (btResult.recommendation !== "TRADE" || btResult.oosTrades < 8) return;
 
     // ── Score confirmations ──────────────────────────────────────────────────
     let score = 0;
@@ -9053,7 +9062,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
     // Walk-forward backtest gate — same gate as scalp, using 1H candles
     const bkBtResult = await backtestCoin(symbol).catch(() => null);
-    if (bkBtResult && bkBtResult.recommendation === "SKIP") {
+    if (!bkBtResult || bkBtResult.recommendation !== "TRADE" || bkBtResult.walkForward !== true || bkBtResult.oosTrades < 8) {
       console.log(`🚫 BREAKOUT BACKTEST BLOCK — ${symbol} failed walk-forward gate (WR<65%). Skipping.`);
       return;
     }
