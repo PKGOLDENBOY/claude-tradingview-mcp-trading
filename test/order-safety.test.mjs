@@ -41,6 +41,6 @@ test("bot live paths must wire up sell quantity, confirmations, hard stop and ba
   assert.ok(src.includes("confirmSpotSellFill({"));
   assert.ok(src.includes("confirmZeroFillCancellation({"));
   assert.ok(src.includes("haltOnUnconfirmedSell("));
-  assert.ok(src.includes('throw new Error("BACKTEST_UNAVAILABLE'));
+  assert.ok(src.includes('"BACKTEST_UNAVAILABLE: "'));
   assert.ok(src.includes('LIVE_TRADING_APPROVED === "true"'));
 });
