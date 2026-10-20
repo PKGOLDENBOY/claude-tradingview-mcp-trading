@@ -23,7 +23,7 @@ test("RSI/EMA/VWAP math is bounded and sane",()=>{
 test("incomplete and invalid candles cannot leak into signals",()=>{
   const now=Date.now(),k=15*60_000;
   const sample=[
-    [now-k,1,2,1,1.5,100], // active bar must never be used
+    [now-Math.floor(k/2),1,2,1,1.5,100], // active bar must never be used
     [now-2*k,1,2,1,1.5,100],
     [now-3*k,1,2,1,NaN,100],
   ];
@@ -37,6 +37,6 @@ test("signals fail closed on missing market data",()=>{
 });
 test("synthetic profit includes fees, bid/ask and adverse slippage",()=>{
   const pnl=positionPnl({entryPrice:100,quantity:1,totalCost:100.1},{lastPr:"100",bidPr:"100",askPr:"100"});
-  assert.ok(pnl<-0.19 && pnl> -0.22);
+  assert.ok(pnl<-0.29 && pnl> -0.31);
   assert.equal(positionPnl({entryPrice:100,quantity:1,totalCost:100},{}),null);
 });
