@@ -628,7 +628,25 @@ function loadLog() {
 }
 
 function saveLog(log) {
-  // Atomic write: write to temp file then rename so a mid-write kill never corrupts the log
+  // Preserve any durable halt written by a concurrent/failed order operation.
+  if (existsSync(acct().logFile)) {
+    try {
+      const persisted = JSON.parse(readFileSync(acct().logFile, "utf8"));
+      if (persisted._tradingHaltReason && !log._tradingHaltReason)
+        log._tradingHaltReason = persisted._tradingHaltReason;
+      if (Array.isArray(persisted.unconfirmedOrders) && persisted.unconfirmedOrders.length) {
+        const current = Array.isArray(log.unconfirmedOrders) ? log.unconfirmedOrders : [];
+        const seen = new Set(current.map(o => JSON.stringify(o)));
+        for (const order of persisted.unconfirmedOrders) {
+          if (!seen.has(JSON.stringify(order))) current.push(order);
+        }
+        log.unconfirmedOrders = current;
+      }
+    } catch (err) {
+      if (EXCHANGE_WRITES_ALLOWED)
+        throw new Error("Refusing to overwrite corrupt safety ledger: " + err.message);
+    }
+  }
   const tmp = acct().logFile + ".tmp";
   writeFileSync(tmp, JSON.stringify(log, null, 2));
   renameSync(tmp, acct().logFile);
@@ -683,19 +701,46 @@ function loadCsvStats() {
 // Daily drawdown — sum of realised losses today vs portfolio value
 function checkDailyDrawdown(log) {
   const today = new Date().toISOString().slice(0, 10);
-  const todayExits = log.trades.filter(
-    (t) => t.type === "exit" && t.timestamp.startsWith(today) && t.pnlUSD !== undefined,
-  );
-  const totalLoss = todayExits.reduce((sum, t) => sum + Math.min(t.pnlUSD, 0), 0);
-  const totalGain = todayExits.reduce((sum, t) => sum + Math.max(t.pnlUSD, 0), 0);
-  const portfolio = log.portfolioValue || acct().portfolioValue;
-  const drawdownPct = Math.abs(totalLoss) / portfolio * 100;
-  const gainPct = totalGain / portfolio * 100;
-  const DAILY_STOP   = 3; // stop trading if down 3% on the day
-  const DAILY_TARGET = 3; // milestone — log it but keep trading (user wants max gains)
-  const stopHit   = drawdownPct >= DAILY_STOP;
-  const targetHit = gainPct >= DAILY_TARGET;
-  return { drawdownPct, gainPct, totalLoss, totalGain, paused: stopHit, stopHit, targetHit, limit: DAILY_STOP, target: DAILY_TARGET };
+  const todayExits = (log.trades || []).filter(t =>
+    t.type === "exit" && t.orderPlaced && t.timestamp?.startsWith(today) &&
+    Number.isFinite(Number(t.pnlUSD)));
+  const totalLoss = todayExits.reduce((sum,t)=>sum+Math.min(Number(t.pnlUSD),0),0);
+  const totalGain = todayExits.reduce((sum,t)=>sum+Math.max(Number(t.pnlUSD),0),0);
+  const realized = Number(log.portfolioValue || acct().portfolioValue);
+  const dayStart = Number(log.dayStartValue || realized);
+  if (!Number.isFinite(realized) || !Number.isFinite(dayStart) || dayStart <= 0)
+    return {drawdownPct:100,gainPct:0,totalLoss,totalGain,paused:true,stopHit:true,
+      targetHit:false,limit:3,target:3,unpricedPositions:1};
+  let unrealizedNet = 0, unpricedPositions = 0;
+  for (const key of ["positions","swingPositions","breakoutPositions","sniperPositions","ltPositions"]) {
+    for (const [sym,pos] of Object.entries(log[key] || {})) {
+      if (!pos?.open) continue;
+      const qty = Number(pos.quantity), entry = Number(pos.entryPrice || pos.avgEntry);
+      const live = livePrices.get(sym);
+      const snap = coinSnapshots[sym];
+      const streamFresh = live && Date.now()-live.ts <= 90000 && Number(live.price)>0;
+      const snapFresh = snap && Date.now()-Date.parse(snap.updatedAt) <= 300000 && Number(snap.price)>0;
+      const mark = streamFresh ? Number(live.price) : snapFresh ? Number(snap.price) : null;
+      if (!Number.isFinite(qty) || qty<=0 || !Number.isFinite(entry) || entry<=0 || !mark) {
+        unpricedPositions++;
+        continue;
+      }
+      // Conservative liquidation estimate: closing fee/slippage + unpaid entry fees.
+      unrealizedNet += (mark-entry)*qty -
+        (Number(pos.entryFeeUsd)||0) - mark*qty*(PAPER_FEE_FRACTION+PAPER_SLIPPAGE_FRACTION);
+    }
+  }
+  const estimatedEquity = realized + unrealizedNet;
+  const grossLossPct = Math.abs(totalLoss)/dayStart*100;
+  const equityDrawdownPct = Math.max(0,(dayStart-estimatedEquity)/dayStart*100);
+  const drawdownPct = Math.max(grossLossPct,equityDrawdownPct);
+  const gainPct = totalGain/dayStart*100;
+  const DAILY_STOP=3, DAILY_TARGET=3;
+  const stopHit = drawdownPct>=DAILY_STOP;
+  return {drawdownPct,gainPct,totalLoss,totalGain,unrealizedNet,
+    estimatedEquity,dayStart,unpricedPositions,
+    paused:stopHit || unpricedPositions>0, stopHit, targetHit:gainPct>=DAILY_TARGET,
+    limit:DAILY_STOP,target:DAILY_TARGET};
 }
 
 // Adaptive mode — automatically tightens strategy when losing
@@ -1680,23 +1725,32 @@ async function detectMarketRegime() {
 // Tracks total $ at risk across ALL open positions (scalp + swing + breakout).
 // Hard cap at 8% — never risk more than this simultaneously.
 function calcPortfolioHeat(log, livePortfolioValue = null) {
-  const portfolio = livePortfolioValue || log.portfolioValue || acct().portfolioValue;
+  const portfolio = Number(livePortfolioValue || log.portfolioValue || acct().portfolioValue);
   let totalRisk = 0;
   const positions = [];
-  const addPos = (map, stopPct, type) => {
-    for (const [sym, pos] of Object.entries(map || {})) {
+  const addPos = (map, defaultStop, type) => {
+    for (const [sym,pos] of Object.entries(map || {})) {
       if (!pos?.open) continue;
-      const risk = pos.entryPrice * stopPct * parseFloat(pos.quantity || 0);
-      totalRisk += risk;
-      positions.push({ sym, risk: +risk.toFixed(4), type });
+      const entry=Number(pos.entryPrice || pos.avgEntry),qty=Number(pos.quantity);
+      const stop = Number(pos.slPct ?? defaultStop);
+      if (![entry,qty,stop].every(Number.isFinite) || entry<=0 || qty<=0 || stop<=0) {
+        totalRisk = Infinity;
+        positions.push({sym,risk:"UNKNOWN",type});
+        continue;
+      }
+      const risk=entry*qty*(stop+2*PAPER_FEE_FRACTION+2*PAPER_SLIPPAGE_FRACTION);
+      totalRisk+=risk;
+      positions.push({sym,risk:+risk.toFixed(4),type});
     }
   };
-  addPos(log.positions,         0.025, "scalp");    // ~2.5% scalp stop
-  addPos(log.swingPositions,    SWING.stopLoss, "swing");
-  addPos(log.breakoutPositions, 0.03,  "breakout"); // 3% breakout stop
-  addPos(log.sniperPositions,   0.08, "sniper"); // SNIPER.stopLossPct — constant can't cross block scope
-  const heatPct = portfolio > 0 ? (totalRisk / portfolio) * 100 : 0;
-  return { heatPct: +heatPct.toFixed(2), totalRisk, positions, isOverheated: heatPct > 8 };
+  addPos(log.positions,0.04,"scalp");
+  addPos(log.swingPositions,SWING.stopLoss,"swing");
+  addPos(log.breakoutPositions,0.03,"breakout");
+  addPos(log.sniperPositions,0.08,"sniper");
+  addPos(log.ltPositions,0.25,"long-term");
+  const heatPct=portfolio>0?(totalRisk/portfolio)*100:Infinity;
+  return {heatPct:Number.isFinite(heatPct)?+heatPct.toFixed(2):Infinity,
+    totalRisk,positions,isOverheated:!Number.isFinite(heatPct)||heatPct>=8};
 }
 
 // VWAP — rolling 20-bar, stays close to current price action
