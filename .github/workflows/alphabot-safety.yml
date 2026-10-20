@@ -1,0 +1,29 @@
+name: AlphaBot safety patch CI
+on:
+  push:
+    branches: [fix/alphabot-safety-audit-20261020]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked deps
+        run: npm ci --ignore-scripts
+      - name: Syntax
+        run: |
+          node --check bot.js
+          node --check lib/order-safety.mjs
+      - name: Full regression suite
+        run: node --test test/*.test.mjs
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
+      - name: Read-only BitGet socket heartbeat smoke
+        run: node test/ws-smoke.mjs
