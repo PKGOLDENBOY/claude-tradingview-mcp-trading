@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { LT_COINS,CONFIG_LT,ema,parseClosedBars,scoreLtEntry,
   makeState,manageLongterm,buyVirtual,snapshot } from "../lib/longterm-shadow-engine.mjs";
 const HOST="https://api.bitget.com",DAY=86400000,HOUR=3600000;
-const DURATIONS={"6h":6*HOUR,"4h":4*HOUR,"1day":DAY,"1week":7*DAY};
+const DURATIONS={"6Hutc":6*HOUR,"4h":4*HOUR,"1Dutc":DAY,"1Wutc":7*DAY};
 const requestedEnd=process.env.LT_BACKTEST_END_UTC;
 const cutoff=requestedEnd?Date.parse(requestedEnd):Math.floor(Date.now()/DAY)*DAY;
 const DAYS=Number(process.env.LT_BACKTEST_DAYS || 35);
@@ -137,11 +137,11 @@ async function run(){
   const state=makeState(START,DAYS),fng=await fetchFG();
   const taskList=[];
   for(const symbol of [...LT_COINS,"BTCUSDT"]){
-    taskList.push({symbol,granularity:"6h",minimumTs:START-2*DAY});
+    taskList.push({symbol,granularity:"6Hutc",minimumTs:START-2*DAY});
     if(symbol==="BTCUSDT")taskList.push({symbol,granularity:"4h",minimumTs:START-12*DAY});
     else {
-      taskList.push({symbol,granularity:"1day",minimumTs:START-100*DAY});
-      taskList.push({symbol,granularity:"1week",minimumTs:START-60*7*DAY});
+      taskList.push({symbol,granularity:"1Dutc",minimumTs:START-100*DAY});
+      taskList.push({symbol,granularity:"1Wutc",minimumTs:START-60*7*DAY});
     }
   }
   // Deliberately sequential: <=20 requests/s per BitGet public-IP rate limit.
@@ -157,19 +157,19 @@ async function run(){
   }
   const eligible=LT_COINS.filter(sym=>{
     const b=data.get(sym);
-    return b?.["6h"]?.length>=DAYS*4-4&&b?.["1day"]?.length>=95&&b?.["1week"]?.length>=40;
+    return b?.["6Hutc"]?.length>=DAYS*4-4&&b?.["1Dutc"]?.length>=95&&b?.["1Wutc"]?.length>=40;
   });
   const excluded=LT_COINS.filter(sym=>!eligible.includes(sym)).map(sym=>{
     const r=data.get(sym)||{};
-    return {symbol:sym,sixHour:r["6h"]?.length||0,daily:r["1day"]?.length||0,weekly:r["1week"]?.length||0};
+    return {symbol:sym,sixHour:r["6Hutc"]?.length||0,daily:r["1Dutc"]?.length||0,weekly:r["1Wutc"]?.length||0};
   });
   meta.unavailable=excluded;
   const btc4=data.get("BTCUSDT")?.["4h"]||[];
-  const btc6=data.get("BTCUSDT")?.["6h"]||[];
+  const btc6=data.get("BTCUSDT")?.["6Hutc"]||[];
   say("LT_5W_DATA_COVERAGE",{requested:LT_COINS.length,eligible:eligible.length,excluded,
     bitcoinFourHourBars:btc4.length,bitcoinSixHourBars:btc6.length,
     sentimentRecords:meta.fngEntries,issues:issue.slice(0,12)});
-  const barMaps=Object.fromEntries(eligible.map(sym=>[sym,new Map((data.get(sym)?.["6h"]||[]).map(b=>[b.timestamp,b]))]));
+  const barMaps=Object.fromEntries(eligible.map(sym=>[sym,new Map((data.get(sym)?.["6Hutc"]||[]).map(b=>[b.timestamp,b]))]));
   const counters={scanCycles:0,blockedRegime:0,blockedFear:0,blockedUnknownRegime:0,
     blockedUnknownSentiment:0,skippedMissingSixHour:0,qualifyingSignals:0,entryAttempts:0,
     blockedBudget:0,indicatorReadyPairs:0,activeSymbols:eligible.length,weekly:[]};
@@ -197,8 +197,8 @@ async function run(){
       const candidates=[];
       for(const sym of eligible){
         if(state.positions[sym]?.open||!prices[sym])continue;
-        const d=(data.get(sym)?.["1day"]||[]).filter(b=>b.timestamp+DAY<=t).slice(-200);
-        const w=(data.get(sym)?.["1week"]||[]).filter(b=>b.timestamp+7*DAY<=t).slice(-52);
+        const d=(data.get(sym)?.["1Dutc"]||[]).filter(b=>b.timestamp+DAY<=t).slice(-200);
+        const w=(data.get(sym)?.["1Wutc"]||[]).filter(b=>b.timestamp+7*DAY<=t).slice(-52);
         const scored=scoreLtEntry(w,d);
         state.scans++;
         if(scored.reason==="insufficient closed indicator warmup")state.indicatorsMissing++;
@@ -226,7 +226,7 @@ async function run(){
   }
   const endPrices={};
   for(const sym of eligible){
-    const last=(data.get(sym)?.["6h"]||[]).filter(x=>x.timestamp+6*HOUR<=cutoff).at(-1);
+    const last=(data.get(sym)?.["6Hutc"]||[]).filter(x=>x.timestamp+6*HOUR<=cutoff).at(-1);
     if(last)endPrices[sym]=last.close;
   }
   const final=snapshot(state,endPrices);
