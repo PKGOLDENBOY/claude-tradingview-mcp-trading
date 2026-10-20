@@ -74,3 +74,26 @@ test("5-week history fetcher is public GET-only, never imports bot or authorizes
   assert.ok(!/method:\s*["']POST["']/.test(source));
   assert.ok(!source.includes('/trade/place-order'));
 });
+
+test("re-entering a previously closed coin creates a new live episode and preserves realized PnL",()=>{
+  const s=makeState(base);
+  assert.equal(buyVirtual(s,"HBARUSDT",100,2.5,base),true);
+  const first=s.positions.HBARUSDT.qty;
+  sellVirtual(s,"HBARUSDT",110,first,"TAKE_PROFIT",base+DAY);
+  assert.equal(s.positions.HBARUSDT.open,false);
+  assert.equal(s.positions.HBARUSDT.remainingQty,0);
+  assert.equal(buyVirtual(s,"HBARUSDT",90,2.5,base+DAY*2),true);
+  assert.equal(s.positions.HBARUSDT.open,true);
+  assert.ok(s.positions.HBARUSDT.remainingQty>0);
+  assert.equal(s.closedPositionsCount,1);
+  const second=s.positions.HBARUSDT.qty;
+  sellVirtual(s,"HBARUSDT",80,second,"CATASTROPHIC_STOP",base+DAY*3);
+  const snap=snapshot(s,{HBARUSDT:80});
+  assert.equal(snap.openPositions,0);
+  assert.equal(snap.completeExits,2);
+  assert.equal(snap.simulatedBuys,2);
+  assert.equal(snap.simulatedSells,2);
+  // With all positions sold, cash change MUST equal realized P&L to 6 decimals.
+  assert.ok(Math.abs(snap.realizedPnlUSD-snap.combinedSimulatedPnlUSD)<0.00001);
+  assert.ok(s.events.every(e=>e.kind!=="SIMULATED_BUY"||e.date.startsWith("2026-")));
+});
