@@ -245,9 +245,16 @@ async function run(){
     startPrice:btcStart.open,endPrice:btcEnd.close,
     afterEstimatedCostsPct:(btcEnd.close*(1-SLIPPAGE)*(1-FEES)/
       (btcStart.open*(1+SLIPPAGE)*(1+FEES))-1)*100}:null;
+  if(final.openPositions===0 && Math.abs(final.realizedPnlUSD-final.combinedSimulatedPnlUSD)>0.0001)
+    throw new Error("LEDGER_INCONSISTENCY: all virtual positions are closed, but cash and realized PnL disagree");
+  const realizedByCoin=new Map();
+  for(const ev of state.events){
+    if(ev.kind==="SIMULATED_SELL")
+      realizedByCoin.set(ev.symbol,(realizedByCoin.get(ev.symbol)||0)+ev.realizedPnlUSD);
+  }
   const sortedPositions=Object.values(state.positions).map(pos=>({
     symbol:pos.symbol,open:pos.open,initialScore:pos.entryScore,
-    realizedPnlUSD:pos.realizedPnlUsd||0,
+    realizedPnlUSD:realizedByCoin.get(pos.symbol)||0,
     openPnlUSD:pos.open&&endPrices[pos.symbol]?
       pos.remainingQty*endPrices[pos.symbol]*(1-SLIPPAGE)*(1-FEES)-
       pos.totalCostUsd*(pos.remainingQty/pos.qty):0,
@@ -262,11 +269,11 @@ async function run(){
       Number((wins.length/signedTrades.length*100).toFixed(2)):null,
     maxDrawdownPct:Number(maxDrawdownPct.toFixed(2)),
     soldPnlUSD:Number(soldPnlUSD.toFixed(3)),
-    totalFullyClosedPositions:Object.values(state.positions).filter(p=>!p.open).length,
+    totalFullyClosedPositions:state.closedPositionsCount,
     weekly,maxTradesSimulated:signedTrades.length,benchmarkBTC,counters,
     closedByReason:state.closedByReason,topAssets:sortedPositions.slice(0,12),
     worstAssets:sortedPositions.slice(-10),lastEvents:state.events.slice(-20),
-    totalEvents:state.events.length,api:meta,
+    totalEvents:state.events.length,api:meta,ledgerReconciled:final.openPositions>0?null:true,
     limitations:["Historical five-week period is short for a long-term strategy.",
       "Six-hour OPEN tick fills do not model intrabar stops, gaps, spread or order book depth exactly.",
       "Historical F&G and a closed-BTC regime are modelled; missing data blocks buys.",
