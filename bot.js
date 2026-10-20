@@ -5037,6 +5037,7 @@ async function run(tvSignal = null, symbol = null) {
 
     console.log("\n── Decision ─────────────────────────────────────────────\n");
 
+    if (tvSignal === "SELL") finalExit = true; // authenticated exit cannot be vetoed by Claude
     const simulatedExit = CONFIG.paperTrading ? paperExit({
       entryFillPrice: position.entryPrice, exitMarketPrice: price,
       quantity: Number(position.quantity), entryFeeUsd: Number(position.entryFeeUsd || 0),
@@ -5794,8 +5795,19 @@ async function run(tvSignal = null, symbol = null) {
       if (swingSetup.score >= 5) {
         if (entryCapReached()) { pushSignal(symbol, "BLOCKED", "Swing entry cap reached"); return; }
         console.log(`   Swing targets +${(SWING.takeProfit * 100).toFixed(0)}% over 1-5 days vs scalp's +1% — better R:R here`);
-        const swingSize = (log.portfolioValue || acct().portfolioValue) * SWING.sizePct;
-        let qty = swingSize / price;
+        const inlineBt = await backtestSwingCoin(symbol).catch(() => null);
+        if (!inlineBt || inlineBt.recommendation !== "TRADE" || inlineBt.oosTrades < 8) {
+          console.log("⛔ INLINE SWING BACKTEST BLOCK — no validated out-of-sample edge");
+          return;
+        }
+        const swingSize = Math.min((log.portfolioValue || acct().portfolioValue) * SWING.sizePct,
+          sizedOrder(log.portfolioValue || acct().portfolioValue, SWING.stopLoss));
+        if (!swingSize) return;
+        const inlinePaperFill = CONFIG.paperTrading ? paperEntry({
+          marketPrice:price,notionalUsd:swingSize,
+          feeFraction:PAPER_FEE_FRACTION,slippageFraction:PAPER_SLIPPAGE_FRACTION,
+        }) : null;
+        let qty = inlinePaperFill?.quantity ?? (swingSize / price);
         let orderId = `PAPER-SWING-${Date.now()}`;
 
         if (!CONFIG.paperTrading) {
@@ -5815,7 +5827,7 @@ async function run(tvSignal = null, symbol = null) {
         }
 
         // Reload fresh to prevent concurrent writes clobbering other swing positions
-        try { log.swingPositions = { ...(loadLog().swingPositions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId, tradeType: "swing", partialExitDone: false, tpPct: SWING.takeProfit, slPct: SWING.stopLoss } }; } catch { log.swingPositions = { ...(log.swingPositions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId, tradeType: "swing", partialExitDone: false, tpPct: SWING.takeProfit, slPct: SWING.stopLoss } }; }
+        try { log.swingPositions = { ...(loadLog().swingPositions || {}), [symbol]: { open: true, side: "long", entryPrice: inlinePaperFill?.fillPrice ?? price, entryFeeUsd: inlinePaperFill?.entryFeeUsd ?? 0, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId, tradeType: "swing", partialExitDone: false, tpPct: SWING.takeProfit, slPct: SWING.stopLoss } }; } catch { log.swingPositions = { ...(log.swingPositions || {}), [symbol]: { open: true, side: "long", entryPrice: inlinePaperFill?.fillPrice ?? price, entryFeeUsd: inlinePaperFill?.entryFeeUsd ?? 0, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId, tradeType: "swing", partialExitDone: false, tpPct: SWING.takeProfit, slPct: SWING.stopLoss } }; }
         if (!CONFIG.paperTrading) {
           const tpOrderId = await placeLimitSell(symbol, qty.toFixed(6), price * (1 + SWING.takeProfit));
           if (tpOrderId) {
@@ -5825,7 +5837,7 @@ async function run(tvSignal = null, symbol = null) {
         }
         const swingLog = {
           timestamp: new Date().toISOString(), type: "entry", symbol,
-          timeframe: "4H", price, strategy: "swing", swingScore: swingSetup.score,
+          timeframe: "4H", price: inlinePaperFill?.fillPrice ?? price, paperEntryFeeUsd: inlinePaperFill?.entryFeeUsd ?? 0, strategy: "swing", swingScore: swingSetup.score,
           tradeSize: swingSize, orderPlaced: true, orderId,
           liquidity: liquiditySnapshot(symbol),
           paperTrading: CONFIG.paperTrading,
@@ -5879,7 +5891,7 @@ async function run(tvSignal = null, symbol = null) {
       pushSignal(symbol, "BLOCKED", `1H RSI(14) ${rsi14_1h.toFixed(1)} < 50 — hourly downtrend, no entry`);
       return;
     }
-    if (rsi14_1h !== null) console.log(`  ✅ 1H RSI(14) ${rsi14_1h.toFixed(1)} ≥ 50 — hourly trend ok${bearSnapBack ? " (bypassed — bear snap-back)" : ""}`);
+    if (rsi14_1h !== null) console.log(`  ${rsi14_1h >= 50 ? "✅" : "⚡"} 1H RSI(14) ${rsi14_1h.toFixed(1)} ${rsi14_1h >= 50 ? "≥50 trend confirmed" : "below 50 (VWAP bounce/bear snap-back bypass)"}`);
 
     // 4H trend hard gate — medium-term trend must be bullish to scalp bounces
     // bearSnapBack exempt: regime.btcTrend==="bear" implies 4H is bearish — this gate would always fire
@@ -5950,7 +5962,7 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
     if (!btResult || btResult.recommendation !== "TRADE" || btResult.walkForward !== true || btResult.oosTrades < 8) {
-      console.log(`🚫 BACKTEST BLOCK — ${symbol} WR ${btResult.winRate}% over ${btResult.trades} trades (need 75%+ TRADE rating). Skipping.`);
+      console.log(`🚫 BACKTEST BLOCK — ${symbol} WR ${btResult?.winRate ?? "n/a"}% over ${btResult?.trades ?? 0} trades (need OOS TRADE rating). Skipping.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       pushSignal(symbol, "BLOCKED", `Backtest WR ${btResult.winRate}% — need 75%+ TRADE rating (got ${btResult.recommendation})`);
       return;
@@ -6157,7 +6169,7 @@ async function run(tvSignal = null, symbol = null) {
         claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, null, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h: bullTrendConfirmed, vol }, symbol);
         recordClaudeCall();
         const meetsConfidence = claudeAnalysis.confidence >= CONFIDENCE_MIN;
-        allPass = claudeAnalysis.action === "BUY" && meetsConfidence;
+        allPass = rulesPass && claudeAnalysis.action === "BUY" && meetsConfidence;
         console.log(`  Decision:   ${claudeAnalysis.action} (${claudeAnalysis.confidence}% confidence) [${_claudeCallsToday}/${CLAUDE_DAILY_CAP} today]`);
         console.log(`  Min confidence required: ${CONFIDENCE_MIN}% (high-conviction mode)`);
         console.log(`  Reasoning:  ${claudeAnalysis.reasoning}`);
