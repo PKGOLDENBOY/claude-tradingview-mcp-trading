@@ -22,9 +22,12 @@ import { startBitgetHeartbeat } from "./lib/bitget-ws-heartbeat.mjs";
 import { fetchMarketCandles } from "./lib/market-data.mjs";
 import { safePositionNotional, paperEntry, paperExit, paperStats, paperPortfolioValuation } from "./lib/risk-engine.mjs";
 import { simulateSwingTrades, swingTradeMetrics } from "./lib/swing-backtest.mjs";
+import { planSpotSellQuantity, confirmSpotSellFill, confirmZeroFillCancellation } from "./lib/order-safety.mjs";
 // ─── Email notifications (Resend — HTTP, no SMTP, works on Railway) ──────────
 
-const EXCHANGE_WRITES_ALLOWED = process.env.PAPER_TRADING === "false" && process.env.LIVE_TRADING_ENABLED === "true";
+const EXCHANGE_WRITES_ALLOWED = process.env.PAPER_TRADING === "false" && process.env.LIVE_TRADING_ENABLED === "true" && process.env.LIVE_TRADING_APPROVED === "true";
+// LIVE_TRADING_APPROVED is intentionally unset on the Railway paper-testing service.
+// Source changes cannot turn exchange writes on unless a human supplies all three flags.
 function requireExchangeWrites(action) { if (!EXCHANGE_WRITES_ALLOWED) throw new Error("LIVE_TRADING_LOCKED: " + action); }
 const EMAIL_TO = process.env.NOTIFY_EMAIL || "joshualiversage01@gmail.com";
 
@@ -2502,6 +2505,7 @@ async function placeBitMartOrder(symbol, side, sizeUSD, price, quantityOverride 
   const timestamp = Date.now().toString();
 
   let bodyObj;
+  if (process.env.BITMART_LIVE_ORDERS_APPROVED !== "true") throw new Error("BITMART_LIVE_LOCKED: BitMart needs separately audited execution");
   if (side === "buy") {
     bodyObj = { symbol: bmSymbol, side: "buy", type: "market", notional: sizeUSD.toFixed(2) };
   } else {
@@ -3622,18 +3626,19 @@ async function sweepDust(log) {
 
 const _symbolPrecisionCache = {};
 async function getQuantityPrecision(symbol) {
-  if (acct().exchange === "bitmart") return 6; // BitMart: default precision
+  if (acct().exchange === "bitmart") return 6;
   const cacheKey = symbol + acct().id;
   if (_symbolPrecisionCache[cacheKey] !== undefined) return _symbolPrecisionCache[cacheKey];
-  try {
-    const res = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`);
-    const data = await res.json();
-    const precision = parseInt(data.data?.[0]?.quantityPrecision ?? "6", 10);
-    _symbolPrecisionCache[cacheKey] = precision;
-    return precision;
-  } catch {
-    return 6;
-  }
+  const res = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`, {
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error("BitGet precision request failed: HTTP " + res.status);
+  const data = await res.json();
+  const precision = Number(data.data?.[0]?.quantityPrecision);
+  if (data.code !== "00000" || !Number.isInteger(precision) || precision < 0 || precision > 12)
+    throw new Error("Cannot verify BitGet quantity precision for " + symbol);
+  _symbolPrecisionCache[cacheKey] = precision;
+  return precision;
 }
 
 function floorToDecimals(value, decimals) {
@@ -3652,106 +3657,108 @@ async function getBitGetServerTime() {
 
 async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride = null) {
   requireExchangeWrites("BitGet order");
-  // Defense-in-depth: block blacklisted BUYS at the lowest execution level too, so no caller can
-  // ever bypass the guard (blacklisted ZEC/MAGMA/UMXM were still being bought — belt AND braces).
+  if (side !== "buy" && side !== "sell") throw new Error("Invalid exchange order side");
   if (side === "buy" && HARD_BLACKLIST.has(symbol.toUpperCase())) {
-    console.log(`⛔ BUY BLOCKED [placeBitGetOrder] — ${symbol} is hard-blacklisted. Skipping.`);
-    return { blocked: true, code: "HARD_BLACKLIST", reason: "Coin is hard-blacklisted" };
+    console.log("BUY BLOCKED: hard blacklist " + symbol);
+    throw new Error("BUY_BLOCKED_HARD_BLACKLIST: " + symbol);
   }
-  // Capture pre-trade inventory BEFORE sending a market order.
-  // Previously this was sampled after placement, making successful fills appear
-  // as zero and leading to invented quantities and potential duplicate buys.
-  const spotBuyBalanceBefore = CONFIG.tradeMode === "spot" && side === "buy"
-    ? await getSpotBalance(symbol.replace("USDT", "")) : null;
-  const timestamp = await getBitGetServerTime();
-  const path =
-    CONFIG.tradeMode === "spot"
-      ? "/api/v2/spot/trade/place-order"
-      : "/api/v2/mix/order/place-order";
-
-  // Spot market BUY: size = USDT to spend
-  // Spot market SELL: size = actual token balance, floored to symbol's quantity precision
-  // Futures: use calculated quantity
+  const spot = CONFIG.tradeMode === "spot";
+  const isSpotSell = spot && side === "sell";
+  const referencePrice = Number(price);
   let orderSize;
-  if (CONFIG.tradeMode === "spot" && side === "buy") {
-    orderSize = sizeUSD.toFixed(2);
-  } else if (CONFIG.tradeMode === "spot" && side === "sell") {
-    const baseCoin = symbol.replace("USDT", "");
-    const available = await getSpotBalance(baseCoin);
-    if (available <= 0) throw new Error(`DUST:No ${baseCoin} balance to sell`);
-    const valueUSD = available * (price || 1);
-    if (valueUSD < 1.0) throw new Error(`DUST:Position too small — $${valueUSD.toFixed(4)} remaining (below $1 minimum)`);
-    const precision = await getQuantityPrecision(symbol);
-    const floored = floorToDecimals(available, precision);
-    orderSize = floored.toFixed(precision);
+  let plan = null;
+  // Spot SELL size is in base-asset units. Explicit requested quantity is mandatory:
+  // market orders must not silently liquidate all available exchange inventory.
+  if (isSpotSell) {
+    if (quantityOverride == null) throw new Error("Explicit spot sell quantity required");
+    if (!Number.isFinite(referencePrice) || referencePrice <= 0) throw new Error("Invalid spot sell price");
+    const asset = symbol.replace(/USDT$/, "");
+    const [available, precision] = await Promise.all([
+      getSpotBalance(asset), getQuantityPrecision(symbol)
+    ]);
+    plan = planSpotSellQuantity({ available, requested: quantityOverride, precision });
+    if (plan.quantity * referencePrice < 1.0) throw new Error("DUST:Spot sell below $1 minimum");
+    orderSize = plan.size;
+  } else if (spot && side === "buy") {
+    if (!Number.isFinite(Number(sizeUSD)) || Number(sizeUSD) <= 0)
+      throw new Error("Invalid spot buy notional");
+    orderSize = Number(sizeUSD).toFixed(2);
   } else {
-    orderSize = quantityOverride ?? (sizeUSD / price).toFixed(6);
+    if (!Number.isFinite(referencePrice) || referencePrice <= 0) throw new Error("Invalid futures order price");
+    orderSize = String(quantityOverride ?? (sizeUSD / referencePrice).toFixed(6));
   }
 
+  const spotBuyBalanceBefore = spot && side === "buy"
+    ? await getSpotBalance(symbol.replace(/USDT$/, "")) : null;
+  const timestamp = await getBitGetServerTime();
+  const path = spot ? "/api/v2/spot/trade/place-order" : "/api/v2/mix/order/place-order";
   const body = JSON.stringify({
-    symbol,
-    side,
-    orderType: "market",
-    size: orderSize,
-    ...(CONFIG.tradeMode === "futures" && {
-      productType: "USDT-FUTURES",
-      marginMode: "isolated",
-      marginCoin: "USDT",
-    }),
+    symbol, side, orderType: "market", size: orderSize,
+    ...(!spot && { productType: "USDT-FUTURES", marginMode: "isolated", marginCoin: "USDT" }),
   });
-
   const signature = signBitGet(timestamp, "POST", path, body);
-
-  const res = await fetch(`${acct().baseUrl}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "ACCESS-KEY": acct().apiKey,
-      "ACCESS-SIGN": signature,
-      "ACCESS-TIMESTAMP": timestamp,
-      "ACCESS-PASSPHRASE": acct().passphrase,
-      "locale": "en-US",
-    },
-    body,
-  });
-
-  const data = await res.json();
-  if (data.code !== "00000") {
-    throw new Error(`BitGet order failed: ${data.msg}`);
-  }
-
-  // For spot BUY: verify coins actually landed — track incremental gain only (not dust)
-  if (CONFIG.tradeMode === "spot" && side === "buy") {
-    const baseCoin = symbol.replace("USDT", "");
-    const balanceBefore = spotBuyBalanceBefore;
-    // Retry up to 3 times with increasing delays (some coins settle slowly)
-    let received = 0;
-    for (const delay of [3000, 4000, 5000]) {
-      await new Promise(r => setTimeout(r, delay));
-      const balanceAfter = await getSpotBalance(baseCoin);
-      received = balanceAfter - balanceBefore;
-      if (received > 0) break;
+  let submitted = false;
+  let orderId = null;
+  try {
+    // Once POST starts, any timeout/error is ambiguous until exchange reconciliation.
+    submitted = true;
+    const res = await fetch(`${acct().baseUrl}${path}`, {
+      method: "POST", signal: AbortSignal.timeout(10000),
+      headers: {
+        "Content-Type": "application/json",
+        "ACCESS-KEY": acct().apiKey,
+        "ACCESS-SIGN": signature,
+        "ACCESS-TIMESTAMP": timestamp,
+        "ACCESS-PASSPHRASE": acct().passphrase, locale: "en-US",
+      }, body,
+    });
+    const data = await res.json();
+    orderId = data.data?.orderId ?? null;
+    if (!res.ok || data.code !== "00000" || !orderId)
+      throw new Error("BitGet order submission not reliably acknowledged");
+    if (isSpotSell) {
+      // A successful HTTP POST confirms *acceptance*, not a filled sell.
+      // Never delete the position or book realised profit until the exact
+      // requested quantity is confirmed filled by BitGet.
+      for (const ms of [800, 1400, 2400, 4000]) {
+        await new Promise(resolve => setTimeout(resolve, ms));
+        const state = await readSpotOrderInfo(orderId);
+        if (confirmSpotSellFill({
+          status: state.status, confirmedQty: state.confirmedQty,
+          requestedQty: plan.quantity, precision: Number(plan.size.split(".")[1]?.length ?? 0),
+        })) return { ...data.data, confirmedQty: state.confirmedQty };
+        // A terminal partial fill cannot be booked as a successful full exit.
+        if (["filled", "full_fill", "cancelled", "cancel"].includes(String(state.status).toLowerCase()))
+          throw new Error("BitGet SELL confirmed only " + state.confirmedQty + "/" + plan.quantity + " units, status " + state.status);
+      }
+      throw new Error("Timed out waiting for verified BitGet spot SELL fill");
     }
-    const minExpected = sizeUSD / price * 0.90; // allow 10% slippage
-    if (received <= 0 || received < minExpected) {
-      // Do not fabricate a base-asset quantity when a real fill cannot be verified.
-      // Freeze further buys; a human must reconcile the exchange order ID.
-      _tradingPaused = true;
-      const state = loadLog();
-      state._tradingHaltReason = "UNCONFIRMED_BITGET_BUY_FILL";
-      state.unconfirmedOrders = [...(state.unconfirmedOrders || []), {
-        symbol, side, orderId: data.data?.orderId ?? null, clientOid: data.data?.clientOid ?? null,
-        observedQty: received, expectedMinimumQty: minExpected, time: new Date().toISOString(),
-      }];
-      saveLog(state);
-      throw new Error("UNCONFIRMED_BITGET_BUY_FILL: order " + (data.data?.orderId || "unknown") +
-        " was submitted but received quantity " + received + " is unverified; further buys halted");
+    if (spot && side === "buy") {
+      const asset = symbol.replace(/USDT$/, "");
+      let received = 0;
+      for (const delay of [3000, 4000, 5000]) {
+        await new Promise(resolve => setTimeout(resolve, delay));
+        const balanceAfter = await getSpotBalance(asset);
+        received = balanceAfter - spotBuyBalanceBefore;
+        if (received > 0) break;
+      }
+      const minExpected = sizeUSD / referencePrice * 0.90;
+      if (!Number.isFinite(received) || received <= 0 || received < minExpected)
+        throw new Error("UNCONFIRMED_BITGET_BUY_FILL: " + orderId + " qty=" + received);
+      return { ...data.data, confirmedQty: received };
     }
-    console.log(`✅ Balance confirmed: +${received.toFixed(6)} ${baseCoin} received (pre-existing: ${balanceBefore.toFixed(6)})`);
-    return { ...data.data, confirmedQty: received };
+    return data.data;
+  } catch (err) {
+    if (submitted) {
+      if (side === "sell") haltOnUnconfirmedSell({
+        symbol, orderId, reason: err.message, requestedQty: plan?.quantity ?? quantityOverride,
+      });
+      else if (side === "buy") haltOnUnconfirmedOrder({
+        symbol, clientOid: null, orderId, reason: err.message,
+      });
+    }
+    throw err;
   }
-
-  return data.data;
 }
 
 // ─── Tax CSV Logging ─────────────────────────────────────────────────────────
@@ -4252,6 +4259,22 @@ function haltOnUnconfirmedOrder({symbol, clientOid, orderId, reason}) {
   }
 }
 
+function haltOnUnconfirmedSell({symbol, orderId = null, requestedQty = null, reason}) {
+  _tradingPaused = true;
+  try {
+    const log = loadLog();
+    log._tradingHaltReason = "UNCONFIRMED_EXCHANGE_SELL";
+    log.unconfirmedOrders = [...(log.unconfirmedOrders || []), {
+      symbol, side: "sell", orderId, requestedQty, reason,
+      time: new Date().toISOString(),
+    }];
+    saveLog(log);
+  } catch (e) {
+    console.error("CRITICAL: failed to persist uncertain sell " + symbol + ": " + e.message);
+  }
+  console.error("CRITICAL UNCONFIRMED SELL " + symbol + ": " + reason + "; new entries halted pending reconciliation");
+}
+
 async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
   requireExchangeWrites("BitGet limit buy");
   if (HARD_BLACKLIST.has(symbol.toUpperCase()) || entryCapReached()) return null;
@@ -4376,40 +4399,58 @@ async function placeLimitSell(symbol, qty, limitPrice) {
 
 async function cancelOrder(symbol, orderId) {
   requireExchangeWrites("Cancel order");
+  if (!orderId) throw new Error("Cannot cancel order without an exchange order ID");
+  let submitted = false;
   try {
     const ts = Date.now().toString();
     const path = "/api/v2/spot/trade/cancel-order";
     const body = JSON.stringify({ symbol, orderId });
     const sign = signBitGet(ts, "POST", path, body);
-    await fetch(`${acct().baseUrl}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
-      body,
+    submitted = true;
+    const res = await fetch(`${acct().baseUrl}${path}`, {
+      method: "POST", signal: AbortSignal.timeout(10000),
+      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey,
+        "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts,
+        "ACCESS-PASSPHRASE": acct().passphrase, locale: "en-US" }, body,
     });
+    const response = await res.json();
+    if (!res.ok || response.code !== "00000") throw new Error("Cancel response rejected for " + orderId);
+    for (const delay of [500, 1200, 2500]) {
+      await new Promise(resolve => setTimeout(resolve, delay));
+      const state = await readSpotOrderInfo(orderId);
+      if (confirmZeroFillCancellation({status: state.status, confirmedQty: state.confirmedQty}))
+        return true;
+      if (state.confirmedQty > 0 || ["filled", "full_fill"].includes(String(state.status).toLowerCase()))
+        throw new Error("Cannot confirm safe cancellation: order has filled quantity " + state.confirmedQty);
+    }
+    throw new Error("Cancellation still not confirmed for " + orderId);
   } catch (err) {
-    console.log(`  ⚠️  Cancel order ${orderId} failed: ${err.message}`);
+    if (submitted) haltOnUnconfirmedSell({symbol, orderId, reason: "TP cancel uncertain: " + err.message});
+    throw err;
   }
 }
 
 async function cancelAllSymbolOrders(symbol) {
   requireExchangeWrites("Cancel all orders");
-  try {
-    // Fetch open orders then cancel individually (bulk cancel endpoint is not available)
-    const ts = Date.now().toString();
-    const listPath = `/api/v2/spot/trade/unfilled-orders?symbol=${symbol}&limit=20`;
-    const listSign = signBitGet(ts, "GET", listPath);
-    const listRes = await fetch(`${acct().baseUrl}${listPath}`, {
-      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": listSign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
-    });
-    const listData = await listRes.json();
-    const orders = listData.data || [];
-    console.log(`  🗑️  Found ${orders.length} open orders for ${symbol}`);
-    for (const o of orders) {
-      await cancelOrder(symbol, o.orderId);
-    }
-  } catch (err) {
-    console.log(`  ⚠️  cancelAllSymbolOrders(${symbol}) failed: ${err.message}`);
+  const ts = Date.now().toString();
+  const listPath = `/api/v2/spot/trade/unfilled-orders?symbol=${symbol}&limit=20`;
+  const listSign = signBitGet(ts, "GET", listPath);
+  const listRes = await fetch(`${acct().baseUrl}${listPath}`, {
+    headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": listSign,
+      "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, locale: "en-US" },
+    signal: AbortSignal.timeout(8000),
+  });
+  const listData = await listRes.json();
+  if (!listRes.ok || listData.code !== "00000" || !Array.isArray(listData.data)) {
+    haltOnUnconfirmedSell({symbol, reason:"Could not verify open orders before selling"});
+    throw new Error("Cannot verify open orders to cancel for " + symbol);
   }
+  // Fail closed if exchange truncates results; do not pretend all orders are canceled.
+  if (listData.data.length >= 20) {
+    haltOnUnconfirmedSell({symbol, reason:"Open order list limit reached"});
+    throw new Error("More than 19 open orders; manual reconciliation required");
+  }
+  for (const row of listData.data) await cancelOrder(symbol, row.orderId);
 }
 
 async function getOrderStatus(symbol, orderId) {
