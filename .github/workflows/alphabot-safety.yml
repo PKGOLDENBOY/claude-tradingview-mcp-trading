@@ -1,7 +1,7 @@
 name: AlphaBot safety patch CI
 on:
   push:
-    branches: [fix/alphabot-safety-audit-20261020]
+    branches: [fix/alphabot-safety-audit-20261020, fix/trade-size-log-actual-percentage-20261022]
   workflow_dispatch:
 permissions:
   contents: read
