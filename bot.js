@@ -3372,8 +3372,9 @@ async function runLongTermPaperShadow() {
   const fearGreed = await fetchFearGreed().catch(() => null);
   const policy = balancedAdaptiveLongtermPolicy({
     regime:regime?.regime,trend:regime?.btcTrend,
-    volatilityRatio:Number(regime?.volRatio),
-    fearGreed:Number(fearGreed?.value),drawdownPct
+    // Unknown market data MUST remain unknown, never coerce null to zero.
+    volatilityRatio:Number.isFinite(regime?.volRatio) ? regime.volRatio : NaN,
+    fearGreed:Number.isFinite(fearGreed?.value) ? fearGreed.value : NaN,drawdownPct
   });
   const now = Date.now();
   // Protect existing virtual holdings on every run, regardless of entry rules.
