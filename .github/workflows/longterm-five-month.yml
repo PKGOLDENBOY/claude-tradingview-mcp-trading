@@ -1,0 +1,99 @@
+name: Five-month read-only long-term backtest
+on:
+  push:
+    branches: [test/alphabot-lt-5months-20261022]
+    paths:
+      - .github/workflows/longterm-five-month.yml
+      - lib/longterm-shadow-engine.mjs
+      - scripts/longterm-5m-backtest.mjs
+      - test/longterm-shadow.test.mjs
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      LT_BACKTEST_DAYS: "153"
+      LT_BACKTEST_END_UTC: "2026-10-22T00:00:00.000Z"
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Verify syntax, risk and ledger invariants
+        run: |
+          node --check scripts/longterm-5m-backtest.mjs
+          node --check lib/longterm-shadow-engine.mjs
+          node --test test/longterm-shadow.test.mjs
+      - name: Backtest 153 days of public BitGet data (NO ORDERS)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/longterm-5m-backtest.mjs > /tmp/lt5m.log 2>&1 || { tail -n 35 /tmp/lt5m.log | cut -c 1-1200; exit 1; }
+          tail -n 3 /tmp/lt5m.log | cut -c 1-1200
+      - name: Extract five-month report and verify market coverage
+        shell: bash
+        run: |
+          node --input-type=module <<'EOF'
+          import fs from 'node:fs';
+          const lines=fs.readFileSync('/tmp/lt5m.log','utf8').split(/\r?\n/).filter(Boolean);
+          const parsed=lines.map(s=>{try{return JSON.parse(s)}catch{return null}}).filter(Boolean);
+          const final=parsed.findLast(x=>x.tag==='LT_5M_FINAL');
+          if(!final)throw Error('No final five-month market result');
+          const report={
+            period:[final.from,final.to],
+            requestedCoins:final.dataCoverage.requested,
+            eligibleCoins:final.dataCoverage.eligible,
+            missingCoins:final.dataCoverage.exclusions,
+            startingVirtualUSD:final.simulation.initialUSD,
+            finalVirtualUSD:final.simulation.markToMarketUSD,
+            simulatedNetPnlUSD:final.simulation.combinedSimulatedPnlUSD,
+            simulatedNetReturnPct:final.simulation.combinedReturnPct,
+            realizedPnlUSD:final.simulation.realizedPnlUSD,
+            simulatedBuys:final.simulation.simulatedBuys,
+            simulatedSells:final.simulation.simulatedSells,
+            openPositions:final.simulation.openPositions,
+            fullyClosedPositions:final.simulation.completeExits,
+            winRatePct:final.winRatePct,
+            maxDrawdownPct:final.maxDrawdownPct,
+            btcBenchmarkAfterCostsPct:final.benchmarkBTC?.afterEstimatedCostsPct,
+            weekly:final.weekly,
+            dataErrors:final.api.fetchErrors,
+            requestCount:final.api.apiRequests,
+            buyBlockedByRegime:final.counters.blockedRegime,
+            buyBlockedByFear:final.counters.blockedFear,
+            indicatorsMissing:final.counters.indicatorReadyPairs,
+            exitsByReason:final.closedByReason,
+            topAssets:final.topAssets,
+            worstAssets:final.worstAssets,
+            limitations:final.limitations,
+            exchangeOrderRequests:0,
+          };
+          fs.mkdirSync('reports',{recursive:true});
+          fs.writeFileSync('reports/lt-5month-2026-05-22-to-2026-10-22.json',JSON.stringify({report,raw:final},null,2));
+          console.log('FIVE_MONTH_SUMMARY '+JSON.stringify(report));
+          if(final.days!==153||final.from!=='2026-05-22T00:00:00.000Z'||final.to!=='2026-10-22T00:00:00.000Z')
+            throw Error('Wrong period; cannot label this a 5-month backtest');
+          if(final.dataCoverage.eligible<8)
+            throw Error('Historical coverage insufficient: '+final.dataCoverage.eligible+' eligible coins');
+          if(final.simulation.markToMarketUSD===null)
+            throw Error('Portfolio valuation incomplete: some open synthetic positions unpriced');
+          if(final.api.fetchErrors>25)
+            throw Error('Excessive data API errors: '+final.api.fetchErrors);
+          if(final.simulation.openPositions===0 && final.ledgerReconciled!==true)
+            throw Error('Virtual ledger failed reconciliation');
+          EOF
+      - name: Preserve full five-month result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alphabot-five-month-longterm-readonly-history
+          path: |
+            reports/lt-5month-2026-05-22-to-2026-10-22.json
+            /tmp/lt5m.log
+          if-no-files-found: warn
