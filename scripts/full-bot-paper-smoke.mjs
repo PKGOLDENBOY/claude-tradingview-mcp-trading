@@ -1,7 +1,7 @@
 /**
  * Live public-market, paper-locked, whole-bot startup/HTTP/shadow smoke.
  * Executes NO exchange order: all real-order flags OFF, daily entry cap 0.
- * Uses generated fake exchange credentials, no Anthropic/Resend keys.
+ * Uses NO exchange credentials, Anthropic keys or Resend keys.
  * Runs against a disposable GitHub Actions runner, never the user's bot.
  */
 import assert from "node:assert/strict";
@@ -31,9 +31,8 @@ function start(){
       SYMBOLS:"BTCUSDT,ETHUSDT",SYMBOL:"BTCUSDT",
       BOT_PIN:pin,WEBHOOK_SECRET:secret,NOTIFY_EMAIL:"",
       RESEND_API_KEY:"",ANTHROPIC_API_KEY:"",
-      BITGET_API_KEY:"fake_readonly_test_key_no_account",
-      BITGET_SECRET_KEY:"fake_readonly_test_secret_no_account",
-      BITGET_PASSPHRASE:"fake_readonly_test_passphrase_no_account",
+      // Paper-mode must boot with absolutely NO exchange credentials.
+      BITGET_API_KEY:"",BITGET_SECRET_KEY:"",BITGET_PASSPHRASE:"",
     },stdio:["ignore","pipe","pipe"],
   });
   let output="";
