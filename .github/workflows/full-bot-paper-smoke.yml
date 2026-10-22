@@ -1,0 +1,34 @@
+name: Full bot end-to-end paper market smoke
+on:
+  push:
+    branches: [test/alphabot-lt-balanced-adaptive-20261022]
+    paths:
+      - .github/workflows/full-bot-paper-smoke.yml
+      - bot.js
+      - lib/market-data.mjs
+      - lib/longterm-adaptive-policy.mjs
+      - lib/longterm-shadow-engine.mjs
+      - scripts/full-bot-paper-smoke.mjs
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  paper-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+      LT_PAPER_SHADOW_ENABLED: "true"
+      BITMART_ENABLED: "false"
+      SNIPER_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies, no package scripts
+        run: npm ci --ignore-scripts
+      - name: Boot actual bot in disposable paper mode and validate APIs, adaptive shadow, restart
+        run: node scripts/full-bot-paper-smoke.mjs
