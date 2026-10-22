@@ -7,7 +7,7 @@ on:
   schedule:
     - cron: '0 0 * * 1'
   push:
-    branches: [fix/weekly-backtest-readonly-20261022]
+    branches: [main, fix/weekly-backtest-readonly-20261022]
     paths:
       - .github/workflows/weekly-backtest.yml
   workflow_dispatch:
