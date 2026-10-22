@@ -1,0 +1,120 @@
+name: AlphaBot market-adaptive long-term comparison
+on:
+  push:
+    branches: [test/alphabot-lt-adaptive-regime-20261022]
+    paths:
+      - .github/workflows/longterm-adaptive-compare.yml
+      - lib/longterm-adaptive-policy.mjs
+      - lib/longterm-shadow-engine.mjs
+      - scripts/longterm-5m-backtest.mjs
+      - test/longterm-adaptive-policy.test.mjs
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - case: baseline-153
+            days: "153"
+            end: "2026-10-22T00:00:00.000Z"
+            adaptive: "false"
+          - case: adaptive-153
+            days: "153"
+            end: "2026-10-22T00:00:00.000Z"
+            adaptive: "true"
+          - case: baseline-92
+            days: "92"
+            end: "2026-08-22T00:00:00.000Z"
+            adaptive: "false"
+          - case: adaptive-92
+            days: "92"
+            end: "2026-08-22T00:00:00.000Z"
+            adaptive: "true"
+          - case: baseline-61
+            days: "61"
+            end: "2026-10-22T00:00:00.000Z"
+            adaptive: "false"
+          - case: adaptive-61
+            days: "61"
+            end: "2026-10-22T00:00:00.000Z"
+            adaptive: "true"
+    env:
+      LT_BACKTEST_DAYS: ${{ matrix.days }}
+      LT_BACKTEST_END_UTC: ${{ matrix.end }}
+      LT_ADAPTIVE_POLICY: ${{ matrix.adaptive }}
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Verify adaptive policy and virtual ledger tests
+        run: |
+          node --check scripts/longterm-5m-backtest.mjs
+          node --check lib/longterm-shadow-engine.mjs
+          node --check lib/longterm-adaptive-policy.mjs
+          node --test test/longterm-shadow.test.mjs test/longterm-adaptive-policy.test.mjs
+      - name: Execute historic read-only replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/longterm-5m-backtest.mjs > /tmp/alpha-compare.log 2>&1 || { tail -n 30 /tmp/alpha-compare.log | cut -c 1-1200; exit 1; }
+          tail -n 3 /tmp/alpha-compare.log | cut -c 1-1500
+      - name: Validate result and print comparable summary
+        shell: bash
+        env:
+          COMPARISON_CASE: ${{ matrix.case }}
+        run: |
+          node --input-type=module <<'EOF'
+          import fs from 'node:fs';
+          const entries=fs.readFileSync('/tmp/alpha-compare.log','utf8').split(/\r?\n/)
+            .filter(Boolean).map(line=>{try{return JSON.parse(line)}catch{return null}}).filter(Boolean);
+          const final=entries.findLast(e=>e.tag==='LT_5M_FINAL');
+          if(!final)throw Error('No final result; cannot claim profitability');
+          const z={
+            name:process.env.COMPARISON_CASE, period:[final.from,final.to],
+            adaptiveEnabled:final.adaptiveMarketPolicyEnabled,
+            capital:final.simulation.initialUSD,finalPortfolio:final.simulation.markToMarketUSD,
+            netUSD:final.simulation.combinedSimulatedPnlUSD,
+            netPct:final.simulation.combinedReturnPct,
+            realizedUSD:final.simulation.realizedPnlUSD,
+            wins:final.wins,losses:final.losses,winRatePct:final.winRatePct,
+            maxDrawdownPct:final.maxDrawdownPct,
+            buys:final.simulation.simulatedBuys,sells:final.simulation.simulatedSells,
+            open:final.simulation.openPositions,closed:final.simulation.completeExits,
+            btcBenchmarkPct:final.benchmarkBTC?.afterEstimatedCostsPct,
+            eligible:final.dataCoverage.eligible,missing:final.dataCoverage.exclusions,
+            apiErrors:final.api.fetchErrors,policyReasonCounts:final.counters.adaptiveReasonCounts,
+            scoreBlocked:final.counters.adaptiveEntryBlockedByScore,
+            lowerSizeScans:final.counters.adaptiveSizeReduced,
+            entrySignals:final.counters.qualifyingSignals,
+            exitReasons:final.closedByReason,weekly:final.weekly,
+            warnings:final.limitations,exchangeOrders:0
+          };
+          if(z.adaptiveEnabled !== (process.env.LT_ADAPTIVE_POLICY==='true'))
+            throw Error('Adaptive mode mismatch');
+          if(final.dataCoverage.eligible<8)throw Error('Insufficient coin coverage');
+          if(z.finalPortfolio===null||!Number.isFinite(z.finalPortfolio))
+            throw Error('Virtual account cannot be priced');
+          if(z.apiErrors>25)throw Error('Market data errors too high');
+          fs.mkdirSync('reports',{recursive:true});
+          fs.writeFileSync('reports/'+process.env.COMPARISON_CASE+'.json',JSON.stringify(z,null,2));
+          console.log('STRATEGY_COMPARE_SUMMARY '+JSON.stringify(z));
+          EOF
+      - name: Preserve results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: alpha-comparison-${{ matrix.case }}
+          path: |
+            reports/${{ matrix.case }}.json
+            /tmp/alpha-compare.log
+          if-no-files-found: warn
