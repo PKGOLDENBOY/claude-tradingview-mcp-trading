@@ -1,0 +1,85 @@
+name: AlphaBot 1-3-6-12 month public historical research
+on:
+  push:
+    branches: [research/alphabot-multihorizon-20261022]
+    paths:
+      - .github/workflows/multihorizon-research.yml
+      - lib/backtest-horizons.mjs
+      - test/backtest-horizons.test.mjs
+      - scripts/multihorizon-backtest.mjs
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  historical-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        days: [30, 90, 180, 365]
+    env:
+      LT_BACKTEST_DAYS: "${{ matrix.days }}"
+      LT_BACKTEST_END_UTC: "2026-10-20T00:00:00.000Z"
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Syntax and deterministic safety/pagination tests
+        run: |
+          node --check scripts/multihorizon-backtest.mjs
+          node --check lib/backtest-horizons.mjs
+          node --test test/backtest-horizons.test.mjs test/longterm-shadow.test.mjs
+      - name: Historical public BitGet replay (no keys, no trades, no POST)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          node scripts/multihorizon-backtest.mjs > "reports/horizon-${{ matrix.days }}.log" 2>&1 || { tail -n 50 "reports/horizon-${{ matrix.days }}.log"; exit 1; }
+          node --input-type=module <<'EOF'
+          import fs from 'node:fs';
+          const days=Number(process.env.LT_BACKTEST_DAYS);
+          const lines=fs.readFileSync(`reports/horizon-${days}.log`,'utf8').split(/\r?\n/).filter(Boolean);
+          const final=lines.map(line=>{try{return JSON.parse(line)}catch{return null}}).findLast(row=>row?.tag==='LT_HORIZON_FINAL');
+          if(!final)throw Error('NO_VERIFIABLE_PUBLIC_HISTORY_REPORT');
+          const sim=final.simulation;
+          const report={
+            type:'READ_ONLY_HYPOTHETICAL_AFTER_ASSUMED_FEES',
+            horizonDays:days,from:final.from,to:final.to,
+            requestedSymbols:final.dataCoverage.requested,
+            eligibleSymbols:final.dataCoverage.eligible,
+            excludedSymbols:final.dataCoverage.excluded,
+            initialUSD:sim.initialUSD,
+            simulatedMarkToMarketUSD:sim.markToMarketUSD,
+            netSimulatedReturnPct:sim.combinedReturnPct,
+            sellEventWinRatePct:final.sellEventWinRatePct,
+            sellEventProfitFactor:final.sellEventProfitFactor,
+            completedPositions:final.totalFullyClosedPositions,
+            simulatedBuys:sim.simulatedBuys,simulatedSells:sim.simulatedSells,
+            maxDrawdownPct:Math.abs(final.maxDrawdownPct),
+            btcBuyHoldAfterAssumedCostsPct:final.benchmarkBTC?.afterEstimatedCostsPct ?? null,
+            dataErrors:final.api.fetchErrors,
+            notes:final.limitations,
+            exchangeOrderRequests:0
+          };
+          fs.writeFileSync(`reports/horizon-${days}.json`,JSON.stringify({summary:report,raw:final},null,2));
+          console.log('HISTORICAL_HORIZON_SUMMARY '+JSON.stringify(report));
+          if(final.dataCoverage.eligible<8)throw Error('INSUFFICIENT_HISTORICAL_DATA_COVERAGE');
+          if(!Number.isFinite(sim.markToMarketUSD))throw Error('UNVERIFIABLE_END_PORTFOLIO');
+          if(!Number.isFinite(report.btcBuyHoldAfterAssumedCostsPct))throw Error('MISSING_BTC_BENCHMARK');
+          if(final.api.fetchErrors>20)throw Error('EXCESS_PUBLIC_PRICE_REQUEST_ERRORS');
+          EOF
+      - name: Retain research logs and reports even on errors
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alphabot-research-${{ matrix.days }}-days
+          path: |
+            reports/horizon-${{ matrix.days }}.json
+            reports/horizon-${{ matrix.days }}.log
+          if-no-files-found: warn
