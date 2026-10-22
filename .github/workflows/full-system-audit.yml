@@ -1,0 +1,79 @@
+name: AlphaBot full system regression and safety audit
+on:
+  push:
+    branches: [test/alphabot-lt-balanced-adaptive-20261022]
+    paths:
+      - .github/workflows/full-system-audit.yml
+      - bot.js
+      - lib/**
+      - scripts/**
+      - test/**
+      - package.json
+      - package-lock.json
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  all-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+      LT_PAPER_SHADOW_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+      - name: Parse every JavaScript module
+        shell: bash
+        run: |
+          set -euo pipefail
+          find . -path './node_modules' -prune -o -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) -print0 | while IFS= read -r -d '' file; do
+            node --check "$file"
+          done
+      - name: Run every Node test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          find test -maxdepth 1 -type f -name '*.test.mjs' -print | sort
+          node --test test/*.test.mjs
+      - name: Dependency vulnerability audit
+        run: npm audit --omit=dev --audit-level=high
+      - name: Verify live orders are gated
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'process.env.LIVE_TRADING_APPROVED === "true"' bot.js
+          grep -F 'requireExchangeWrites("BitGet order")' bot.js
+          grep -F 'requireExchangeWrites("BitMart order")' bot.js
+      - name: Validate long-term paper-only isolation
+        run: node --test test/longterm-paper-integration.test.mjs test/longterm-adaptive-policy.test.mjs
+  public-feed-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Public market candle smoke without credentials
+        shell: bash
+        run: |
+          node --input-type=module <<'EOF'
+          import {fetchMarketCandles} from './lib/market-data.mjs';
+          for(const [symbol,tf] of [['BTCUSDT','15m'],['ETHUSDT','1H'],['SOLUSDT','4H'],['BTCUSDT','1D']]){
+            const rows=await fetchMarketCandles(symbol,tf,80,{closedOnly:true});
+            if(rows.length<20||rows.some(c=>!Number.isFinite(c.close)||c.close<=0))
+              throw Error('Bad public market data '+symbol+' '+tf);
+            console.log('PUBLIC_FEED_OK',symbol,tf,rows.length);
+          }
+          EOF
