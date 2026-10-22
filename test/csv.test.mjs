@@ -52,3 +52,36 @@ test("micro-price and BTC quantities are recorded with 8 decimal places",()=>{
   assert.match(rows[1],/0\.00012500/);
   assert.ok(rows[1].includes("0.010000"));
 });
+
+test("paper sniper entries are PAPER, fee-adjusted, and retain 8-decimal quantity",()=>{
+  const w=makeCsvWriter();w.initCsv();
+  w.writeTradeCsv({timestamp:"2026-10-20T18:00:00Z",type:"entry",symbol:"BTCUSDT",
+    tradeType:"sniper",paperTrading:true,orderPlaced:true,
+    price:80000,tradeSize:10,paperEntryFeeUsd:0.012345,orderId:"PAPER-SNIPER-A"});
+  const row=w.get().trim().split("\n").at(-1);
+  assert.ok(row.includes(",PAPER,"));
+  assert.ok(!row.includes(",LIVE,"));
+  assert.ok(row.includes(",0.00012500,"));
+  assert.ok(row.includes(",0.012345,"));
+});
+test("paper sniper exits record adjusted fees and never claim LIVE",()=>{
+  const w=makeCsvWriter();w.initCsv();
+  w.writeTradeCsv({timestamp:"2026-10-20T19:00:00Z",type:"exit",symbol:"BTCUSDT",
+    tradeType:"sniper",paperTrading:true,orderPlaced:true,feeAdjusted:true,
+    quantity:0.000125,price:81000,pnlPct:1.25,pnlUSD:0.1,
+    exitFeeUSD:0.017123,exitReasons:["stop"],orderId:"PAPER-SNIPER-B"});
+  const row=w.get().trim().split("\n").at(-1);
+  assert.ok(row.includes(",PAPER,"));
+  assert.ok(!row.includes(",LIVE,"));
+  assert.ok(row.includes(",0.017123,"));
+});
+test("existing LIVE sniper accounting remains labelled LIVE",()=>{
+  const w=makeCsvWriter();w.initCsv();
+  w.writeTradeCsv({timestamp:"2026-10-20T20:00:00Z",type:"entry",symbol:"BTCUSDT",
+    tradeType:"sniper",paperTrading:false,orderPlaced:true,
+    price:80000,tradeSize:10,orderId:"LIVE-SNIPER-A"});
+  const row=w.get().trim().split("\n").at(-1);
+  assert.ok(row.includes(",LIVE,"));
+  assert.ok(!row.includes(",PAPER,"));
+  assert.ok(row.includes(",0.000125,"));
+});
