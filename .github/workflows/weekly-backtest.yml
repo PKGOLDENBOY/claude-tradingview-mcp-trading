@@ -1,30 +1,78 @@
-name: Weekly Backtest
+name: Weekly read-only AlphaBot market validation
 
+# This replaces the legacy in-sample optimizer, which silently accepted zero
+# available market candles and repeatedly failed to push its resulting file.
+# No repository writes, no trading keys, and never changes live strategy rules.
 on:
   schedule:
-    - cron: '0 0 * * 1'  # Every Monday at midnight UTC
-  workflow_dispatch:       # Allow manual trigger from GitHub UI
+    - cron: '0 0 * * 1'
+  push:
+    branches: [fix/weekly-backtest-readonly-20261022]
+    paths:
+      - .github/workflows/weekly-backtest.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  backtest:
+  public-historical-review:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LT_BACKTEST_DAYS: '35'
+      PAPER_TRADING: 'true'
+      LIVE_TRADING_ENABLED: 'false'
+      LIVE_TRADING_APPROVED: 'false'
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Run backtest
-        run: node backtest.js
-
-      - name: Commit updated results
+          node-version: '22'
+      - name: Check syntax and deterministic strategy safety tests
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add backtest_results.json
-          git diff --staged --quiet || git commit -m "chore: weekly backtest results $(date -u +%Y-%m-%d)"
-          git push
+          node --check scripts/longterm-5w-backtest.mjs
+          node --check lib/longterm-shadow-engine.mjs
+          node --test test/longterm-shadow.test.mjs
+      - name: Run recent historical public GET-only analysis (NO ORDERS)
+        run: |
+          mkdir -p reports
+          node scripts/longterm-5w-backtest.mjs > reports/weekly-readonly.log 2>&1 || { tail -n 50 reports/weekly-readonly.log; exit 1; }
+      - name: Fail closed if market data is unavailable or final report incomplete
+        run: |
+          node --input-type=module <<'EOF'
+          import fs from 'node:fs';
+          const rows=fs.readFileSync('reports/weekly-readonly.log','utf8')
+            .split(/\r?\n/).filter(Boolean)
+            .map(line=>{try{return JSON.parse(line)}catch{return null}});
+          const final=rows.findLast(row=>row?.tag==='LT_5W_FINAL');
+          if(!final)throw Error('NO_BACKTEST_REPORT');
+          const result={
+            type:'HYPOTHETICAL_READ_ONLY_NOT_A_LIVE_TRADING_SIGNAL',
+            range:[final.from,final.to],
+            eligibleSymbols:final.dataCoverage?.eligible,
+            excludedSymbols:final.dataCoverage?.excluded,
+            dataErrors:final.api?.fetchErrors,
+            simulatedNetReturnPct:final.simulation?.combinedReturnPct,
+            btcBuyHoldAfterEstimatedCostsPct:final.benchmarkBTC?.afterEstimatedCostsPct,
+            simulatedCompletedPositions:final.totalFullyClosedPositions,
+            simulatedMaxDrawdownPct:Math.abs(final.maxDrawdownPct),
+            limitations:final.limitations,
+            exchangeOrders:0
+          };
+          fs.writeFileSync('reports/weekly-readonly-summary.json',JSON.stringify(result,null,2));
+          console.log('WEEKLY_READ_ONLY_SUMMARY '+JSON.stringify(result));
+          if(!(result.eligibleSymbols>=8))throw Error('INSUFFICIENT_PUBLIC_HISTORICAL_DATA');
+          if(!Number.isFinite(result.dataErrors)||result.dataErrors>20)throw Error('PUBLIC_DATA_ERRORS_EXCEED_LIMIT');
+          if(!Number.isFinite(result.simulatedNetReturnPct))throw Error('UNVERIFIABLE_SIMULATED_RETURN');
+          if(!Number.isFinite(result.btcBuyHoldAfterEstimatedCostsPct))throw Error('UNVERIFIABLE_BTC_BENCHMARK');
+          EOF
+      - name: Upload research artifacts, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alphabot-weekly-readonly
+          path: |
+            reports/weekly-readonly.log
+            reports/weekly-readonly-summary.json
+          if-no-files-found: warn
