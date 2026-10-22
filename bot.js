@@ -2468,7 +2468,7 @@ function checkTradeLimits(log) {
   const tradeSize = CONFIG.maxTradeSizeUSD ? Math.min(portfolio * sizePct, CONFIG.maxTradeSizeUSD) : portfolio * sizePct;
 
   console.log(
-    `✅ Trade size: $${tradeSize.toFixed(2)} (${(sizePct * 100).toFixed(0)}% of $${portfolio.toFixed(2)})`,
+    `✅ Trade size: ${tradeSize.toFixed(2)} (${(portfolio > 0 ? tradeSize / portfolio * 100 : 0).toFixed(1)}% of ${portfolio.toFixed(2)})`,
   );
 
   return true;
