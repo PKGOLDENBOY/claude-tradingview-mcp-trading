@@ -3951,19 +3951,25 @@ function writeTradeCsv(logEntry) {
       side = "SELL";
       quantity = logEntry.quantity != null ? String(logEntry.quantity) : "";
       totalUSD = val > 0 ? val.toFixed(2) : "";
-      fee = val > 0 ? (val * getFeePct()).toFixed(4) : "";
-      netAmount = val > 0 ? (val - val * getFeePct()).toFixed(2) : "";
+      const feeUsd = logEntry.paperTrading && logEntry.feeAdjusted === true
+        ? Number(logEntry.exitFeeUSD || 0)
+        : val * (logEntry.paperTrading ? PAPER_FEE_FRACTION : getFeePct());
+      fee = val > 0 ? feeUsd.toFixed(logEntry.paperTrading ? 6 : 4) : "";
+      netAmount = val > 0 ? (val - feeUsd).toFixed(logEntry.paperTrading ? 4 : 2) : "";
       orderId = logEntry.orderId || "";
-      mode = "LIVE";
+      mode = logEntry.paperTrading ? "PAPER" : "LIVE";
       notes = `[SNIPER] Exit: ${logEntry.exitReasons?.join("; ")}${pnlStr}`;
     } else {
       side = "BUY";
-      quantity = (logEntry.tradeSize / logEntry.price).toFixed(6);
+      quantity = (logEntry.tradeSize / logEntry.price).toFixed(logEntry.paperTrading ? 8 : 6);
       totalUSD = logEntry.tradeSize.toFixed(2);
-      fee = (logEntry.tradeSize * getFeePct()).toFixed(4);
-      netAmount = (logEntry.tradeSize - logEntry.tradeSize * getFeePct()).toFixed(2);
+      const feeUsd = logEntry.paperTrading
+        ? Number(logEntry.paperEntryFeeUsd ?? (logEntry.tradeSize * PAPER_FEE_FRACTION))
+        : logEntry.tradeSize * getFeePct();
+      fee = feeUsd.toFixed(logEntry.paperTrading ? 6 : 4);
+      netAmount = (logEntry.tradeSize - feeUsd).toFixed(logEntry.paperTrading ? 4 : 2);
       orderId = logEntry.orderId || "";
-      mode = "LIVE";
+      mode = logEntry.paperTrading ? "PAPER" : "LIVE";
       notes = `[SNIPER] Entry: Trail +${(SNIPER.trailActivatePct * 100).toFixed(0)}%/${(SNIPER.trailPct * 100).toFixed(0)}% | SL -${(SNIPER.stopLossPct * 100).toFixed(0)}% | ${SNIPER.maxHoldMin}min`;
     }
   } else if (logEntry.type === "exit") {
