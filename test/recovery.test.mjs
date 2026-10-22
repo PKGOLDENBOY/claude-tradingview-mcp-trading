@@ -15,15 +15,17 @@ function policy(env) {
   return new Function('process', policySource + '\nreturn {allowed:EXCHANGE_WRITES_ALLOWED, requireExchangeWrites};')({ env });
 }
 
-test('both explicit flags are required to enable real orders', () => {
+test('three independent explicit flags are required to enable real orders', () => {
   for (const env of [{}, { PAPER_TRADING:'true' }, { LIVE_TRADING_ENABLED:'true' },
                      { PAPER_TRADING:'false' }, { PAPER_TRADING:'true', LIVE_TRADING_ENABLED:'true' },
-                     { PAPER_TRADING:'false', LIVE_TRADING_ENABLED:'false' }]) {
+                     { PAPER_TRADING:'false', LIVE_TRADING_ENABLED:'false' },
+                     { PAPER_TRADING:'false', LIVE_TRADING_ENABLED:'true' },
+                     { PAPER_TRADING:'false', LIVE_TRADING_APPROVED:'true' }]) {
     const p = policy(env);
     assert.equal(p.allowed, false);
     assert.throws(() => p.requireExchangeWrites('test order'), /LIVE_TRADING_LOCKED/);
   }
-  const authorized = policy({ PAPER_TRADING:'false', LIVE_TRADING_ENABLED:'true' });
+  const authorized = policy({ PAPER_TRADING:'false', LIVE_TRADING_ENABLED:'true', LIVE_TRADING_APPROVED:'true' });
   assert.equal(authorized.allowed, true);
   assert.doesNotThrow(() => authorized.requireExchangeWrites('test order'));
 });
