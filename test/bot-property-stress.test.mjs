@@ -56,8 +56,13 @@ test("10000 randomized sell requests never oversell and precision plans match fi
     const precision=Math.floor(between(0,13));
     const available=between(.5,500);
     const requested=available*between(.02,.999);
-    const a=planSpotSellQuantity({available,requested,precision});
     const unit=10**precision;
+    if(Math.floor(requested*unit+1e-7)<=0) {
+      assert.throws(()=>planSpotSellQuantity({available,requested,precision}),
+        /below exchange quantity precision/);
+      continue;
+    }
+    const a=planSpotSellQuantity({available,requested,precision});
     assert.ok(a.quantity>=0,"non-negative");
     assert.ok(a.quantity<=available+1/unit*0.501,"must not oversell balance");
     assert.ok(a.quantity<=requested+1/unit*0.501,"must not exceed partial order");
