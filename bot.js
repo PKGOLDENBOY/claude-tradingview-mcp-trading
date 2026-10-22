@@ -18,6 +18,7 @@ import { AsyncLocalStorage } from "async_hooks";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import WebSocket from "ws";
+import { summarizePaperLedgerForLog } from "./lib/paper-ledger-telemetry.mjs";
 import { formatTradeSizeSummary } from "./lib/trade-size-report.mjs";
 import { startBitgetHeartbeat } from "./lib/bitget-ws-heartbeat.mjs";
 import { fetchMarketCandles } from "./lib/market-data.mjs";
@@ -9619,9 +9620,36 @@ async function monitorSniperPositions() {
     } catch {}
   }
 
+  // Read-only, fee-adjusted PAPER evidence for Railway remote status audits.
+  // No file writes, network requests, exchange orders, or raw trading records.
+  function logPaperLedgerEvidence() {
+    if (!CONFIG.paperTrading) return;
+    for (const account of ACCOUNTS) {
+      const base = { mode:"PAPER", accountId:String(account.id), liveMoneyReady:false };
+      try {
+        if (!existsSync(account.logFile)) {
+          console.log("PAPER_LEDGER_EVIDENCE " + JSON.stringify({
+            ...base, status:"NO_PERSISTED_LEDGER", auditableFeeAdjustedExitEvents:0
+          }));
+          continue;
+        }
+        const state = JSON.parse(readFileSync(account.logFile,"utf8"));
+        const result = summarizePaperLedgerForLog(state,account.id);
+        console.log("PAPER_LEDGER_EVIDENCE " + JSON.stringify(result));
+      } catch {
+        // Never show raw ledger content, account secrets, or parse-error excerpts.
+        console.log("PAPER_LEDGER_AUDIT_ERROR " + JSON.stringify({
+          ...base, status:"UNREADABLE_LEDGER", exchangeVerified:false
+        }));
+      }
+    }
+  }
+  setInterval(logPaperLedgerEvidence, 60 * 60 * 1000);
+
   server.listen(PORT, () => {
     console.log(`\n🌐 Webhook server listening on port ${PORT}`);
     console.log(`🔒 EXCHANGE WRITES: ${EXCHANGE_WRITES_ALLOWED ? "AUTHORIZED" : "LOCKED"} | mode: ${CONFIG.paperTrading ? "PAPER" : "LIVE"}`);
+    logPaperLedgerEvidence();
     // Deploy-verification banner — confirms which guards the RUNNING code has (grep logs for GUARDS).
     console.log(`🛡️  GUARDS ACTIVE — blacklist(${HARD_BLACKLIST.size}): ${[...HARD_BLACKLIST].join(",")} | entryCap ${MAX_ENTRIES_PER_DAY}/day | minBookDepth ${MIN_BOOK_DEPTH_USD}`);
     console.log("🔎 RECOVERY INVENTORY " + JSON.stringify(historicalRecoverySummary()));
