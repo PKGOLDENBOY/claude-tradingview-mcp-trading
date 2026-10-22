@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
-import {adaptiveLongtermPolicy} from "../lib/longterm-adaptive-policy.mjs";
+import {adaptiveLongtermPolicy, balancedAdaptiveLongtermPolicy} from "../lib/longterm-adaptive-policy.mjs";
 import {makeState,buyVirtual,manageLongterm,CONFIG_LT,snapshot} from "../lib/longterm-shadow-engine.mjs";
 const bull={regime:"TRENDING",trend:"bull",volatilityRatio:1.1,fearGreed:55,drawdownPct:0};
 test("requires complete market regime and fear/greed data",()=>{
@@ -59,4 +59,40 @@ test("read-only five-month market replay cannot make an authenticated exchange r
   assert.ok(!source.includes("/trade/place-order"));
   assert.ok(!source.includes('import "./bot.js"'));
   assert.ok(source.includes("LT_ADAPTIVE_POLICY"));
+});
+
+test("balanced: ordinary bull uses baseline entry threshold and full virtual allocation",()=>{
+  const p=balancedAdaptiveLongtermPolicy(bull);
+  assert.deepEqual(p,{
+    allowEntry:true,allowDca:true,allocationMultiplier:1,requiredScore:6,
+    reason:"TRENDING_BULL_NORMAL_RISK",
+  });
+});
+test("balanced: weak sentiment or mild drawdown halves risk and blocks average-down",()=>{
+  for(const item of [{fearGreed:33},{fearGreed:82},{drawdownPct:-3.1}]){
+    const p=balancedAdaptiveLongtermPolicy({...bull,...item});
+    assert.equal(p.allowEntry,true);
+    assert.equal(p.allowDca,false);
+    assert.equal(p.allocationMultiplier,0.5);
+    assert.equal(p.requiredScore,7);
+  }
+});
+test("balanced: volatile bull only takes stronger signals with reduced size",()=>{
+  const p=balancedAdaptiveLongtermPolicy({...bull,regime:"VOLATILE",volatilityRatio:2.1});
+  assert.deepEqual(p,{
+    allowEntry:true,allowDca:false,allocationMultiplier:0.5,requiredScore:8,
+    reason:"VOLATILE_BULL_SMALL_RISK",
+  });
+  assert.equal(balancedAdaptiveLongtermPolicy({...bull,regime:"VOLATILE",trend:"bear",volatilityRatio:2.1}).allowEntry,false);
+});
+test("balanced: bear, range, extreme fear, incomplete feed or big drawdown block ALL new positions",()=>{
+  for(const p of [
+    {regime:"BEAR",trend:"bear"},{regime:"RANGING",trend:"neutral"},
+    {fearGreed:20},{drawdownPct:-6.01},{volatilityRatio:NaN},{fearGreed:null},
+  ]){
+    const decision=balancedAdaptiveLongtermPolicy({...bull,...p});
+    assert.equal(decision.allowEntry,false,JSON.stringify(p));
+    assert.equal(decision.allowDca,false,JSON.stringify(p));
+    assert.equal(decision.allocationMultiplier,0,JSON.stringify(p));
+  }
 });
