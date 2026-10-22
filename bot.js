@@ -18,6 +18,7 @@ import { AsyncLocalStorage } from "async_hooks";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import WebSocket from "ws";
+import { formatTradeSizeSummary } from "./lib/trade-size-report.mjs";
 import { startBitgetHeartbeat } from "./lib/bitget-ws-heartbeat.mjs";
 import { fetchMarketCandles } from "./lib/market-data.mjs";
 import { safePositionNotional, paperEntry, paperExit, paperStats, paperPortfolioValuation } from "./lib/risk-engine.mjs";
@@ -2468,7 +2469,7 @@ function checkTradeLimits(log) {
   const tradeSize = CONFIG.maxTradeSizeUSD ? Math.min(portfolio * sizePct, CONFIG.maxTradeSizeUSD) : portfolio * sizePct;
 
   console.log(
-    `✅ Trade size: ${tradeSize.toFixed(2)} (${(portfolio > 0 ? tradeSize / portfolio * 100 : 0).toFixed(1)}% of ${portfolio.toFixed(2)})`,
+    `✅ Trade size: ${formatTradeSizeSummary(tradeSize, portfolio)}`,
   );
 
   return true;
