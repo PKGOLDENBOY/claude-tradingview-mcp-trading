@@ -10,6 +10,7 @@
  * Not an exact intra-6h execution simulation; cannot establish true edge.
  */
 import { fileURLToPath } from "node:url";
+import { adaptiveLongtermPolicy } from "../lib/longterm-adaptive-policy.mjs";
 import { LT_COINS,CONFIG_LT,ema,parseClosedBars,scoreLtEntry,
   makeState,manageLongterm,buyVirtual,snapshot } from "../lib/longterm-shadow-engine.mjs";
 const HOST="https://api.bitget.com",DAY=86400000,HOUR=3600000;
@@ -21,6 +22,7 @@ const DAYS=Number(process.env.LT_BACKTEST_DAYS || 153);
 if(!Number.isInteger(DAYS)||DAYS<7||DAYS>210||!Number.isFinite(cutoff)||cutoff>Date.now())
   throw new Error("Invalid backtest duration/cutoff");
 const START=cutoff-DAYS*DAY, FEES=CONFIG_LT.feeRate, SLIPPAGE=CONFIG_LT.slippageRate;
+const ADAPTIVE = process.env.LT_ADAPTIVE_POLICY === "true";
 const nowISO=n=>new Date(n).toISOString();
 const events=new Map(),data=new Map(),issue=[];
 const meta={apiRequests:0,retries:0,fetchErrors:0,unavailable:[],fngEntries:0,
@@ -131,6 +133,7 @@ function resultByWeek(){return [];}
 async function run(){
   say("LT_5M_START",{requestedSymbols:LT_COINS.length,from:nowISO(START),
     untilExclusive:nowISO(cutoff),durationDays:DAYS,virtualCapitalUSD:CONFIG_LT.initialUSD,
+    adaptiveMarketPolicy:ADAPTIVE,
     virtualEntryTrancheUSD:CONFIG_LT.t1USD,virtualSecondTrancheUSD:CONFIG_LT.t2USD,
     feeEachSidePct:FEES*100,slippageEachSidePct:SLIPPAGE*100,
     verifiedNoOrders:true,market:"real public BitGet spot history",
@@ -186,8 +189,10 @@ async function run(){
   const barMaps=Object.fromEntries(eligible.map(sym=>[sym,new Map((data.get(sym)?.["6Hutc"]||[]).map(b=>[b.timestamp,b]))]));
   const counters={scanCycles:0,blockedRegime:0,blockedFear:0,blockedUnknownRegime:0,
     blockedUnknownSentiment:0,skippedMissingSixHour:0,qualifyingSignals:0,entryAttempts:0,
-    blockedBudget:0,indicatorReadyPairs:0,activeSymbols:eligible.length,weekly:[]};
+    blockedBudget:0,indicatorReadyPairs:0,activeSymbols:eligible.length,weekly:[],
+    adaptiveReasonCounts:{},adaptiveSizeReduced:0,adaptiveEntryBlockedByScore:0};
   const lastPrices={},equityTrace=[],equityReturns=[],weekly=[];
+  let peakEquity=CONFIG_LT.initialUSD;
   // Decision at every 6h opening, with historical indicators ending *before* t.
   for(let t=START;t<cutoff;t+=6*HOUR){
     counters.scanCycles++;
@@ -200,13 +205,31 @@ async function run(){
     // Existing holdings may be liquidated even if entries are gated.
     const regime=btcRegime(btc4,t),fear=fgAsOf(fng,t);
     const uncertain=regime.regime==="UNKNOWN"||fear===null;
-    const blocked=uncertain||["RANGING","BEAR"].includes(regime.regime)||fear<=25;
+    // PRE-TRADE NAV and drawdown use prices available at the current 6h OPEN.
+    // No future price/indicator data influences the adaptive allocation.
+    const preTradeEquity=snapshot(state,lastPrices).markToMarketUSD;
+    if(Number.isFinite(preTradeEquity))peakEquity=Math.max(peakEquity,preTradeEquity);
+    const drawdownPct=Number.isFinite(preTradeEquity)&&peakEquity>0
+      ?(preTradeEquity/peakEquity-1)*100:NaN;
+    const policy=ADAPTIVE?adaptiveLongtermPolicy({
+      regime:regime.regime,trend:regime.trend,volatilityRatio:regime.ratio,
+      fearGreed:fear,drawdownPct
+    }):null;
+    if(policy){
+      counters.adaptiveReasonCounts[policy.reason]=(counters.adaptiveReasonCounts[policy.reason]||0)+1;
+      if(policy.allowEntry&&policy.allocationMultiplier<1)counters.adaptiveSizeReduced++;
+    }
+    const blocked=ADAPTIVE?!policy.allowEntry
+      :uncertain||["RANGING","BEAR"].includes(regime.regime)||fear<=25;
     if(regime.regime==="UNKNOWN")counters.blockedUnknownRegime++;
     if(fear===null)counters.blockedUnknownSentiment++;
     if(["RANGING","BEAR"].includes(regime.regime))counters.blockedRegime++;
     if(fear!==null&&fear<=25)counters.blockedFear++;
-    manageLongterm(state,prices,t,blocked);
-    const haveEnoughCash=state.cashUsd >= CONFIG_LT.cashReserveUSD+CONFIG_LT.t1USD*(1+FEES);
+    manageLongterm(state,prices,t,ADAPTIVE?!policy.allowDca:blocked,
+      ADAPTIVE?CONFIG_LT.t2USD*policy.allocationMultiplier:CONFIG_LT.t2USD);
+    const virtualEntrySize=CONFIG_LT.t1USD*(ADAPTIVE?policy.allocationMultiplier:1);
+    const haveEnoughCash=virtualEntrySize>0&&state.cashUsd>=
+      CONFIG_LT.cashReserveUSD+virtualEntrySize*(1+FEES);
     if(!blocked&&haveEnoughCash){
       const candidates=[];
       for(const sym of eligible){
@@ -217,6 +240,10 @@ async function run(){
         state.scans++;
         if(scored.reason==="insufficient closed indicator warmup")state.indicatorsMissing++;
         if(scored.pass){
+          if(ADAPTIVE&&scored.passed<policy.requiredScore){
+            counters.adaptiveEntryBlockedByScore++;
+            continue;
+          }
           state.qualifiedSignals++;counters.qualifyingSignals++;
           candidates.push({sym,score:scored.passed,checks:scored.checks});
         }
@@ -224,7 +251,7 @@ async function run(){
       candidates.sort((a,b)=>b.score-a.score||LT_COINS.indexOf(a.sym)-LT_COINS.indexOf(b.sym));
       if(candidates.length){
         const best=candidates[0];counters.entryAttempts++;
-        if(!buyVirtual(state,best.sym,prices[best.sym],CONFIG_LT.t1USD,t,"T1",best.score))
+        if(!buyVirtual(state,best.sym,prices[best.sym],virtualEntrySize,t,"T1",best.score))
           counters.blockedBudget++;
       }
     }else if(!blocked){counters.blockedBudget++;}
@@ -276,6 +303,7 @@ async function run(){
   })).sort((a,b)=>(b.realizedPnlUSD+b.openPnlUSD)-(a.realizedPnlUSD+a.openPnlUSD));
   state.complete=true;
   const result={from:nowISO(START),to:nowISO(cutoff),days:DAYS,
+    adaptiveMarketPolicyEnabled:ADAPTIVE,
     dataCoverage:{requested:LT_COINS.length,eligible:eligible.length,excluded:excluded.length,
       exclusions:excluded,eligibleSymbols:eligible,
       historyBtc4h:btc4.length,historyBtc6h:btc6.length,fngDays:meta.fngEntries},
