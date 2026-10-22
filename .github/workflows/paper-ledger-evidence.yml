@@ -1,0 +1,32 @@
+name: AlphaBot read-only ledger evidence checks
+on:
+  push:
+    branches: [audit/paper-ledger-evidence-20261022]
+    paths:
+      - .github/workflows/paper-ledger-evidence.yml
+      - lib/paper-ledger-evidence.mjs
+      - test/paper-ledger-evidence.test.mjs
+      - scripts/audit-paper-ledger.mjs
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Syntax and strict paper ledger tests (zero orders)
+        run: |
+          node --check lib/paper-ledger-evidence.mjs
+          node --check scripts/audit-paper-ledger.mjs
+          node --test test/paper-ledger-evidence.test.mjs
+      - name: Empty ledger has no fabricated trades
+        run: |
+          node --input-type=module -e 'import { auditPaperLedger } from "./lib/paper-ledger-evidence.mjs"; const r=auditPaperLedger({trades:[]}); if(r.auditableExitEvents!==0 || r.readyForLiveMoney)process.exit(1); console.log("NO_SYNTHETIC_REALIZED_TRADES");'
