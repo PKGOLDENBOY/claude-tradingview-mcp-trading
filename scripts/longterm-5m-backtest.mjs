@@ -10,7 +10,7 @@
  * Not an exact intra-6h execution simulation; cannot establish true edge.
  */
 import { fileURLToPath } from "node:url";
-import { adaptiveLongtermPolicy } from "../lib/longterm-adaptive-policy.mjs";
+import { adaptiveLongtermPolicy, balancedAdaptiveLongtermPolicy } from "../lib/longterm-adaptive-policy.mjs";
 import { LT_COINS,CONFIG_LT,ema,parseClosedBars,scoreLtEntry,
   makeState,manageLongterm,buyVirtual,snapshot } from "../lib/longterm-shadow-engine.mjs";
 const HOST="https://api.bitget.com",DAY=86400000,HOUR=3600000;
@@ -23,6 +23,8 @@ if(!Number.isInteger(DAYS)||DAYS<7||DAYS>210||!Number.isFinite(cutoff)||cutoff>D
   throw new Error("Invalid backtest duration/cutoff");
 const START=cutoff-DAYS*DAY, FEES=CONFIG_LT.feeRate, SLIPPAGE=CONFIG_LT.slippageRate;
 const ADAPTIVE = process.env.LT_ADAPTIVE_POLICY === "true";
+const ADAPTIVE_VARIANT=process.env.LT_ADAPTIVE_VARIANT || "defensive";
+if(!["balanced","defensive"].includes(ADAPTIVE_VARIANT))throw new Error("Unknown adaptive strategy variant");
 const nowISO=n=>new Date(n).toISOString();
 const events=new Map(),data=new Map(),issue=[];
 const meta={apiRequests:0,retries:0,fetchErrors:0,unavailable:[],fngEntries:0,
@@ -133,7 +135,7 @@ function resultByWeek(){return [];}
 async function run(){
   say("LT_5M_START",{requestedSymbols:LT_COINS.length,from:nowISO(START),
     untilExclusive:nowISO(cutoff),durationDays:DAYS,virtualCapitalUSD:CONFIG_LT.initialUSD,
-    adaptiveMarketPolicy:ADAPTIVE,
+    adaptiveMarketPolicy:ADAPTIVE,adaptivePolicyVariant:ADAPTIVE?ADAPTIVE_VARIANT:"baseline",
     virtualEntryTrancheUSD:CONFIG_LT.t1USD,virtualSecondTrancheUSD:CONFIG_LT.t2USD,
     feeEachSidePct:FEES*100,slippageEachSidePct:SLIPPAGE*100,
     verifiedNoOrders:true,market:"real public BitGet spot history",
@@ -211,10 +213,11 @@ async function run(){
     if(Number.isFinite(preTradeEquity))peakEquity=Math.max(peakEquity,preTradeEquity);
     const drawdownPct=Number.isFinite(preTradeEquity)&&peakEquity>0
       ?(preTradeEquity/peakEquity-1)*100:NaN;
-    const policy=ADAPTIVE?adaptiveLongtermPolicy({
-      regime:regime.regime,trend:regime.trend,volatilityRatio:regime.ratio,
-      fearGreed:fear,drawdownPct
-    }):null;
+    const policy=ADAPTIVE
+      ?(ADAPTIVE_VARIANT==="balanced"?balancedAdaptiveLongtermPolicy:adaptiveLongtermPolicy)({
+        regime:regime.regime,trend:regime.trend,volatilityRatio:regime.ratio,
+        fearGreed:fear,drawdownPct
+      }):null;
     if(policy){
       counters.adaptiveReasonCounts[policy.reason]=(counters.adaptiveReasonCounts[policy.reason]||0)+1;
       if(policy.allowEntry&&policy.allocationMultiplier<1)counters.adaptiveSizeReduced++;
@@ -303,7 +306,7 @@ async function run(){
   })).sort((a,b)=>(b.realizedPnlUSD+b.openPnlUSD)-(a.realizedPnlUSD+a.openPnlUSD));
   state.complete=true;
   const result={from:nowISO(START),to:nowISO(cutoff),days:DAYS,
-    adaptiveMarketPolicyEnabled:ADAPTIVE,
+    adaptiveMarketPolicyEnabled:ADAPTIVE,adaptivePolicyVariant:ADAPTIVE?ADAPTIVE_VARIANT:"baseline",
     dataCoverage:{requested:LT_COINS.length,eligible:eligible.length,excluded:excluded.length,
       exclusions:excluded,eligibleSymbols:eligible,
       historyBtc4h:btc4.length,historyBtc6h:btc6.length,fngDays:meta.fngEntries},
