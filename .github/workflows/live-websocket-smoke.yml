@@ -1,0 +1,31 @@
+name: Live BitGet public price-stream and heartbeat smoke
+on:
+  push:
+    branches: [test/alphabot-lt-balanced-adaptive-20261022]
+    paths:
+      - .github/workflows/live-websocket-smoke.yml
+      - scripts/live-bitget-websocket-smoke.mjs
+      - lib/bitget-ws-heartbeat.mjs
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  public-ws:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+      BITGET_API_KEY: ""
+      BITGET_SECRET_KEY: ""
+      BITGET_PASSPHRASE: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install locked package dependencies
+        run: npm ci --ignore-scripts
+      - name: Validate uncredentialed public price stream and heartbeat
+        run: node scripts/live-bitget-websocket-smoke.mjs

@@ -1,0 +1,98 @@
+name: AlphaBot balanced market-adaptive long-term replay
+on:
+  push:
+    branches: [test/alphabot-lt-balanced-adaptive-20261022]
+    paths:
+      - .github/workflows/longterm-balanced-compare.yml
+      - lib/longterm-adaptive-policy.mjs
+      - lib/longterm-shadow-engine.mjs
+      - scripts/longterm-5m-backtest.mjs
+      - test/longterm-adaptive-policy.test.mjs
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - case: balanced-153
+            days: "153"
+            end: "2026-10-22T00:00:00.000Z"
+          - case: balanced-92
+            days: "92"
+            end: "2026-08-22T00:00:00.000Z"
+          - case: balanced-61
+            days: "61"
+            end: "2026-10-22T00:00:00.000Z"
+    env:
+      LT_BACKTEST_DAYS: ${{ matrix.days }}
+      LT_BACKTEST_END_UTC: ${{ matrix.end }}
+      LT_ADAPTIVE_POLICY: "true"
+      LT_ADAPTIVE_VARIANT: "balanced"
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Syntax and no-buy safety regression
+        run: |
+          node --check scripts/longterm-5m-backtest.mjs
+          node --check lib/longterm-adaptive-policy.mjs
+          node --test test/longterm-shadow.test.mjs test/longterm-adaptive-policy.test.mjs
+      - name: Real-market historical replay, virtual orders ONLY
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/longterm-5m-backtest.mjs > /tmp/balanced.log 2>&1 || {
+            tail -n 30 /tmp/balanced.log | cut -c 1-1000; exit 1;
+          }
+      - name: Extract results and verify no buy orders
+        shell: bash
+        env:
+          REPORT_CASE: ${{ matrix.case }}
+        run: |
+          node --input-type=module <<'EOF'
+          import fs from 'node:fs';
+          const lines=fs.readFileSync('/tmp/balanced.log','utf8').split(/\r?\n/);
+          const records=lines.map(s=>{try{return JSON.parse(s)}catch{return null}}).filter(Boolean);
+          const final=records.findLast(r=>r.tag==='LT_5M_FINAL');
+          if(!final)throw Error('Missing completed historical replay');
+          if(!final.adaptiveMarketPolicyEnabled||final.adaptivePolicyVariant!=='balanced')
+            throw Error('Policy was not active: refuse result');
+          const report={
+            name:process.env.REPORT_CASE,period:[final.from,final.to],coins:final.dataCoverage.eligible,
+            missingSymbols:final.dataCoverage.exclusions,initialUSD:final.simulation.initialUSD,
+            endingUSD:final.simulation.markToMarketUSD,netUSD:final.simulation.combinedSimulatedPnlUSD,
+            netPct:final.simulation.combinedReturnPct,realizedUSD:final.simulation.realizedPnlUSD,
+            buys:final.simulation.simulatedBuys,sells:final.simulation.simulatedSells,
+            openPositions:final.simulation.openPositions,closedPositions:final.simulation.completeExits,
+            wins:final.wins,losses:final.losses,winPct:final.winRatePct,
+            maxDrawdownPct:final.maxDrawdownPct,bitcoinBenchmarkPct:final.benchmarkBTC?.afterEstimatedCostsPct,
+            regimeDecisions:final.counters.adaptiveReasonCounts,partialRiskScans:final.counters.adaptiveSizeReduced,
+            blockedWeakCoinScores:final.counters.adaptiveEntryBlockedByScore,
+            dataErrors:final.api.fetchErrors,source:"public historical BitGet + F&G",exchangeOrders:0,
+            cautions:final.limitations,
+          };
+          if(!Number.isFinite(report.endingUSD)||report.coins<8||report.dataErrors>25)
+            throw Error('Historical coverage or reconciliation unacceptable');
+          console.log('BALANCED_ADAPTIVE_SUMMARY '+JSON.stringify(report));
+          fs.mkdirSync('reports',{recursive:true});
+          fs.writeFileSync('reports/'+report.name+'.json',JSON.stringify(report,null,2));
+          EOF
+      - name: Preserve simulation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpha-balanced-${{ matrix.case }}
+          path: |
+            reports/${{ matrix.case }}.json
+            /tmp/balanced.log
+          if-no-files-found: warn

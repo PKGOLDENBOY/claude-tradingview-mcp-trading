@@ -20,6 +20,10 @@ import { execSync } from "child_process";
 import WebSocket from "ws";
 import { startBitgetHeartbeat } from "./lib/bitget-ws-heartbeat.mjs";
 import { fetchMarketCandles } from "./lib/market-data.mjs";
+import { balancedAdaptiveLongtermPolicy } from "./lib/longterm-adaptive-policy.mjs";
+import { LT_COINS as LT_PAPER_COINS, CONFIG_LT as LT_PAPER_CONFIG, makeState as makeLtPaperState,
+  scoreLtEntry as scoreLtPaperEntry, manageLongterm as manageLtPaperPositions,
+  buyVirtual as buyLtPaper, snapshot as snapshotLtPaper } from "./lib/longterm-shadow-engine.mjs";
 import { safePositionNotional, paperEntry, paperExit, paperStats, paperPortfolioValuation } from "./lib/risk-engine.mjs";
 import { simulateSwingTrades, swingTradeMetrics } from "./lib/swing-backtest.mjs";
 import { planSpotSellQuantity, confirmSpotSellFill, confirmZeroFillCancellation } from "./lib/order-safety.mjs";
@@ -369,6 +373,10 @@ let _livePortfolioValue = null;
 // ─── Onboarding ───────────────────────────────────────────────────────────────
 
 function checkOnboarding() {
+  // Public-price paper mode must NOT demand real exchange credentials or
+  // manufacture a .env file containing empty account secrets. This makes
+  // read-only rehearsal possible with ZERO authenticated exchange access.
+  if (CONFIG.paperTrading) return;
   const required = ["BITGET_API_KEY", "BITGET_SECRET_KEY", "BITGET_PASSPHRASE"];
   const missing = required.filter((k) => !process.env[k]);
 
@@ -429,7 +437,8 @@ const SWING_BACKTEST = {}; // in-memory cache, 24h TTL
 // ─── Long-Term Portfolio Config ───────────────────────────────────────────────
 // Based on BitcoinTAF $25K portfolio strategy: buy a diversified basket and
 // hold until the profit target is reached. Runs independently of scalp/swing.
-const LT_ENABLED    = process.env.LT_ENABLED === "true";                       // disable via env if needed
+const LT_ENABLED    = process.env.LT_ENABLED === "true";
+const LT_PAPER_SHADOW_ENABLED = process.env.LT_PAPER_SHADOW_ENABLED === "true"; // read-only LT strategy, defaults OFF                       // disable via env if needed
 const LT_TRADE_SIZE = parseFloat(process.env.LT_TRADE_SIZE_USD  || "5");        // $ invested per coin
 const LT_TARGET_PCT = parseFloat(process.env.LT_TARGET_PCT      || "100");      // exit at +100% (2×)
 const LT_RESERVE    = parseFloat(process.env.LT_USDT_RESERVE    || "20");       // keep this much free for scalp
@@ -3321,6 +3330,111 @@ async function _runLtPortfolioLegacy() {
   const remaining  = LT_COINS.filter(s => !log.ltPositions[s]?.open).length;
   console.log(`  💎 Portfolio: ${openCount}/${LT_COINS.length} held | ${remaining} still to acquire`);
   console.log(`═══════════════════════════════════════════════════════════\n`);
+}
+
+
+// ─── Read-only adaptive long-term paper portfolio ─────────────────────────────
+// Explicitly segregated from real-account positions. It reads only public
+// spot market prices + closed candle history, and never invokes placeOrder,
+// placeBitGetOrder or any authenticated exchange endpoint.
+async function runLongTermPaperShadow() {
+  if (!CONFIG.paperTrading || !LT_PAPER_SHADOW_ENABLED || EXCHANGE_WRITES_ALLOWED) return;
+  const sourceFile = acct().logFile + ".lt-shadow.json";
+  let state;
+  if (existsSync(sourceFile)) {
+    // Corruption must halt this shadow evaluation, not fabricate a fresh winner.
+    state = JSON.parse(readFileSync(sourceFile, "utf8"));
+    if (state?.mode !== "PUBLIC_MARKET_READ_ONLY_LONGTERM" ||
+        !Number.isFinite(state.cashUsd) || !Array.isArray(state.events) ||
+        !state.positions || typeof state.positions !== "object")
+      throw new Error("LT_PAPER_SHADOW_LEDGER_UNSAFE");
+  } else {
+    state = makeLtPaperState(Date.now(), 365);
+    state.peakEquityUSD = state.initialUsd;
+  }
+  const res = await fetch("https://api.bitget.com/api/v2/spot/market/tickers", {
+    method: "GET", signal: AbortSignal.timeout(12000)
+  });
+  if (!res.ok) throw new Error("LT paper market HTTP " + res.status);
+  const json = await res.json();
+  if (json.code !== "00000" || !Array.isArray(json.data))
+    throw new Error("LT paper market malformed ticker response");
+  const prices = {};
+  for (const tick of json.data) {
+    const price = Number(tick.lastPr);
+    if (Number.isFinite(price) && price > 0 && /^[A-Z0-9]{2,24}$/.test(tick.symbol))
+      prices[tick.symbol] = price;
+  }
+  // Compute portfolio risk from fresh simulated positions + current prices.
+  const before = snapshotLtPaper(state, prices);
+  if (Number.isFinite(before.markToMarketUSD))
+    state.peakEquityUSD = Math.max(state.peakEquityUSD || state.initialUsd,
+      before.markToMarketUSD);
+  const drawdownPct = Number.isFinite(before.markToMarketUSD) && state.peakEquityUSD > 0
+    ? (before.markToMarketUSD / state.peakEquityUSD - 1) * 100 : NaN;
+  const regime = await detectMarketRegime().catch(() => null);
+  const fearGreed = await fetchFearGreed().catch(() => null);
+  const policy = balancedAdaptiveLongtermPolicy({
+    regime:regime?.regime,trend:regime?.btcTrend,
+    // Unknown market data MUST remain unknown, never coerce null to zero.
+    volatilityRatio:Number.isFinite(regime?.volRatio) ? regime.volRatio : NaN,
+    fearGreed:Number.isFinite(fearGreed?.value) ? fearGreed.value : NaN,drawdownPct
+  });
+  const now = Date.now();
+  // Protect existing virtual holdings on every run, regardless of entry rules.
+  manageLtPaperPositions(state, prices, now, !policy.allowDca,
+    LT_PAPER_CONFIG.t2USD * policy.allocationMultiplier);
+  let signals=0, scoredSymbols=0, failedFeeds=0, simulatedEntry=null;
+  const sixHours = 6 * 60 * 60 * 1000;
+  const scanDue = !Number.isFinite(state.lastEntryScanAt) ||
+    now - state.lastEntryScanAt >= sixHours;
+  if (scanDue && policy.allowEntry) {
+    const picks = [];
+    for (const sym of LT_PAPER_COINS) {
+      if (!prices[sym] || state.positions[sym]?.open) continue;
+      try {
+        // Closed-only fetch guarantees no partial weekly/daily candle is used.
+        const [weekly,daily] = await Promise.all([
+          fetchMarketCandles(sym, "1W", 56, { closedOnly: true }),
+          fetchMarketCandles(sym, "1D", 210, { closedOnly: true }),
+        ]);
+        const score = scoreLtPaperEntry(weekly,daily);
+        scoredSymbols++;
+        if (!score.pass) continue;
+        signals++;
+        if (score.passed >= policy.requiredScore)
+          picks.push({sym,passed:score.passed});
+      } catch (e) {
+        failedFeeds++;
+        console.log(`  ⚠️ LT paper candle history ${sym}: ${e.message.slice(0,90)}`);
+      }
+    }
+    // Refuse to select a candidate when public feed is substantially broken.
+    if (failedFeeds <= 10 && picks.length > 0) {
+      picks.sort((a,b)=>b.passed-a.passed ||
+        LT_PAPER_COINS.indexOf(a.sym)-LT_PAPER_COINS.indexOf(b.sym));
+      const best=picks[0],size=LT_PAPER_CONFIG.t1USD*policy.allocationMultiplier;
+      if (size>0 && buyLtPaper(state,best.sym,prices[best.sym],size,now,"T1",best.passed))
+        simulatedEntry={symbol:best.sym,score:best.passed,virtualUSD:size};
+    }
+    state.lastEntryScanAt=now;
+  }
+  const after = snapshotLtPaper(state, prices);
+  state.lastStatus={
+    timestamp:new Date(now).toISOString(),regime:regime?.regime || "UNKNOWN",
+    btcTrend:regime?.btcTrend || "UNKNOWN",fearGreed:fearGreed?.value ?? null,
+    drawdownPct:Number.isFinite(drawdownPct)?+drawdownPct.toFixed(2):null,
+    policy:policy.reason,allocationMultiplier:policy.allocationMultiplier,
+    requiredScore:policy.requiredScore,scoredSymbols,signals,failedFeeds,
+    simulatedEntry,simulatedPortfolioValue:after.markToMarketUSD,
+    netSimulatedPnl:after.combinedSimulatedPnlUSD,
+    openPositions:after.openPositions,realOrders:0,
+  };
+  // Separate persistent paper-only ledger; never mutate main order ledger.
+  const temp = sourceFile + ".tmp";
+  writeFileSync(temp, JSON.stringify(state, null, 2));
+  renameSync(temp, sourceFile);
+  console.log("💎 LT PAPER MARKET ADAPTATION — " + JSON.stringify(state.lastStatus));
 }
 
 async function runLongTermPortfolio() {
@@ -9661,6 +9775,9 @@ async function monitorSniperPositions() {
                <p><b>Mode:</b> LIVE TRADING</p>`
             );
           }
+          if (CONFIG.paperTrading && LT_PAPER_SHADOW_ENABLED) {
+            await runLongTermPaperShadow().catch(e=>console.error("LT paper adaptive startup:",e.message));
+          }
           console.log(`\n👛 Account ${account.id} — initial scan (sequential)`);
           const startSyms = [...CONFIG.symbols];
           for (const sym of startSyms) {
@@ -9699,6 +9816,18 @@ async function monitorSniperPositions() {
   if (!CONFIG.paperTrading && LT_ENABLED) {
     setInterval(async () => {
       await runLongTermPortfolio().catch(e => console.log(`⚠️ LT portfolio run failed: ${e.message}`));
+    }, 6 * 60 * 60 * 1000);
+  }
+
+  // Independent LT adaptive paper trial; no authenticated exchange endpoints.
+  if (CONFIG.paperTrading && LT_PAPER_SHADOW_ENABLED) {
+    setInterval(async () => {
+      for (const account of ACCOUNTS) {
+        await _accountStore.run(account, async () => {
+          await runLongTermPaperShadow()
+            .catch(e=>console.error("LT paper adaptive interval:",e.message));
+        });
+      }
     }, 6 * 60 * 60 * 1000);
   }
 
