@@ -103,6 +103,24 @@ try{
     body:JSON.stringify({action:"BUY",symbol:"BTCUSDT",secret,fill:"A".repeat(9000)}),
   });
   assert.equal(oversize.status,413);
+  // Exercise the actual authenticated TradingView webhook in both directions,
+  // with all exchange order writes locked and daily real-entry cap 0.
+  const validBuy=await request("/webhook",{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({action:"BUY",symbol:"BTCUSDT",secret}),
+  });
+  assert.equal(validBuy.status,200);
+  const buyAck=await validBuy.json();
+  assert.equal(buyAck.received,true);
+  assert.equal(buyAck.action,"BUY");
+  const validSell=await request("/webhook",{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({action:"SELL",symbol:"ETHUSDT",secret}),
+  });
+  assert.equal(validSell.status,200);
+  const sellAck=await validSell.json();
+  assert.equal(sellAck.received,true);
+  assert.equal(sellAck.action,"SELL");
   const authed=await request("/status?pin="+pin);
   assert.equal(authed.status,200);
   const stat=await authed.json();
@@ -110,6 +128,7 @@ try{
   console.log("E2E_WEBHOOK_AND_STATUS_OK",JSON.stringify({
     unauthorized:unauthed.status,unknownSymbol:unknown.status,
     oversize:oversize.status,statusAuth:authed.status,
+    validBuyAcknowledged:validBuy.status,validSellAcknowledged:validSell.status,
   }));
   const lt=await waitForLt(first,175000);
   assert.equal(lt.mode,"PUBLIC_MARKET_READ_ONLY_LONGTERM");
