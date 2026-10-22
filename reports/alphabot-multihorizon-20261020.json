@@ -1,0 +1,80 @@
+{
+  "tag": "ALPHABOT_PUBLIC_MARKET_HISTORICAL_MULTI_HORIZON",
+  "asOf": "2026-10-20T00:00:00Z",
+  "executedUtc": "2026-10-22",
+  "runId": 39829916973,
+  "run": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/actions/runs/39829916973",
+  "engine": "scripts/multihorizon-backtest.mjs",
+  "source": "Public BitGet historical spot candles; no authenticated endpoints",
+  "symbolsRequested": 45,
+  "symbolsEligible": 40,
+  "symbolsExcluded": 5,
+  "fetchErrorsPerHorizon": 15,
+  "startingUsd": 150,
+  "feesPerSidePct": 0.1,
+  "adverseSlippagePerSidePct": 0.1,
+  "noExchangeOrders": true,
+  "cases": [
+    {
+      "horizonDays": 30,
+      "from": "2026-09-20",
+      "to": "2026-10-20",
+      "endSimulatedUsd": 149.42663,
+      "netSimulatedReturnPct": -0.382247,
+      "simulatedFullyClosedPositions": 19,
+      "simulatedSellEvents": 22,
+      "sellEventWinRatePct": 63.64,
+      "sellEventProfitFactor": 1.473,
+      "sixHourSampledMaxDrawdownPct": 3.25,
+      "btcBuyHoldAfterAssumedCostsPct": 0.4376611326484259
+    },
+    {
+      "horizonDays": 90,
+      "from": "2026-07-22",
+      "to": "2026-10-20",
+      "endSimulatedUsd": 154.218258,
+      "netSimulatedReturnPct": 2.812172,
+      "simulatedFullyClosedPositions": 48,
+      "simulatedSellEvents": 57,
+      "sellEventWinRatePct": 70.18,
+      "sellEventProfitFactor": 2.874,
+      "sixHourSampledMaxDrawdownPct": 3.84,
+      "btcBuyHoldAfterAssumedCostsPct": 22.636880656264303
+    },
+    {
+      "horizonDays": 180,
+      "from": "2026-04-23",
+      "to": "2026-10-20",
+      "endSimulatedUsd": 158.554717,
+      "netSimulatedReturnPct": 5.703145,
+      "simulatedFullyClosedPositions": 72,
+      "simulatedSellEvents": 89,
+      "sellEventWinRatePct": 68.54,
+      "sellEventProfitFactor": 2.781,
+      "sixHourSampledMaxDrawdownPct": 3.73,
+      "btcBuyHoldAfterAssumedCostsPct": 4.390950835992258
+    },
+    {
+      "horizonDays": 365,
+      "from": "2025-10-20",
+      "to": "2026-10-20",
+      "endSimulatedUsd": 145.238325,
+      "netSimulatedReturnPct": -3.17445,
+      "simulatedFullyClosedPositions": 102,
+      "simulatedSellEvents": 121,
+      "sellEventWinRatePct": 56.2,
+      "sellEventProfitFactor": 0.861,
+      "sixHourSampledMaxDrawdownPct": 11.01,
+      "btcBuyHoldAfterAssumedCostsPct": -24.883819138586116
+    }
+  ],
+  "decision": "NO_VALIDATED_EDGE",
+  "limitations": [
+    "Simulated replay is not forward paper trading and does not count toward 100 real-market paper trade validation",
+    "Sell event statistics include partial closes and are not win rates for completed positions",
+    "Six-hour open-tick replay misses intrabar stops, gaps and order-book spreads",
+    "Current asset universe selection introduces survivorship bias",
+    "5 symbols excluded and 15 history fetch failures per horizon; statistics are conditional on 40 eligible assets",
+    "No actual Railway volume-backed paper trade records were used"
+  ]
+}
