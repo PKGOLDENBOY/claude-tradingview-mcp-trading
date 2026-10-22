@@ -18,8 +18,18 @@ import { AsyncLocalStorage } from "async_hooks";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import WebSocket from "ws";
+import { formatTradeSizeSummary } from "./lib/trade-size-report.mjs";
+import { startBitgetHeartbeat } from "./lib/bitget-ws-heartbeat.mjs";
+import { fetchMarketCandles } from "./lib/market-data.mjs";
+import { safePositionNotional, paperEntry, paperExit, paperStats, paperPortfolioValuation } from "./lib/risk-engine.mjs";
+import { simulateSwingTrades, swingTradeMetrics } from "./lib/swing-backtest.mjs";
+import { planSpotSellQuantity, confirmSpotSellFill, confirmZeroFillCancellation } from "./lib/order-safety.mjs";
 // ─── Email notifications (Resend — HTTP, no SMTP, works on Railway) ──────────
 
+const EXCHANGE_WRITES_ALLOWED = process.env.PAPER_TRADING === "false" && process.env.LIVE_TRADING_ENABLED === "true" && process.env.LIVE_TRADING_APPROVED === "true";
+// LIVE_TRADING_APPROVED is intentionally unset on the Railway paper-testing service.
+// Source changes cannot turn exchange writes on unless a human supplies all three flags.
+function requireExchangeWrites(action) { if (!EXCHANGE_WRITES_ALLOWED) throw new Error("LIVE_TRADING_LOCKED: " + action); }
 const EMAIL_TO = process.env.NOTIFY_EMAIL || "joshualiversage01@gmail.com";
 
 async function sendEmail(subject, html) {
@@ -322,7 +332,7 @@ async function bookDepthUSD(symbol) {
 // True if the coin is too thin to trade. Fail-open: null depth (API error / non-BitGet) => allowed.
 async function failsLiquidityFloor(symbol) {
   const usd = await bookDepthUSD(symbol);
-  return usd != null && usd < MIN_BOOK_DEPTH_USD;
+  return usd == null || !Number.isFinite(usd) || usd < MIN_BOOK_DEPTH_USD;
 }
 
 // ── Global daily entry cap ────────────────────────────────────────────────────
@@ -331,15 +341,18 @@ async function failsLiquidityFloor(symbol) {
 // The old per-path checkTradeLimits (entries+exits, cap 15) was bypassed by the mover/swing/LT
 // paths, so ~35 round-trips/day still happened. This is a HARD cap on new BUYS across ALL paths,
 // enforced at the buy chokepoints. Exits/sells are NEVER capped — we must always be able to close.
-const MAX_ENTRIES_PER_DAY = parseInt(process.env.MAX_ENTRIES_PER_DAY || "6", 10);
+const MAX_ENTRIES_PER_DAY = parseInt(process.env.MAX_ENTRIES_PER_DAY || "0", 10);
 function countTodaysEntries(log) {
   const today = new Date().toISOString().slice(0, 10);
   return (log?.trades || []).filter(t => t.type === "entry" && t.orderPlaced && t.timestamp?.startsWith(today)).length;
 }
 // True if today's entry budget is already spent. Reads the persisted log so it survives redeploys.
 function entryCapReached() {
-  try { return countTodaysEntries(loadLog()) >= MAX_ENTRIES_PER_DAY; }
-  catch { return false; } // fail-open on read error — don't freeze the bot
+  try {
+    const state = loadLog();
+    if (state._tradingHaltReason || (state.unconfirmedOrders || []).length > 0) return true;
+    return countTodaysEntries(state) >= MAX_ENTRIES_PER_DAY;
+  } catch { return true; } // fail closed when ledger is inaccessible
 }
 
 // Per-coin latest scan data — shown in dashboard coin detail view
@@ -406,10 +419,9 @@ function checkOnboarding() {
   );
 }
 
-// ─── Backtest results — loaded once at startup ────────────────────────────
-const BACKTEST = existsSync("backtest_results.json")
-  ? JSON.parse(readFileSync("backtest_results.json", "utf8"))
-  : {};
+// Historical May backtests overfit a tiny in-sample window; preserve on disk
+// for audit only. Active trading criteria require new out-of-sample tests.
+const BACKTEST = {};
 
 const SWING_BACKTEST = {}; // in-memory cache, 24h TTL
 
@@ -418,7 +430,7 @@ const SWING_BACKTEST = {}; // in-memory cache, 24h TTL
 // ─── Long-Term Portfolio Config ───────────────────────────────────────────────
 // Based on BitcoinTAF $25K portfolio strategy: buy a diversified basket and
 // hold until the profit target is reached. Runs independently of scalp/swing.
-const LT_ENABLED    = process.env.LT_ENABLED !== "false";                       // disable via env if needed
+const LT_ENABLED    = process.env.LT_ENABLED === "true";                       // disable via env if needed
 const LT_TRADE_SIZE = parseFloat(process.env.LT_TRADE_SIZE_USD  || "5");        // $ invested per coin
 const LT_TARGET_PCT = parseFloat(process.env.LT_TARGET_PCT      || "100");      // exit at +100% (2×)
 const LT_RESERVE    = parseFloat(process.env.LT_USDT_RESERVE    || "20");       // keep this much free for scalp
@@ -448,6 +460,23 @@ const WATCHLIST = [...new Set([
   ...(process.env.WATCHLIST || "").split(",").map(s => s.trim().toUpperCase()).filter(Boolean),
 ])];
 
+// Recovery test mode: scanning only the selected symbols avoids excessive exchange API calls.
+const ENABLE_MOVER_DISCOVERY = process.env.ENABLE_MOVER_DISCOVERY === "true";
+const ALLOW_NEW_SWING_ENTRIES = process.env.ALLOW_NEW_SWING_ENTRIES === "true";
+const ALLOW_NEW_BREAKOUT_ENTRIES = process.env.ALLOW_NEW_BREAKOUT_ENTRIES === "true";
+const PAPER_FEE_FRACTION = 0.001; // 0.10% per side in simulations
+const PAPER_SLIPPAGE_FRACTION = 0.001; // 0.10% per side in simulations
+const MAX_NEW_ORDER_RISK = 0.01; // 1% equity loss budget for a stopped trade
+function sizedOrder(portfolioUsd, stopFraction) {
+  return safePositionNotional({
+    portfolioUsd, stopFraction,
+    absoluteLimitUsd: CONFIG.maxTradeSizeUSD,
+    fractionLimit: CONFIG.maxTradeSizePct ?? 0.15,
+    riskFraction: MAX_NEW_ORDER_RISK,
+    feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+    minSizeUsd: 5,
+  });
+}
 const CONFIG = {
   symbols: (process.env.SYMBOLS || process.env.SYMBOL || "NEARUSDT,BNBUSDT,LINKUSDT,SOLUSDT,INJUSDT,ADAUSDT,DOTUSDT,ZECUSDT,KAVAUSDT,AXSUSDT")
     .replace(/^SYMBOLS=/i, "")
@@ -458,7 +487,7 @@ const CONFIG = {
   maxTradeSizePct: (() => { const v = process.env.MAX_TRADE_SIZE_USD || "25%"; return v.trim().endsWith("%") ? parseFloat(v) / 100 : null; })(),
   maxTradeSizeUSD: (() => { const v = process.env.MAX_TRADE_SIZE_USD || "25%"; return v.trim().endsWith("%") ? null : parseFloat(v); })(),
   maxTradesPerDay: parseInt(process.env.MAX_TRADES_PER_DAY || "15"),
-  paperTrading: process.env.PAPER_TRADING !== "false",
+  paperTrading: !EXCHANGE_WRITES_ALLOWED,
   tradeMode: process.env.TRADE_MODE || "spot",
   bitget: {
     apiKey: process.env.BITGET_API_KEY,
@@ -591,7 +620,8 @@ function loadLog() {
     if (!log.dayStartValue) log.dayStartValue = log.portfolioValue;
     return log;
   } catch (e) {
-    // Corrupted log (e.g. process killed mid-write) — back it up and start fresh
+    if (EXCHANGE_WRITES_ALLOWED) throw new Error("Trading locked: corrupt state ledger: " + e.message);
+    // Only an isolated paper ledger can be reset on corruption.
     console.error(`⚠️ loadLog: JSON parse failed (${e.message}) — backing up corrupted file and starting fresh`);
     try { renameSync(sourceFile, sourceFile + ".bak." + Date.now()); } catch {}
     return fresh();
@@ -599,7 +629,25 @@ function loadLog() {
 }
 
 function saveLog(log) {
-  // Atomic write: write to temp file then rename so a mid-write kill never corrupts the log
+  // Preserve any durable halt written by a concurrent/failed order operation.
+  if (existsSync(acct().logFile)) {
+    try {
+      const persisted = JSON.parse(readFileSync(acct().logFile, "utf8"));
+      if (persisted._tradingHaltReason && !log._tradingHaltReason)
+        log._tradingHaltReason = persisted._tradingHaltReason;
+      if (Array.isArray(persisted.unconfirmedOrders) && persisted.unconfirmedOrders.length) {
+        const current = Array.isArray(log.unconfirmedOrders) ? log.unconfirmedOrders : [];
+        const seen = new Set(current.map(o => JSON.stringify(o)));
+        for (const order of persisted.unconfirmedOrders) {
+          if (!seen.has(JSON.stringify(order))) current.push(order);
+        }
+        log.unconfirmedOrders = current;
+      }
+    } catch (err) {
+      if (EXCHANGE_WRITES_ALLOWED)
+        throw new Error("Refusing to overwrite corrupt safety ledger: " + err.message);
+    }
+  }
   const tmp = acct().logFile + ".tmp";
   writeFileSync(tmp, JSON.stringify(log, null, 2));
   renameSync(tmp, acct().logFile);
@@ -654,19 +702,46 @@ function loadCsvStats() {
 // Daily drawdown — sum of realised losses today vs portfolio value
 function checkDailyDrawdown(log) {
   const today = new Date().toISOString().slice(0, 10);
-  const todayExits = log.trades.filter(
-    (t) => t.type === "exit" && t.timestamp.startsWith(today) && t.pnlUSD !== undefined,
-  );
-  const totalLoss = todayExits.reduce((sum, t) => sum + Math.min(t.pnlUSD, 0), 0);
-  const totalGain = todayExits.reduce((sum, t) => sum + Math.max(t.pnlUSD, 0), 0);
-  const portfolio = log.portfolioValue || acct().portfolioValue;
-  const drawdownPct = Math.abs(totalLoss) / portfolio * 100;
-  const gainPct = totalGain / portfolio * 100;
-  const DAILY_STOP   = 3; // stop trading if down 3% on the day
-  const DAILY_TARGET = 3; // milestone — log it but keep trading (user wants max gains)
-  const stopHit   = drawdownPct >= DAILY_STOP;
-  const targetHit = gainPct >= DAILY_TARGET;
-  return { drawdownPct, gainPct, totalLoss, totalGain, paused: stopHit, stopHit, targetHit, limit: DAILY_STOP, target: DAILY_TARGET };
+  const todayExits = (log.trades || []).filter(t =>
+    t.type === "exit" && t.orderPlaced && t.timestamp?.startsWith(today) &&
+    Number.isFinite(Number(t.pnlUSD)));
+  const totalLoss = todayExits.reduce((sum,t)=>sum+Math.min(Number(t.pnlUSD),0),0);
+  const totalGain = todayExits.reduce((sum,t)=>sum+Math.max(Number(t.pnlUSD),0),0);
+  const realized = Number(log.portfolioValue || acct().portfolioValue);
+  const dayStart = Number(log.dayStartValue || realized);
+  if (!Number.isFinite(realized) || !Number.isFinite(dayStart) || dayStart <= 0)
+    return {drawdownPct:100,gainPct:0,totalLoss,totalGain,paused:true,stopHit:true,
+      targetHit:false,limit:3,target:3,unpricedPositions:1};
+  let unrealizedNet = 0, unpricedPositions = 0;
+  for (const key of ["positions","swingPositions","breakoutPositions","sniperPositions","ltPositions"]) {
+    for (const [sym,pos] of Object.entries(log[key] || {})) {
+      if (!pos?.open) continue;
+      const qty = Number(pos.quantity), entry = Number(pos.entryPrice || pos.avgEntry);
+      const live = livePrices.get(sym);
+      const snap = coinSnapshots[sym];
+      const streamFresh = live && Date.now()-live.ts <= 90000 && Number(live.price)>0;
+      const snapFresh = snap && Date.now()-Date.parse(snap.updatedAt) <= 300000 && Number(snap.price)>0;
+      const mark = streamFresh ? Number(live.price) : snapFresh ? Number(snap.price) : null;
+      if (!Number.isFinite(qty) || qty<=0 || !Number.isFinite(entry) || entry<=0 || !mark) {
+        unpricedPositions++;
+        continue;
+      }
+      // Conservative liquidation estimate: closing fee/slippage + unpaid entry fees.
+      unrealizedNet += (mark-entry)*qty -
+        (Number(pos.entryFeeUsd)||0) - mark*qty*(PAPER_FEE_FRACTION+PAPER_SLIPPAGE_FRACTION);
+    }
+  }
+  const estimatedEquity = realized + unrealizedNet;
+  const grossLossPct = Math.abs(totalLoss)/dayStart*100;
+  const equityDrawdownPct = Math.max(0,(dayStart-estimatedEquity)/dayStart*100);
+  const drawdownPct = Math.max(grossLossPct,equityDrawdownPct);
+  const gainPct = totalGain/dayStart*100;
+  const DAILY_STOP=3, DAILY_TARGET=3;
+  const stopHit = drawdownPct>=DAILY_STOP;
+  return {drawdownPct,gainPct,totalLoss,totalGain,unrealizedNet,
+    estimatedEquity,dayStart,unpricedPositions,
+    paused:stopHit || unpricedPositions>0, stopHit, targetHit:gainPct>=DAILY_TARGET,
+    limit:DAILY_STOP,target:DAILY_TARGET};
 }
 
 // Adaptive mode — automatically tightens strategy when losing
@@ -795,7 +870,7 @@ function calcRSI3Series(closes) {
 
 function calcVWAPSeries(candles) {
   return candles.map((_, i) => {
-    const w = candles.slice(Math.max(0, i - 23), i + 1);
+    const w = candles.slice(Math.max(0, i - 19), i + 1);
     const tv = w.reduce((s, c) => s + ((c.high + c.low + c.close) / 3) * c.volume, 0);
     const v = w.reduce((s, c) => s + c.volume, 0);
     return v > 0 ? tv / v : candles[i].close;
@@ -806,12 +881,12 @@ function runBacktestSim(candles, rsiThreshold, takeProfit, stopLoss = 0.04, feeR
   // Round-trip taker fee (entry + exit). Live BitGet is 0.064%/side w/ BGB → 0.128% round-trip.
   // Baking this in is the single biggest honesty fix: without it a +0.1% scalp counts as a "win"
   // that is actually a net loss live — the root of the old 75%-backtest-vs-35%-live gap.
-  const fee = feeRT ?? getFeePct() * 2;
+  const fee = feeRT ?? (Math.max(getFeePct(), PAPER_FEE_FRACTION) * 2 + PAPER_SLIPPAGE_FRACTION * 2);
   const closes = candles.map(c => c.close);
   const ema8 = calcEMASeries(closes, 8);
+  const ema21 = calcEMASeries(closes, 21);
   const rsi = calcRSI3Series(closes);
   const vwap = calcVWAPSeries(candles);
-  const avgVol = candles.slice(0, 20).reduce((s, c) => s + c.volume, 0) / 20;
   const trades = [];
   let inTrade = false, entry = 0, bar = 0;
   for (let i = 30; i < candles.length - 1; i++) {
@@ -833,9 +908,11 @@ function runBacktestSim(candles, rsiThreshold, takeProfit, stopLoss = 0.04, feeR
     }
     const p = candles[i].close, rv = rsi[i];
     if (rv === null || rv === undefined) continue;
-    if (p > vwap[i] && p > ema8[i] && rv < rsiThreshold &&
-        Math.abs((p - vwap[i]) / vwap[i]) < 0.03 &&
-        candles[i].volume > avgVol * 0.8) {
+    const avgVol = candles.slice(i - 20, i).reduce((sum, c) => sum + c.volume, 0) / 20;
+    const vol3=(candles[i].volume+candles[i-1].volume+candles[i-2].volume)/3;
+    if (p > vwap[i] && p > ema8[i] && ema8[i] > ema21[i] && rv < rsiThreshold &&
+        Math.abs((p - vwap[i]) / vwap[i]) < 0.015 &&
+        candles[i].volume > avgVol && vol3 >= avgVol) {
       inTrade = true; entry = candles[i+1].open; bar = i + 1;
     }
   }
@@ -883,7 +960,10 @@ async function backtestCoin(symbol) {
   // 2. Validate those parameters on the most recent 7 days (out-of-sample)
   // 3. Only trade if the strategy holds on recent market conditions
   // This prevents over-fitting to conditions that no longer exist
-  const candles = await fetchCandles(symbol, "1H", 800); // ~33 days of hourly data
+  const simTF = ["5m","15m","30m","1H"].includes(CONFIG.timeframe) ? CONFIG.timeframe : "15m";
+  const candles = await fetchMarketCandles(symbol, simTF, 1000, { closedOnly: true });
+  // BitGet caps one fetch at 1000 candles. OOS may span only ~2.6 days for 15m.
+
 
   if (candles.length < 200) {
     // Not enough history for walk-forward — use simple backtest
@@ -893,7 +973,8 @@ async function backtestCoin(symbol) {
     return result;
   }
 
-  const oosSize = Math.min(7 * 24, Math.floor(candles.length * 0.25)); // 7 days or 25%
+  const perDay = { "5m":288,"15m":96,"30m":48,"1H":24 }[simTF];
+  const oosSize = Math.min(7 * perDay, Math.floor(candles.length * 0.25));
   const inSample    = candles.slice(0, candles.length - oosSize);
   const outOfSample = candles.slice(candles.length - oosSize);
 
@@ -910,7 +991,9 @@ async function backtestCoin(symbol) {
   const oosWR   = oosTrades.length > 0 ? oosWins / oosTrades.length : 0;
   const oosExp  = oosTrades.length > 0 ? oosTrades.reduce((s, t) => s + t.pct, 0) / oosTrades.length : 0; // net %/trade
 
-  const result = { ...inResult, symbol, oosWinRate: +(oosWR * 100).toFixed(1), oosExpectancy: +oosExp.toFixed(3), oosTrades: oosTrades.length, walkForward: true };
+  const result = { ...inResult, symbol, timeframe:simTF, oosDays:+(oosSize/perDay).toFixed(2),
+    oosWinRate: +(oosWR * 100).toFixed(1), oosExpectancy: +oosExp.toFixed(3),
+    oosTrades: oosTrades.length, walkForward: true };
 
   // TRADE only with a real OOS sample (>=8 trades) that is profitable AFTER fees on unseen recent
   // data. The old gate passed on 3 trades / raw WR — trivially luck, and the source of the false
@@ -933,32 +1016,17 @@ async function backtestCoin(symbol) {
 // ─── Swing Backtest ──────────────────────────────────────────────────────────
 
 function runSwingBacktestSim(candles4h, rsiThreshold, takeProfit = 0.10, stopLoss = 0.05) {
-  // Mega-backtest validated signal: dip-buy below VWAP in uptrend (69% OOS WR)
   const closes = candles4h.map(c => c.close);
-  const ema8   = calcEMASeries(closes, 8);
-  const ema21  = calcEMASeries(closes, 21);
-  const rsi3   = calcRSI3Series(closes);
-  const vwap   = calcVWAPSeries(candles4h);
-  const maxBars = 48; // 48 × 4H = 8 days (mega-backtest winner)
-  const trades = [];
-  let inTrade = false, entry = 0, bar = 0;
-  for (let i = 30; i < candles4h.length - 1; i++) {
-    if (inTrade) {
-      const pct = (candles4h[i].close - entry) / entry;
-      if (pct >= takeProfit || pct <= -stopLoss || (i - bar) >= maxBars) {
-        trades.push({ pct: pct * 100, win: pct > 0 });
-        inTrade = false;
-      }
-      continue;
-    }
-    const p = candles4h[i].close, rv = rsi3[i];
-    if (rv === null || rv === undefined) continue;
-    // Buy the dip: price at/below VWAP + uptrend (EMA8 > EMA21) + RSI oversold
-    if (p <= vwap[i] * 1.01 && ema8[i] > ema21[i] && rv < rsiThreshold) {
-      inTrade = true; entry = candles4h[i + 1].open; bar = i + 1;
-    }
-  }
-  return trades;
+  const indicators = {
+    ema8: calcEMASeries(closes, 8),
+    ema21: calcEMASeries(closes, 21),
+    rsi3: calcRSI3Series(closes),
+    vwap: calcVWAPSeries(candles4h),
+  };
+  return simulateSwingTrades(candles4h, rsiThreshold, takeProfit, stopLoss, indicators, {
+    feeFraction: PAPER_FEE_FRACTION,
+    slippageFraction: PAPER_SLIPPAGE_FRACTION, maxHoldBars: 48,
+  });
 }
 
 function optimiseSwingCoin(candles4h) {
@@ -968,14 +1036,14 @@ function optimiseSwingCoin(candles4h) {
       for (const sl of [0.04, 0.05, 0.06]) { // mega-backtest winner: 5%
         if (tp / sl < 1.5) continue; // enforce minimum R:R
         const trades = runSwingBacktestSim(candles4h, rsi, tp, sl);
-        if (trades.length < 3) continue;
+        if (trades.length < 8) continue; // reject tiny lucky training samples
         const wins = trades.filter(t => t.win), losses = trades.filter(t => !t.win);
         const wr  = wins.length / trades.length;
         const aw  = wins.length   > 0 ? wins.reduce((s, t) => s + t.pct, 0)   / wins.length   : 0;
         const al  = losses.length > 0 ? losses.reduce((s, t) => s + t.pct, 0) / losses.length : 0;
         const exp = wr * aw + (1 - wr) * al;
         if (wr < 0.55 || exp <= 0) continue;
-        const score = wr * exp;
+        const score = exp * Math.sqrt(trades.length);
         if (!best || score > best.score) {
           best = { rsiThreshold: rsi, takeProfit: tp, stopLoss: sl,
             trades: trades.length, winRate: +(wr * 100).toFixed(1),
@@ -985,7 +1053,7 @@ function optimiseSwingCoin(candles4h) {
     }
   }
   if (!best) return { trades: 0, winRate: 0, recommendation: "SKIP", rsiThreshold: 35, takeProfit: 0.08, stopLoss: 0.04 };
-  return { ...best, recommendation: best.winRate >= 65 ? "TRADE" : "CAUTION" };
+  return { ...best, recommendation: "CAUTION" }; // Train only; OOS must still pass.
 }
 
 async function backtestSwingCoin(symbol) {
@@ -995,12 +1063,12 @@ async function backtestSwingCoin(symbol) {
   }
 
   let candles;
-  try { candles = await fetchCandles(symbol, "4H", 200); }
+  try { candles = await fetchMarketCandles(symbol, "4H", 800, { closedOnly: true }); }
   catch { return { recommendation: "SKIP", trades: 0 }; }
   if (!candles || candles.length < 60) return { recommendation: "SKIP", trades: 0 };
 
   // Walk-forward: last 7 days (42 × 4H bars) as out-of-sample
-  const oosSize    = Math.min(42, Math.floor(candles.length * 0.25));
+  const oosSize    = Math.floor(candles.length * 0.25); // unseen ~30+ days; need sample
   const inSample   = candles.slice(0, candles.length - oosSize);
   const outSample  = candles.slice(candles.length - oosSize);
 
@@ -1018,14 +1086,17 @@ async function backtestSwingCoin(symbol) {
   const result = { ...inResult, symbol, oosWinRate: +(oosWR * 100).toFixed(1),
     oosTrades: oosTrades.length, testedAt: new Date().toISOString() };
 
-  if (oosTrades.length >= 2 && oosWR < 0.45) {
+  const oosQuality = swingTradeMetrics(oosTrades);
+  result.oosNetExpectancyPct = +oosQuality.expectancyPct.toFixed(3);
+  result.oosProfitFactor = Number.isFinite(oosQuality.profitFactor) ? +oosQuality.profitFactor.toFixed(3) : null;
+  // Reject tiny OOS samples, or an apparent edge that disappears after costs.
+  if (oosTrades.length >= 8 && oosQuality.expectancyPct > 0.2 &&
+      oosQuality.profitFactor > 1.2 && oosQuality.winRate >= 0.55) {
+    result.recommendation = "TRADE";
+    console.log(`  ✅ Swing OOS gate PASSED — ${symbol}: ${oosTrades.length} trades; net expectancy +${oosQuality.expectancyPct.toFixed(2)}%/trade after costs`);
+  } else {
     result.recommendation = "SKIP";
-    console.log(`  🔴 Swing WF FAILED — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}% (need 45%+)`);
-  } else if (oosTrades.length >= 2 && oosWR < 0.55) {
-    result.recommendation = "CAUTION";
-    console.log(`  ⚠️  Swing WF CAUTION — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}%`);
-  } else if (oosTrades.length >= 2) {
-    console.log(`  ✅ Swing WF PASSED — ${symbol}: OOS WR ${(oosWR*100).toFixed(0)}% | exp +${oosExp.toFixed(2)}%`);
+    console.log(`  🛑 Swing OOS gate FAILED — ${symbol}: ${oosTrades.length} trades; net ${oosQuality.expectancyPct.toFixed(2)}%/trade after costs (require >=8 and positive net edge)`);
   }
 
   SWING_BACKTEST[symbol] = result;
@@ -1207,34 +1278,7 @@ async function refreshTopMovers() {
 // ─── Market Data (BitGet public API — free, no auth) ────────────────────────
 
 async function fetchCandles(symbol, interval, limit = 100) {
-  const intervalMap = {
-    "1m": "1min",
-    "3m": "3min",
-    "5m": "5min",
-    "15m": "15min",
-    "30m": "30min",
-    "1H": "1h",
-    "4H": "4h",
-    "1D": "1day",
-    "1W": "1week",
-  };
-  const granularity = intervalMap[interval] || "1h";
-
-  const url = `https://api.bitget.com/api/v2/spot/market/candles?symbol=${symbol}&granularity=${granularity}&limit=${Math.min(limit, 1000)}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
-  if (!res.ok) throw new Error(`BitGet market data error: ${res.status}`);
-  const json = await res.json();
-  if (json.code !== "00000") throw new Error(`BitGet API error: ${json.msg}`);
-
-  // BitGet returns oldest-first (ascending) — no reverse needed
-  return json.data.map((k) => ({
-    time: parseInt(k[0]),
-    open: parseFloat(k[1]),
-    high: parseFloat(k[2]),
-    low: parseFloat(k[3]),
-    close: parseFloat(k[4]),
-    volume: parseFloat(k[5]),
-  }));
+  return fetchMarketCandles(symbol, interval, limit);
 }
 
 // ─── Indicator Calculations ──────────────────────────────────────────────────
@@ -1690,23 +1734,32 @@ async function detectMarketRegime() {
 // Tracks total $ at risk across ALL open positions (scalp + swing + breakout).
 // Hard cap at 8% — never risk more than this simultaneously.
 function calcPortfolioHeat(log, livePortfolioValue = null) {
-  const portfolio = livePortfolioValue || log.portfolioValue || acct().portfolioValue;
+  const portfolio = Number(livePortfolioValue || log.portfolioValue || acct().portfolioValue);
   let totalRisk = 0;
   const positions = [];
-  const addPos = (map, stopPct, type) => {
-    for (const [sym, pos] of Object.entries(map || {})) {
+  const addPos = (map, defaultStop, type) => {
+    for (const [sym,pos] of Object.entries(map || {})) {
       if (!pos?.open) continue;
-      const risk = pos.entryPrice * stopPct * parseFloat(pos.quantity || 0);
-      totalRisk += risk;
-      positions.push({ sym, risk: +risk.toFixed(4), type });
+      const entry=Number(pos.entryPrice || pos.avgEntry),qty=Number(pos.quantity);
+      const stop = Number(pos.slPct ?? defaultStop);
+      if (![entry,qty,stop].every(Number.isFinite) || entry<=0 || qty<=0 || stop<=0) {
+        totalRisk = Infinity;
+        positions.push({sym,risk:"UNKNOWN",type});
+        continue;
+      }
+      const risk=entry*qty*(stop+2*PAPER_FEE_FRACTION+2*PAPER_SLIPPAGE_FRACTION);
+      totalRisk+=risk;
+      positions.push({sym,risk:+risk.toFixed(4),type});
     }
   };
-  addPos(log.positions,         0.025, "scalp");    // ~2.5% scalp stop
-  addPos(log.swingPositions,    SWING.stopLoss, "swing");
-  addPos(log.breakoutPositions, 0.03,  "breakout"); // 3% breakout stop
-  addPos(log.sniperPositions,   0.08, "sniper"); // SNIPER.stopLossPct — constant can't cross block scope
-  const heatPct = portfolio > 0 ? (totalRisk / portfolio) * 100 : 0;
-  return { heatPct: +heatPct.toFixed(2), totalRisk, positions, isOverheated: heatPct > 8 };
+  addPos(log.positions,0.04,"scalp");
+  addPos(log.swingPositions,SWING.stopLoss,"swing");
+  addPos(log.breakoutPositions,0.03,"breakout");
+  addPos(log.sniperPositions,0.08,"sniper");
+  addPos(log.ltPositions,0.25,"long-term");
+  const heatPct=portfolio>0?(totalRisk/portfolio)*100:Infinity;
+  return {heatPct:Number.isFinite(heatPct)?+heatPct.toFixed(2):Infinity,
+    totalRisk,positions,isOverheated:!Number.isFinite(heatPct)||heatPct>=8};
 }
 
 // VWAP — rolling 20-bar, stays close to current price action
@@ -2416,7 +2469,7 @@ function checkTradeLimits(log) {
   const tradeSize = CONFIG.maxTradeSizeUSD ? Math.min(portfolio * sizePct, CONFIG.maxTradeSizeUSD) : portfolio * sizePct;
 
   console.log(
-    `✅ Trade size: $${tradeSize.toFixed(2)} (${(sizePct * 100).toFixed(0)}% of $${portfolio.toFixed(2)})`,
+    `✅ Trade size: ${formatTradeSizeSummary(tradeSize, portfolio)}`,
   );
 
   return true;
@@ -2453,8 +2506,13 @@ async function getSpotBalance(coin) {
     },
   });
   const data = await res.json();
-  const asset = data.data?.find(a => a.coin === coin);
-  return parseFloat(asset?.available ?? "0");
+  if (!res.ok || data.code !== "00000" || !Array.isArray(data.data)) {
+    throw new Error("BitGet balance unavailable: fail closed rather than assume zero");
+  }
+  const asset = data.data.find(a => a.coin === coin);
+  const amount = Number(asset?.available ?? "0");
+  if (!Number.isFinite(amount) || amount < 0) throw new Error("Invalid BitGet spot balance");
+  return amount;
 }
 
 async function getSpotBalanceTotal(coin) {
@@ -2501,6 +2559,7 @@ async function getBitMartBalance(coin) {
 }
 
 async function placeBitMartOrder(symbol, side, sizeUSD, price, quantityOverride = null) {
+  requireExchangeWrites("BitMart order");
   if (side === "buy" && HARD_BLACKLIST.has(symbol.toUpperCase())) {
     console.log(`⛔ BUY BLOCKED [placeBitMartOrder] — ${symbol} is hard-blacklisted. Skipping.`);
     return { blocked: true, code: "HARD_BLACKLIST", reason: "Coin is hard-blacklisted" };
@@ -2509,6 +2568,7 @@ async function placeBitMartOrder(symbol, side, sizeUSD, price, quantityOverride 
   const timestamp = Date.now().toString();
 
   let bodyObj;
+  if (process.env.BITMART_LIVE_ORDERS_APPROVED !== "true") throw new Error("BITMART_LIVE_LOCKED: BitMart needs separately audited execution");
   if (side === "buy") {
     bodyObj = { symbol: bmSymbol, side: "buy", type: "market", notional: sizeUSD.toFixed(2) };
   } else {
@@ -2566,23 +2626,23 @@ async function placeOrder(symbol, side, sizeUSD, price, quantityOverride = null)
   if (side === "buy") {
     if (HARD_BLACKLIST.has(symbol.toUpperCase())) {
       console.log(`⛔ BUY BLOCKED — ${symbol} is hard-blacklisted (never buy). Skipping.`);
-      return { blocked: true, code: "HARD_BLACKLIST", reason: "Coin is hard-blacklisted" };
+      throw new Error("BUY_BLOCKED_HARD_BLACKLIST: " + symbol);
     }
     if (await failsLiquidityFloor(symbol)) {
       const d = _depthCache.get(symbol)?.usd;
       console.log(`⛔ BUY BLOCKED — ${symbol} book too thin ($${Math.round(d || 0).toLocaleString()} < $${MIN_BOOK_DEPTH_USD.toLocaleString()} ±0.5% depth). Skipping illiquid coin.`);
-      return { blocked: true, code: "THIN_BOOK", reason: `Book depth $${Math.round(d || 0)} below floor` };
+      throw new Error("BUY_BLOCKED_THIN_BOOK: " + symbol + " depth " + d);
     }
     if (entryCapReached()) {
       console.log(`⛔ BUY BLOCKED — ${symbol}: daily entry cap reached (${MAX_ENTRIES_PER_DAY}/day). Trading less by design.`);
-      return { blocked: true, code: "ENTRY_CAP", reason: `Daily entry cap ${MAX_ENTRIES_PER_DAY} reached` };
+      throw new Error("BUY_BLOCKED_ENTRY_CAP: " + symbol);
     }
     const soldAt = _recentlySold.get(symbol);
     if (soldAt && Date.now() - soldAt < POST_SELL_LOCK_MS) {
       const minsLeft = Math.ceil((POST_SELL_LOCK_MS - (Date.now() - soldAt)) / 60000);
       console.log(`🔒 placeOrder BUY BLOCKED — ${symbol} sold ${Math.floor((Date.now() - soldAt) / 60000)}min ago — ${minsLeft}min remaining (stack trace follows)`);
       console.trace();
-      return { blocked: true, code: "POST_SELL_LOCK", reason: `Sold ${Math.floor((Date.now() - soldAt) / 60000)}min ago` };
+      throw new Error("BUY_BLOCKED_POST_SELL_LOCK: " + symbol);
     }
     console.log(`🔍 BUY ORDER PROCEEDING — ${symbol}`);
     console.trace();
@@ -3629,18 +3689,19 @@ async function sweepDust(log) {
 
 const _symbolPrecisionCache = {};
 async function getQuantityPrecision(symbol) {
-  if (acct().exchange === "bitmart") return 6; // BitMart: default precision
+  if (acct().exchange === "bitmart") return 6;
   const cacheKey = symbol + acct().id;
   if (_symbolPrecisionCache[cacheKey] !== undefined) return _symbolPrecisionCache[cacheKey];
-  try {
-    const res = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`);
-    const data = await res.json();
-    const precision = parseInt(data.data?.[0]?.quantityPrecision ?? "6", 10);
-    _symbolPrecisionCache[cacheKey] = precision;
-    return precision;
-  } catch {
-    return 6;
-  }
+  const res = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`, {
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error("BitGet precision request failed: HTTP " + res.status);
+  const data = await res.json();
+  const precision = Number(data.data?.[0]?.quantityPrecision);
+  if (data.code !== "00000" || !Number.isInteger(precision) || precision < 0 || precision > 12)
+    throw new Error("Cannot verify BitGet quantity precision for " + symbol);
+  _symbolPrecisionCache[cacheKey] = precision;
+  return precision;
 }
 
 function floorToDecimals(value, decimals) {
@@ -3658,93 +3719,109 @@ async function getBitGetServerTime() {
 }
 
 async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride = null) {
-  // Defense-in-depth: block blacklisted BUYS at the lowest execution level too, so no caller can
-  // ever bypass the guard (blacklisted ZEC/MAGMA/UMXM were still being bought — belt AND braces).
+  requireExchangeWrites("BitGet order");
+  if (side !== "buy" && side !== "sell") throw new Error("Invalid exchange order side");
   if (side === "buy" && HARD_BLACKLIST.has(symbol.toUpperCase())) {
-    console.log(`⛔ BUY BLOCKED [placeBitGetOrder] — ${symbol} is hard-blacklisted. Skipping.`);
-    return { blocked: true, code: "HARD_BLACKLIST", reason: "Coin is hard-blacklisted" };
+    console.log("BUY BLOCKED: hard blacklist " + symbol);
+    throw new Error("BUY_BLOCKED_HARD_BLACKLIST: " + symbol);
   }
-  const timestamp = await getBitGetServerTime();
-  const path =
-    CONFIG.tradeMode === "spot"
-      ? "/api/v2/spot/trade/place-order"
-      : "/api/v2/mix/order/place-order";
-
-  // Spot market BUY: size = USDT to spend
-  // Spot market SELL: size = actual token balance, floored to symbol's quantity precision
-  // Futures: use calculated quantity
+  const spot = CONFIG.tradeMode === "spot";
+  const isSpotSell = spot && side === "sell";
+  const referencePrice = Number(price);
   let orderSize;
-  if (CONFIG.tradeMode === "spot" && side === "buy") {
-    orderSize = sizeUSD.toFixed(2);
-  } else if (CONFIG.tradeMode === "spot" && side === "sell") {
-    const baseCoin = symbol.replace("USDT", "");
-    const available = await getSpotBalance(baseCoin);
-    if (available <= 0) throw new Error(`DUST:No ${baseCoin} balance to sell`);
-    const valueUSD = available * (price || 1);
-    if (valueUSD < 1.0) throw new Error(`DUST:Position too small — $${valueUSD.toFixed(4)} remaining (below $1 minimum)`);
-    const precision = await getQuantityPrecision(symbol);
-    const floored = floorToDecimals(available, precision);
-    orderSize = floored.toFixed(precision);
+  let plan = null;
+  // Spot SELL size is in base-asset units. Explicit requested quantity is mandatory:
+  // market orders must not silently liquidate all available exchange inventory.
+  if (isSpotSell) {
+    if (quantityOverride == null) throw new Error("Explicit spot sell quantity required");
+    if (!Number.isFinite(referencePrice) || referencePrice <= 0) throw new Error("Invalid spot sell price");
+    const asset = symbol.replace(/USDT$/, "");
+    const [available, precision] = await Promise.all([
+      getSpotBalance(asset), getQuantityPrecision(symbol)
+    ]);
+    plan = planSpotSellQuantity({ available, requested: quantityOverride, precision });
+    if (plan.quantity * referencePrice < 1.0) throw new Error("DUST:Spot sell below $1 minimum");
+    orderSize = plan.size;
+  } else if (spot && side === "buy") {
+    if (!Number.isFinite(Number(sizeUSD)) || Number(sizeUSD) <= 0)
+      throw new Error("Invalid spot buy notional");
+    orderSize = Number(sizeUSD).toFixed(2);
   } else {
-    orderSize = quantityOverride ?? (sizeUSD / price).toFixed(6);
+    if (!Number.isFinite(referencePrice) || referencePrice <= 0) throw new Error("Invalid futures order price");
+    orderSize = String(quantityOverride ?? (sizeUSD / referencePrice).toFixed(6));
   }
 
+  const spotBuyBalanceBefore = spot && side === "buy"
+    ? await getSpotBalance(symbol.replace(/USDT$/, "")) : null;
+  const timestamp = await getBitGetServerTime();
+  const path = spot ? "/api/v2/spot/trade/place-order" : "/api/v2/mix/order/place-order";
   const body = JSON.stringify({
-    symbol,
-    side,
-    orderType: "market",
-    size: orderSize,
-    ...(CONFIG.tradeMode === "futures" && {
-      productType: "USDT-FUTURES",
-      marginMode: "isolated",
-      marginCoin: "USDT",
-    }),
+    symbol, side, orderType: "market", size: orderSize,
+    ...(!spot && { productType: "USDT-FUTURES", marginMode: "isolated", marginCoin: "USDT" }),
   });
-
   const signature = signBitGet(timestamp, "POST", path, body);
-
-  const res = await fetch(`${acct().baseUrl}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "ACCESS-KEY": acct().apiKey,
-      "ACCESS-SIGN": signature,
-      "ACCESS-TIMESTAMP": timestamp,
-      "ACCESS-PASSPHRASE": acct().passphrase,
-      "locale": "en-US",
-    },
-    body,
-  });
-
-  const data = await res.json();
-  if (data.code !== "00000") {
-    throw new Error(`BitGet order failed: ${data.msg}`);
-  }
-
-  // For spot BUY: verify coins actually landed — track incremental gain only (not dust)
-  if (CONFIG.tradeMode === "spot" && side === "buy") {
-    const baseCoin = symbol.replace("USDT", "");
-    const balanceBefore = await getSpotBalance(baseCoin);
-    // Retry up to 3 times with increasing delays (some coins settle slowly)
-    let received = 0;
-    for (const delay of [3000, 4000, 5000]) {
-      await new Promise(r => setTimeout(r, delay));
-      const balanceAfter = await getSpotBalance(baseCoin);
-      received = balanceAfter - balanceBefore;
-      if (received > 0) break;
+  let submitted = false;
+  let orderId = null;
+  try {
+    // Once POST starts, any timeout/error is ambiguous until exchange reconciliation.
+    submitted = true;
+    const res = await fetch(`${acct().baseUrl}${path}`, {
+      method: "POST", signal: AbortSignal.timeout(10000),
+      headers: {
+        "Content-Type": "application/json",
+        "ACCESS-KEY": acct().apiKey,
+        "ACCESS-SIGN": signature,
+        "ACCESS-TIMESTAMP": timestamp,
+        "ACCESS-PASSPHRASE": acct().passphrase, locale: "en-US",
+      }, body,
+    });
+    const data = await res.json();
+    orderId = data.data?.orderId ?? null;
+    if (!res.ok || data.code !== "00000" || !orderId)
+      throw new Error("BitGet order submission not reliably acknowledged");
+    if (isSpotSell) {
+      // A successful HTTP POST confirms *acceptance*, not a filled sell.
+      // Never delete the position or book realised profit until the exact
+      // requested quantity is confirmed filled by BitGet.
+      for (const ms of [800, 1400, 2400, 4000]) {
+        await new Promise(resolve => setTimeout(resolve, ms));
+        const state = await readSpotOrderInfo(orderId);
+        if (confirmSpotSellFill({
+          status: state.status, confirmedQty: state.confirmedQty,
+          requestedQty: plan.quantity, precision: Number(plan.size.split(".")[1]?.length ?? 0),
+        })) return { ...data.data, confirmedQty: state.confirmedQty };
+        // A terminal partial fill cannot be booked as a successful full exit.
+        if (["filled", "full_fill", "cancelled", "cancel"].includes(String(state.status).toLowerCase()))
+          throw new Error("BitGet SELL confirmed only " + state.confirmedQty + "/" + plan.quantity + " units, status " + state.status);
+      }
+      throw new Error("Timed out waiting for verified BitGet spot SELL fill");
     }
-    const minExpected = sizeUSD / price * 0.90; // allow 10% slippage
-    if (received < minExpected) {
-      // Log the position anyway using estimated qty — don't throw, order was placed
-      const estimatedQty = sizeUSD / price;
-      console.log(`⚠️  Balance check uncertain — using estimated qty ${estimatedQty.toFixed(6)} ${baseCoin} (received: ${received.toFixed(6)})`);
-      return { ...data.data, confirmedQty: estimatedQty };
+    if (spot && side === "buy") {
+      const asset = symbol.replace(/USDT$/, "");
+      let received = 0;
+      for (const delay of [3000, 4000, 5000]) {
+        await new Promise(resolve => setTimeout(resolve, delay));
+        const balanceAfter = await getSpotBalance(asset);
+        received = balanceAfter - spotBuyBalanceBefore;
+        if (received > 0) break;
+      }
+      const minExpected = sizeUSD / referencePrice * 0.90;
+      if (!Number.isFinite(received) || received <= 0 || received < minExpected)
+        throw new Error("UNCONFIRMED_BITGET_BUY_FILL: " + orderId + " qty=" + received);
+      return { ...data.data, confirmedQty: received };
     }
-    console.log(`✅ Balance confirmed: +${received.toFixed(6)} ${baseCoin} received (pre-existing: ${balanceBefore.toFixed(6)})`);
-    return { ...data.data, confirmedQty: received };
+    return data.data;
+  } catch (err) {
+    if (submitted) {
+      if (side === "sell") haltOnUnconfirmedSell({
+        symbol, orderId, reason: err.message, requestedQty: plan?.quantity ?? quantityOverride,
+      });
+      else if (side === "buy") haltOnUnconfirmedOrder({
+        symbol, clientOid: null, orderId, reason: err.message,
+      });
+    }
+    throw err;
   }
-
-  return data.data;
 }
 
 // ─── Tax CSV Logging ─────────────────────────────────────────────────────────
@@ -3754,26 +3831,78 @@ async function placeBitGetOrder(symbol, side, sizeUSD, price, quantityOverride =
 //   2. /data/trades.csv — create /data if it doesn't exist yet (Railway volume or ephemeral)
 //   3. trades.csv relative (local dev)
 function resolveCSVPath() {
+  // An isolated trial can keep its own CSV instead of mixing with past simulations.
+  if (CONFIG.paperTrading && process.env.PAPER_CSV_FILE) return process.env.PAPER_CSV_FILE;
   if (process.env.STATE_FILE) {
-    return process.env.STATE_FILE.replace(/[^/\\]+$/, "trades.csv");
+    return process.env.STATE_FILE.replace(/[^/\\]+$/, CONFIG.paperTrading ? "trades-paper.csv" : "trades.csv");
   }
   try {
     // mkdirSync is a no-op if /data already exists; creates it if not.
     // On Railway with a mounted volume /data is persistent; without one it's ephemeral but at
     // least consistent across the process lifetime (won't silently write to /app/).
     mkdirSync("/data", { recursive: true });
-    return "/data/trades.csv";
+    return CONFIG.paperTrading ? "/data/trades-paper.csv" : "/data/trades.csv";
   } catch {
-    return "trades.csv";
+    return CONFIG.paperTrading ? "trades-paper.csv" : "trades.csv";
   }
 }
 const CSV_FILE = resolveCSVPath();
 
+// Read-only recovery inventory. This NEVER mutates or reclassifies real exchange trades.
+function historicalRecoverySummary() {
+  const originalState = join(STATE_DIR, "safety-check-log.json");
+  const originalCsv = join(STATE_DIR, "trades.csv");
+  const result = {
+    historicalStateFound: existsSync(originalState),
+    historicalCsvFound: existsSync(originalCsv),
+    activeStateFile: LOG_FILE,
+    simulatedCsvFile: CONFIG.paperTrading ? CSV_FILE : null,
+    totalsAreExchangeVerified: false,
+  };
+  if (result.historicalStateFound) {
+    try {
+      const state = JSON.parse(readFileSync(originalState, "utf8"));
+      const trades = Array.isArray(state.trades) ? state.trades : [];
+      const exits = trades.filter(t => t.type === "exit" && t.orderPlaced === true);
+      const entries = trades.filter(t => t.type === "entry" && t.orderPlaced === true);
+      result.botLogEntries = entries.length;
+      result.botLogExits = exits.length;
+      result.botReportedExitPnlUSD = Number(exits.reduce((sum, t) => sum + (Number.isFinite(Number(t.pnlUSD)) ? Number(t.pnlUSD) : 0), 0).toFixed(2));
+      result.openRecordCounts = Object.fromEntries(["positions", "swingPositions", "breakoutPositions", "sniperPositions", "ltPositions"].map(k => [k, Object.values(state[k] || {}).filter(p => p?.open).length]));
+      result.note = "Bot-estimated log figures, NOT net account performance. Verify against BitGet deposits, withdrawals and actual balances.";
+    } catch (err) { result.historicalStateError = err.message.slice(0, 120); }
+  }
+  return result;
+}
+
+// Optional signed GET-only balance snapshot, independent of the bot's synthetic P&L.
+// This does NOT place trades, update orders, or overwrite any ledger.
+async function readOnlyBitGetSnapshot() {
+  const account = ACCOUNTS.find(a => a.exchange === "bitget");
+  if (!account?.apiKey || !account?.secretKey || !account?.passphrase)
+    return { ok: false, reason: "BitGet credentials incomplete" };
+  const path = "/api/v2/account/all-account-balance";
+  try {
+    const ts = Date.now().toString();
+    const sig = crypto.createHmac("sha256", account.secretKey).update(ts + "GET" + path).digest("base64");
+    const res = await fetch(account.baseUrl + path, {
+      method: "GET", signal: AbortSignal.timeout(10000),
+      headers: { "ACCESS-KEY": account.apiKey, "ACCESS-SIGN": sig,
+        "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": account.passphrase, "locale": "en-US" },
+    });
+    const data = await res.json();
+    if (!res.ok || data.code !== "00000" || !Array.isArray(data.data))
+      return { ok: false, code: String(data.code || res.status), reason: String(data.msg || "Exchange response invalid").slice(0, 130) };
+    const accountBalances = data.data.map(a => ({ accountType: String(a.accountType || "unknown"), usdBalance: Number(a.usdtBalance || 0) }));
+    const usdTotal = accountBalances.reduce((sum, a) => sum + (Number.isFinite(a.usdBalance) ? a.usdBalance : 0), 0);
+    return { ok: true, timestamp: new Date().toISOString(), officialTotalUsd: Number(usdTotal.toFixed(2)), accountBalances, note: "Read-only exchange valuation. Not net P&L: deposits and withdrawals must be reconciled." };
+  } catch (err) { return { ok: false, reason: String(err.message).slice(0, 140) }; }
+}
+
 // Always ensure trades.csv exists with headers — open it in Excel/Sheets any time
 function initCsv() {
   if (!existsSync(CSV_FILE)) {
-    const funnyNote = `,,,,,,,,,,,"NOTE","Hey, if you're at this stage of the video, you must be enjoying it... perhaps you could hit subscribe now? :)"`;
-    writeFileSync(CSV_FILE, CSV_HEADERS + "\n" + funnyNote + "\n");
+    writeFileSync(CSV_FILE, CSV_HEADERS + "\n");
     console.log(
       `📄 Created ${CSV_FILE} — open in Google Sheets or Excel to track trades.`,
     );
@@ -3841,17 +3970,21 @@ function writeTradeCsv(logEntry) {
     const pnlStr = logEntry.pnlPct !== undefined
       ? ` P&L: ${logEntry.pnlPct >= 0 ? "+" : ""}${logEntry.pnlPct.toFixed(2)}%`
       : "";
-    if (!logEntry.shouldExit) {
+    if (!logEntry.orderPlaced) {
       mode = "HELD";
       orderId = "HELD";
       notes = claudeTag ?? `Holding${pnlStr}`;
     } else {
-      const val = (parseFloat(logEntry.quantity) * logEntry.price);
+      const qty = Number(logEntry.quantity || 0);
+      const val = qty * Number(logEntry.price || 0);
       side = "SELL";
       quantity = logEntry.quantity;
       totalUSD = val.toFixed(2);
-      fee = (val * getFeePct()).toFixed(4);
-      netAmount = (val - val * getFeePct()).toFixed(2);
+      const exitFee = logEntry.feeAdjusted === true
+        ? Number(logEntry.exitFeeUSD || 0)
+        : val * (logEntry.paperTrading ? PAPER_FEE_FRACTION : getFeePct());
+      fee = exitFee.toFixed(6);
+      netAmount = (val - exitFee).toFixed(4);
       orderId = logEntry.orderId || "";
       mode = logEntry.paperTrading ? "PAPER" : "LIVE";
       notes = claudeTag ?? `Exit: ${logEntry.exitReasons?.join("; ")}${pnlStr}`;
@@ -3866,10 +3999,10 @@ function writeTradeCsv(logEntry) {
     notes = claudeTag ?? `Failed: ${failed}`;
   } else if (logEntry.paperTrading) {
     side = "BUY";
-    quantity = (logEntry.tradeSize / logEntry.price).toFixed(6);
+    quantity = (logEntry.tradeSize / logEntry.price).toFixed(8);
     totalUSD = logEntry.tradeSize.toFixed(2);
-    fee = (logEntry.tradeSize * 0.001).toFixed(4);
-    netAmount = (logEntry.tradeSize - parseFloat(fee)).toFixed(2);
+    fee = Number(logEntry.paperEntryFeeUsd ?? (logEntry.tradeSize * PAPER_FEE_FRACTION)).toFixed(6);
+    netAmount = (logEntry.tradeSize - parseFloat(fee)).toFixed(4);
     orderId = logEntry.orderId || "";
     mode = "PAPER";
     notes = claudeTag ?? "All conditions met";
@@ -3891,13 +4024,13 @@ function writeTradeCsv(logEntry) {
     logEntry.symbol,
     side,
     quantity,
-    logEntry.price.toFixed(2),
+    Number(logEntry.price).toFixed(8),
     totalUSD,
     fee,
     netAmount,
     orderId,
     mode,
-    `"${notes}"`,
+    `"${String(notes).replace(/"/g, '""')}"`,
   ].join(",");
 
   if (!existsSync(CSV_FILE)) {
@@ -3958,7 +4091,7 @@ function openPositionSymbols() {
     for (const store of ["positions", "swingPositions", "breakoutPositions", "sniperPositions", "ltPositions"]) {
       const obj = log[store];
       if (!obj) continue;
-      for (const [sym, pos] of Object.entries(obj)) if (pos) syms.add(sym);
+      for (const [sym, pos] of Object.entries(obj)) if (pos?.open) syms.add(sym);
     }
     return [...syms];
   } catch { return []; }
@@ -3973,14 +4106,20 @@ function startPriceStream(symbols) {
   const streamSymbols = [...new Set([...(symbols || []), ...openPositionSymbols()])];
   const ws = new WebSocket("wss://ws.bitget.com/v2/ws/public");
   priceStreamWs = ws;
+  let heartbeat = null;
 
   ws.on("open", () => {
     console.log(`\n📡 WebSocket connected — streaming ${streamSymbols.length} symbols (${openPositionSymbols().length} open positions included)`);
     const args = streamSymbols.map(s => ({ instType: "SPOT", channel: "ticker", instId: s }));
     ws.send(JSON.stringify({ op: "subscribe", args }));
+    heartbeat = startBitgetHeartbeat(ws, {
+      onPong: () => console.log("✅ BitGet WebSocket heartbeat confirmed (plain-text pong)"),
+      onStale: () => console.error("⛔ BitGet WebSocket heartbeat timed out — reconnecting"),
+    });
   });
 
   ws.on("message", (data) => {
+    if (heartbeat?.handleMessage(data.toString())) return;
     try {
       const msg = JSON.parse(data.toString());
       if (msg.event === "pong" || msg.op === "pong") return;
@@ -3991,19 +4130,18 @@ function startPriceStream(symbols) {
     } catch {}
   });
 
-  ws.on("close", () => {
+  ws.on("close", (code) => {
+    heartbeat?.stop();
     if (generation !== _wsGeneration) return; // intentionally replaced — don't reconnect
-    console.log("⚠️  WebSocket disconnected — reconnecting in 5s");
+    console.log("⚠️  WebSocket disconnected (code " + code + ") — reconnecting in 5s");
     setTimeout(() => startPriceStream(CONFIG.symbols), 5000);
   });
 
   ws.on("error", (err) => console.error("WebSocket error:", err.message));
 
-  // BitGet requires a ping within every 30s or the server closes the connection
-  const ping = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ op: "ping" }));
-    else clearInterval(ping);
-  }, 25000);
+  // A plain-text "ping" is sent every 25s by startBitgetHeartbeat.
+  // If no plain-text "pong" arrives within 70s the stale connection is
+  // terminated so the existing generation-safe close handler reconnects.
 
   return ws;
 }
@@ -4076,7 +4214,13 @@ async function checkLiveHardStops() {
     _recentlySold.set(sym, Date.now()); // lock immediately before placing sell
 
     try {
-      const pnlUSD = (livePrice - pos.entryPrice) * parseFloat(pos.quantity);
+      const simulatedStop = CONFIG.paperTrading ? paperExit({
+        entryFillPrice: pos.entryPrice, exitMarketPrice: livePrice,
+        quantity: Number(pos.quantity), entryFeeUsd: Number(pos.entryFeeUsd || 0),
+        feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+      }) : null;
+      const pnlUSD = simulatedStop?.pnlUsd ?? ((livePrice - pos.entryPrice) * Number(pos.quantity));
+      const realizedPct = simulatedStop?.pnlPct ?? pnlPct;
       if (!CONFIG.paperTrading) {
         if (pos.tpOrderId) {
           await cancelOrder(sym, pos.tpOrderId);
@@ -4099,7 +4243,11 @@ async function checkLiveHardStops() {
       log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + pnlUSD;
       log.trades.push({
         timestamp: new Date().toISOString(), type: "exit", symbol: sym,
-        price: livePrice, entryPrice: pos.entryPrice, pnlPct, pnlUSD,
+        price: simulatedStop?.exitFillPrice ?? livePrice, entryPrice: pos.entryPrice,
+        pnlPct: realizedPct, pnlUSD, feeAdjusted: Boolean(simulatedStop),
+        exitFeeUSD: simulatedStop?.exitFeeUsd ?? 0,
+        tradeType: posStore === "swingPositions" ? "swing" :
+          posStore === "breakoutPositions" ? "breakout" : (pos.entryType || "scalp"),
         indicators: {}, exitReasons: [reason],
         shouldExit: true, quantity: pos.quantity,
         orderPlaced: true, paperTrading: CONFIG.paperTrading,
@@ -4135,89 +4283,156 @@ async function checkLiveHardStops() {
   }
 }
 
-// ─── Limit order with market fallback ────────────────────────────────────────
+// ─── Limit buy — exchange-confirmed fill/cancellation only ────────────────────
+//
+// Never turn an ambiguous limit order into an extra market buy. The prior code
+// parsed an object where BitGet returns data[], ignored partial fills, and
+// could resend an entire order after a failed/unconfirmed cancellation.
+// See BitGet v2 Spot Get Order Info: status = filled/partially_filled/cancelled;
+// baseVolume is the actual executed base-coin quantity.
+async function readSpotOrderInfo(orderId) {
+  const ts = Date.now().toString();
+  const path = `/api/v2/spot/trade/orderInfo?orderId=${encodeURIComponent(orderId)}`;
+  const sig = signBitGet(ts, "GET", path);
+  const res = await fetch(`${acct().baseUrl}${path}`, {
+    headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sig,
+      "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
+    signal: AbortSignal.timeout(8000),
+  });
+  const json = await res.json();
+  const row = Array.isArray(json.data) ? json.data[0] : null;
+  if (!res.ok || json.code !== "00000" || !row) throw new Error("Cannot confirm BitGet limit order state");
+  const qty = Number(row.baseVolume);
+  if (!Number.isFinite(qty) || qty < 0) throw new Error("Invalid executed quantity from BitGet");
+  return { status: row.status, confirmedQty: qty };
+}
 
-// Places a limit buy at the specified price. Polls for fill up to 30s.
-// Falls back to market order if not filled (snap-back moves fast — don't miss the entry).
-async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
-  if (HARD_BLACKLIST.has(symbol.toUpperCase())) {
-    console.log(`⛔ BUY BLOCKED — ${symbol} is hard-blacklisted (never buy). Skipping limit buy.`);
-    return null;
-  }
-  if (await failsLiquidityFloor(symbol)) {
-    const d = _depthCache.get(symbol)?.usd;
-    console.log(`⛔ BUY BLOCKED — ${symbol} book too thin ($${Math.round(d || 0).toLocaleString()} < $${MIN_BOOK_DEPTH_USD.toLocaleString()} ±0.5% depth). Skipping illiquid coin.`);
-    return null;
-  }
-  if (entryCapReached()) {
-    console.log(`⛔ BUY BLOCKED — ${symbol}: daily entry cap reached (${MAX_ENTRIES_PER_DAY}/day). Trading less by design.`);
-    return null;
-  }
+function haltOnUnconfirmedOrder({symbol, clientOid, orderId, reason}) {
+  _tradingPaused = true;
   try {
-    // Get symbol precision
-    const symRes = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`);
+    const log = loadLog();
+    log._tradingHaltReason = "UNCONFIRMED_BITGET_LIMIT_ORDER";
+    log.unconfirmedOrders = [...(log.unconfirmedOrders || []), {
+      symbol, side: "buy", clientOid, orderId, reason,
+      time: new Date().toISOString(),
+    }];
+    saveLog(log);
+  } catch (e) {
+    console.error("CRITICAL: Could not persist uncertain limit buy:", e.message);
+  }
+}
+
+function haltOnUnconfirmedSell({symbol, orderId = null, requestedQty = null, reason}) {
+  _tradingPaused = true;
+  try {
+    const log = loadLog();
+    log._tradingHaltReason = "UNCONFIRMED_EXCHANGE_SELL";
+    log.unconfirmedOrders = [...(log.unconfirmedOrders || []), {
+      symbol, side: "sell", orderId, requestedQty, reason,
+      time: new Date().toISOString(),
+    }];
+    saveLog(log);
+  } catch (e) {
+    console.error("CRITICAL: failed to persist uncertain sell " + symbol + ": " + e.message);
+  }
+  console.error("CRITICAL UNCONFIRMED SELL " + symbol + ": " + reason + "; new entries halted pending reconciliation");
+}
+
+async function placeLimitBuyWithFallback(symbol, sizeUSD, limitPrice) {
+  requireExchangeWrites("BitGet limit buy");
+  if (HARD_BLACKLIST.has(symbol.toUpperCase()) || entryCapReached()) return null;
+  if (await failsLiquidityFloor(symbol)) return null;
+
+  // If exchange order details are ever unavailable, STOP instead of retrying
+  // another BUY. A market fallback is permitted only after verified zero fill.
+  const clientOid = "ab" + Date.now().toString(36) + crypto.randomBytes(6).toString("hex");
+  let orderId = null;
+  let submitted = false;
+  try {
+    const symRes = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`, { signal: AbortSignal.timeout(8000) });
     const symData = await symRes.json();
-    const pricePrecision = parseInt(symData.data?.[0]?.pricePrecision ?? "4", 10);
-    const qtyPrecision   = parseInt(symData.data?.[0]?.quantityPrecision ?? "6", 10);
-    const limitPriceStr  = limitPrice.toFixed(pricePrecision);
+    if (!symRes.ok || symData.code !== "00000" || !symData.data?.[0])
+      throw new Error("Cannot confirm BitGet symbol precision");
+    const pricePrecision = Number(symData.data[0].pricePrecision);
+    const qtyPrecision = Number(symData.data[0].quantityPrecision);
+    if (!Number.isInteger(pricePrecision) || !Number.isInteger(qtyPrecision) ||
+        pricePrecision < 0 || pricePrecision > 15 || qtyPrecision < 0 || qtyPrecision > 15)
+      throw new Error("Invalid BitGet quantity precision");
     const qty = floorToDecimals(sizeUSD / limitPrice, qtyPrecision);
-    if (qty <= 0) return null;
-
-    const timestamp = Date.now().toString();
+    if (!Number.isFinite(qty) || qty <= 0) return null;
+    const ts = Date.now().toString();
     const path = "/api/v2/spot/trade/place-order";
-    const body = JSON.stringify({ symbol, side: "buy", orderType: "limit", force: "gtc", price: limitPriceStr, size: qty.toFixed(qtyPrecision) });
-    const signature = signBitGet(timestamp, "POST", path, body);
+    const body = JSON.stringify({ symbol, side: "buy", orderType: "limit",
+      force: "gtc", price: limitPrice.toFixed(pricePrecision),
+      size: qty.toFixed(qtyPrecision), clientOid });
+    const signature = signBitGet(ts, "POST", path, body);
+    // Flag as potentially submitted BEFORE issuing the POST, as network errors
+    // can occur after BitGet accepted the order but before we saw its reply.
+    submitted = true;
     const res = await fetch(`${acct().baseUrl}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": signature, "ACCESS-TIMESTAMP": timestamp, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
-      body,
+      method: "POST", signal: AbortSignal.timeout(10000),
+      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey,
+        "ACCESS-SIGN": signature, "ACCESS-TIMESTAMP": ts,
+        "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" }, body,
     });
-    const orderData = await res.json();
-    if (orderData.code !== "00000") throw new Error(orderData.msg);
-    const orderId = orderData.data.orderId;
-    console.log(`  📋 Limit BUY @ $${limitPriceStr} | id: ${orderId}`);
+    const placed = await res.json();
+    if (!res.ok || placed.code !== "00000" || !placed.data?.orderId) {
+      throw new Error("BitGet limit order submission not accepted/acknowledged");
+    }
+    orderId = placed.data.orderId;
+    console.log(`📋 Limit buy submitted ${symbol}; id:${orderId}`);
 
-    // Poll for fill — up to 30 seconds (10 × 3s)
+    let state;
     for (let i = 0; i < 10; i++) {
       await new Promise(r => setTimeout(r, 3000));
-      const ts2 = Date.now().toString();
-      const checkPath = `/api/v2/spot/trade/orderInfo?orderId=${orderId}&symbol=${symbol}`;
-      const checkSign = signBitGet(ts2, "GET", checkPath);
-      const checkRes = await fetch(`${acct().baseUrl}${checkPath}`, {
-        headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": checkSign, "ACCESS-TIMESTAMP": ts2, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
-      });
-      const checkData = await checkRes.json();
-      const status = checkData.data?.status;
-      if (status === "full_fill") {
-        const confirmedQty = parseFloat(checkData.data?.baseVolume ?? qty.toFixed(qtyPrecision));
-        console.log(`  ✅ Limit filled | qty: ${confirmedQty}`);
-        return { orderId, confirmedQty };
+      state = await readSpotOrderInfo(orderId);
+      if (state.status === "filled" || state.status === "full_fill") {
+        if (state.confirmedQty <= 0) throw new Error("Filled order had zero confirmed base volume");
+        return { orderId, confirmedQty: state.confirmedQty };
       }
-      if (status === "cancelled" || status === "cancel") break;
-      console.log(`  ⏳ Waiting for fill (${i + 1}/10)...`);
+      if (state.status === "cancelled" || state.status === "cancel") break;
     }
 
-    // Cancel unfilled order
-    const cancelTs = Date.now().toString();
-    const cancelPath = "/api/v2/spot/trade/cancel-order";
-    const cancelBody = JSON.stringify({ symbol, orderId });
-    const cancelSign = signBitGet(cancelTs, "POST", cancelPath, cancelBody);
-    await fetch(`${acct().baseUrl}${cancelPath}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": cancelSign, "ACCESS-TIMESTAMP": cancelTs, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
-      body: cancelBody,
-    });
-    console.log(`  ⚠️  Limit not filled — cancelled, falling back to market`);
+    if (state?.status !== "cancelled" && state?.status !== "cancel") {
+      const cancelTs = Date.now().toString();
+      const cancelPath = "/api/v2/spot/trade/cancel-order";
+      const cancelBody = JSON.stringify({ symbol, orderId });
+      const cancelSign = signBitGet(cancelTs, "POST", cancelPath, cancelBody);
+      const cancelled = await fetch(`${acct().baseUrl}${cancelPath}`, {
+        method: "POST", signal: AbortSignal.timeout(10000),
+        headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey,
+          "ACCESS-SIGN": cancelSign, "ACCESS-TIMESTAMP": cancelTs,
+          "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" }, body: cancelBody,
+      });
+      const cancelResult = await cancelled.json();
+      if (!cancelled.ok || cancelResult.code !== "00000") {
+        throw new Error("BitGet limit cancellation not confirmed");
+      }
+    }
+    const finalState = await readSpotOrderInfo(orderId);
+    if (finalState.status === "filled" || finalState.status === "full_fill") {
+      return { orderId, confirmedQty: finalState.confirmedQty };
+    }
+    if (finalState.status !== "cancelled" && finalState.status !== "cancel") {
+      throw new Error("BitGet limit order not confirmed cancelled after timeout");
+    }
+    if (finalState.confirmedQty > 0) {
+      console.log(`⚠️ Limit partially filled then cancelled: ${finalState.confirmedQty} ${symbol}`);
+      return { orderId, confirmedQty: finalState.confirmedQty };
+    }
+    console.log(`📋 Unfilled limit order verified cancelled: ${orderId}; market fallback permitted`);
     return null;
   } catch (err) {
-    console.log(`  ⚠️  Limit order error (${err.message}) — falling back to market`);
-    return null;
+    if (submitted) haltOnUnconfirmedOrder({symbol, clientOid, orderId, reason: err.message});
+    console.error(`⛔ Limit order failed CLOSED (no automatic duplicate market buy): ${err.message}`);
+    throw err;
   }
 }
 
 // ─── Resting TP helpers ───────────────────────────────────────────────────────
 
 async function placeLimitSell(symbol, qty, limitPrice) {
+  requireExchangeWrites("BitGet limit sell");
   try {
     const symRes = await fetch(`${acct().baseUrl}/api/v2/spot/public/symbols?symbol=${symbol}`);
     const symData = await symRes.json();
@@ -4246,52 +4461,82 @@ async function placeLimitSell(symbol, qty, limitPrice) {
 }
 
 async function cancelOrder(symbol, orderId) {
+  requireExchangeWrites("Cancel order");
+  if (!orderId) throw new Error("Cannot cancel order without an exchange order ID");
+  let submitted = false;
   try {
     const ts = Date.now().toString();
     const path = "/api/v2/spot/trade/cancel-order";
     const body = JSON.stringify({ symbol, orderId });
     const sign = signBitGet(ts, "POST", path, body);
-    await fetch(`${acct().baseUrl}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
-      body,
+    submitted = true;
+    const res = await fetch(`${acct().baseUrl}${path}`, {
+      method: "POST", signal: AbortSignal.timeout(10000),
+      headers: { "Content-Type": "application/json", "ACCESS-KEY": acct().apiKey,
+        "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts,
+        "ACCESS-PASSPHRASE": acct().passphrase, locale: "en-US" }, body,
     });
+    const response = await res.json();
+    if (!res.ok || response.code !== "00000") throw new Error("Cancel response rejected for " + orderId);
+    for (const delay of [500, 1200, 2500]) {
+      await new Promise(resolve => setTimeout(resolve, delay));
+      const state = await readSpotOrderInfo(orderId);
+      if (confirmZeroFillCancellation({status: state.status, confirmedQty: state.confirmedQty}))
+        return true;
+      if (state.confirmedQty > 0 || ["filled", "full_fill"].includes(String(state.status).toLowerCase()))
+        throw new Error("Cannot confirm safe cancellation: order has filled quantity " + state.confirmedQty);
+    }
+    throw new Error("Cancellation still not confirmed for " + orderId);
   } catch (err) {
-    console.log(`  ⚠️  Cancel order ${orderId} failed: ${err.message}`);
+    if (submitted) haltOnUnconfirmedSell({symbol, orderId, reason: "TP cancel uncertain: " + err.message});
+    throw err;
   }
 }
 
 async function cancelAllSymbolOrders(symbol) {
-  try {
-    // Fetch open orders then cancel individually (bulk cancel endpoint is not available)
-    const ts = Date.now().toString();
-    const listPath = `/api/v2/spot/trade/unfilled-orders?symbol=${symbol}&limit=20`;
-    const listSign = signBitGet(ts, "GET", listPath);
-    const listRes = await fetch(`${acct().baseUrl}${listPath}`, {
-      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": listSign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
-    });
-    const listData = await listRes.json();
-    const orders = listData.data || [];
-    console.log(`  🗑️  Found ${orders.length} open orders for ${symbol}`);
-    for (const o of orders) {
-      await cancelOrder(symbol, o.orderId);
-    }
-  } catch (err) {
-    console.log(`  ⚠️  cancelAllSymbolOrders(${symbol}) failed: ${err.message}`);
+  requireExchangeWrites("Cancel all orders");
+  const ts = Date.now().toString();
+  const listPath = `/api/v2/spot/trade/unfilled-orders?symbol=${symbol}&limit=20`;
+  const listSign = signBitGet(ts, "GET", listPath);
+  const listRes = await fetch(`${acct().baseUrl}${listPath}`, {
+    headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": listSign,
+      "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, locale: "en-US" },
+    signal: AbortSignal.timeout(8000),
+  });
+  const listData = await listRes.json();
+  if (!listRes.ok || listData.code !== "00000" || !Array.isArray(listData.data)) {
+    haltOnUnconfirmedSell({symbol, reason:"Could not verify open orders before selling"});
+    throw new Error("Cannot verify open orders to cancel for " + symbol);
   }
+  // Fail closed if exchange truncates results; do not pretend all orders are canceled.
+  if (listData.data.length >= 20) {
+    haltOnUnconfirmedSell({symbol, reason:"Open order list limit reached"});
+    throw new Error("More than 19 open orders; manual reconciliation required");
+  }
+  for (const row of listData.data) await cancelOrder(symbol, row.orderId);
 }
 
 async function getOrderStatus(symbol, orderId) {
   try {
     const ts = Date.now().toString();
-    const path = `/api/v2/spot/trade/orderInfo?orderId=${orderId}&symbol=${symbol}`;
+    const path = `/api/v2/spot/trade/orderInfo?orderId=${encodeURIComponent(orderId)}`;
     const sign = signBitGet(ts, "GET", path);
     const res = await fetch(`${acct().baseUrl}${path}`, {
-      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign, "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, "locale": "en-US" },
+      headers: { "ACCESS-KEY": acct().apiKey, "ACCESS-SIGN": sign,
+        "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": acct().passphrase, locale: "en-US" },
+      signal: AbortSignal.timeout(8000),
     });
     const data = await res.json();
-    return data.data ?? null;
-  } catch {
+    // BitGet v2 orderInfo returns data as an ARRAY, never a standalone object.
+    const row = Array.isArray(data.data) ? data.data[0] : null;
+    if (!res.ok || data.code !== "00000" || !row || String(row.orderId) !== String(orderId))
+      throw new Error("BitGet TP order information not verified");
+    const baseVolume = Number(row.baseVolume);
+    if (!Number.isFinite(baseVolume) || baseVolume < 0)
+      throw new Error("Invalid TP executed base quantity");
+    return { ...row, confirmedQty:baseVolume };
+  } catch (err) {
+    console.warn("TP order status unknown " + symbol + ": " + err.message);
     return null;
   }
 }
@@ -4308,11 +4553,25 @@ async function checkTpOrders() {
     if (_processingStops.has(sym) || _runningSymbols.has(sym)) continue;
     const orderData = await getOrderStatus(sym, pos.tpOrderId);
     if (!orderData) continue;
-    // Treat partial fills that left dust as full exits — remaining $<1 is unsellable anyway
-    const isFull = orderData.status === "full_fill";
-    const isPartialDust = orderData.status === "partial_fill" && parseFloat(orderData.priceAvg || 0) > 0 &&
-      (parseFloat(pos.quantity) * parseFloat(orderData.priceAvg || 0) - parseFloat(orderData.accBaseVolume || 0) * parseFloat(orderData.priceAvg || 0)) < 1.0;
-    if (!isFull && !isPartialDust) continue;
+    // Do not record partial TP fills as complete exits. A partially filled
+    // resting sell must be reconciled before another sell of that inventory.
+    const originalQty = Number(pos.quantity);
+    const precision = await getQuantityPrecision(sym).catch(() => null);
+    if (!Number.isFinite(originalQty) || originalQty<=0 ||
+        precision === null) continue;
+    const isFull = confirmSpotSellFill({
+      status:orderData.status, confirmedQty:orderData.confirmedQty,
+      requestedQty:originalQty, precision,
+    });
+    if (!isFull) {
+      if (orderData.confirmedQty > 0) {
+        const state = loadLog();
+        if (!(state.unconfirmedOrders || []).some(o => String(o.orderId) === String(pos.tpOrderId)))
+          haltOnUnconfirmedSell({symbol:sym,orderId:pos.tpOrderId,requestedQty:originalQty,
+            reason:"Resting TP order partially filled; reconcile before additional sells"});
+      }
+      continue;
+    }
 
     _processingStops.add(sym);
     try {
@@ -4397,7 +4656,15 @@ async function run(tvSignal = null, symbol = null) {
   const learnedSource = log?.learnedThresholds?.[symbol]?.basedOnTrades >= 5 ? "live" : "backtest";
   console.log(`\nStrategy: ${rules.strategy.name} v4`);
   console.log(`Symbol: ${symbol} | TF: ${entryTF}${bt ? ` (${learnedSource}: WR ${log?.learnedThresholds?.[symbol]?.winRate ?? bt.winRate}%, RSI gate <${coinRsiThreshold})` : " (default)"}`);
-  const withinLimits = checkTradeLimits(log);
+  // The daily cap applies to simulated and live buys across every strategy.
+  // Existing positions must still be monitored and allowed to exit.
+  const isNewScalpEntry = !((log.positions || {})[symbol]?.open) && tvSignal !== "SELL";
+  if (isNewScalpEntry && entryCapReached()) {
+    console.log(`⛔ ENTRY CAP — no new ${CONFIG.paperTrading ? "paper" : "live"} entries (${countTodaysEntries(log)}/${MAX_ENTRIES_PER_DAY} today)`);
+    pushSignal(symbol, "BLOCKED", "Global daily entry cap reached");
+    return;
+  }
+  const withinLimits = !isNewScalpEntry || checkTradeLimits(log);
   if (!withinLimits) {
     console.log("\nBot stopping — trade limits reached for today.");
     pushSignal(symbol, "BLOCKED", "Daily trade limit reached");
@@ -4405,7 +4672,7 @@ async function run(tvSignal = null, symbol = null) {
   }
 
   // Manual pause via dashboard
-  if (_tradingPaused && tvSignal !== "SELL") {
+  if (_tradingPaused && isNewScalpEntry) {
     console.log("\n⏸ Trading paused via dashboard — skipping entry");
     pushSignal(symbol, "BLOCKED", "Trading paused via dashboard");
     return;
@@ -4413,7 +4680,7 @@ async function run(tvSignal = null, symbol = null) {
 
   // Daily stop loss (3%) — halt on losses. Daily target (3%) is a milestone, not a ceiling.
   const drawdown = checkDailyDrawdown(log);
-  if (drawdown.paused) {
+  if (drawdown.paused && isNewScalpEntry) {
     console.log(`\n🛑 DAILY STOP LOSS — down ${drawdown.drawdownPct.toFixed(2)}% today ($${Math.abs(drawdown.totalLoss).toFixed(2)} lost). No more trades until tomorrow.`);
     pushSignal(symbol, "BLOCKED", `Daily stop — down ${drawdown.drawdownPct.toFixed(1)}% today`);
     console.log("═══════════════════════════════════════════════════════════\n");
@@ -4670,7 +4937,13 @@ async function run(tvSignal = null, symbol = null) {
     if (!position.partialExitDone && livePnlPct >= 2.5) {
       const originalQty = parseFloat(position.quantity);
       const halfQty = originalQty * 0.5;
-      const partialPnlUSD = (price - position.entryPrice) * halfQty;
+      const partialFeeShare = Number(position.entryFeeUsd || 0) * 0.5;
+      const simulatedPartial = CONFIG.paperTrading ? paperExit({
+        entryFillPrice: position.entryPrice, exitMarketPrice: price, quantity: halfQty,
+        entryFeeUsd: partialFeeShare,
+        feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+      }) : null;
+      const partialPnlUSD = simulatedPartial?.pnlUsd ?? ((price - position.entryPrice) * halfQty);
       console.log(`\n📊 PARTIAL TP — up ${livePnlPct.toFixed(2)}%, selling 50% to lock gains`);
       console.log(`   Selling ${halfQty.toFixed(6)} ${symbol} | Locking ~$${partialPnlUSD >= 0 ? "+" : ""}${partialPnlUSD.toFixed(4)}`);
 
@@ -4694,12 +4967,13 @@ async function run(tvSignal = null, symbol = null) {
       if (partialOk) {
         log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + partialPnlUSD;
         // Reload fresh to prevent concurrent writes clobbering other positions
-        try { const _fp = loadLog(); log.positions = { ...(_fp.positions || {}), [symbol]: { ...(_fp.positions?.[symbol] || position), quantity: halfQty.toFixed(6), partialExitDone: true, partialExitPrice: price } }; } catch { log.positions[symbol] = { ...position, quantity: halfQty.toFixed(6), partialExitDone: true, partialExitPrice: price }; }
+        try { const _fp = loadLog(); log.positions = { ...(_fp.positions || {}), [symbol]: { ...(_fp.positions?.[symbol] || position), quantity: halfQty.toFixed(6), entryFeeUsd: partialFeeShare, partialExitDone: true, partialExitPrice: price } }; } catch { log.positions[symbol] = { ...position, quantity: halfQty.toFixed(6), entryFeeUsd: partialFeeShare, partialExitDone: true, partialExitPrice: price }; }
         position = log.positions[symbol]; // use updated position for the rest of this cycle
         const partialEntry = {
           timestamp: new Date().toISOString(), type: "exit", symbol,
           timeframe: CONFIG.timeframe, price, entryPrice: position.entryPrice,
-          pnlPct: livePnlPct, pnlUSD: partialPnlUSD,
+          pnlPct: simulatedPartial?.pnlPct ?? livePnlPct, pnlUSD: partialPnlUSD,
+          feeAdjusted: Boolean(simulatedPartial), exitFeeUSD: simulatedPartial?.exitFeeUsd ?? 0,
           indicators: { ema8, vwap, rsi3 },
           exitReasons: [`Partial TP — locked 50% at +${livePnlPct.toFixed(2)}%`],
           shouldExit: true, quantity: halfQty.toFixed(6),
@@ -4788,16 +5062,23 @@ async function run(tvSignal = null, symbol = null) {
 
     console.log("\n── Decision ─────────────────────────────────────────────\n");
 
-    const pnlPct = ((price - position.entryPrice) / position.entryPrice) * 100;
-    const pnlUSD = (price - position.entryPrice) * parseFloat(position.quantity);
+    if (tvSignal === "SELL") finalExit = true; // authenticated exit cannot be vetoed by Claude
+    const simulatedExit = CONFIG.paperTrading ? paperExit({
+      entryFillPrice: position.entryPrice, exitMarketPrice: price,
+      quantity: Number(position.quantity), entryFeeUsd: Number(position.entryFeeUsd || 0),
+      feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+    }) : null;
+    const pnlPct = simulatedExit?.pnlPct ?? (((price - position.entryPrice) / position.entryPrice) * 100);
+    const pnlUSD = simulatedExit?.pnlUsd ?? ((price - position.entryPrice) * Number(position.quantity));
 
     const logEntry = {
       timestamp: new Date().toISOString(),
       type: "exit",
       symbol,
       timeframe: CONFIG.timeframe,
-      price,
+      price: simulatedExit?.exitFillPrice ?? price,
       entryPrice: position.entryPrice,
+      feeAdjusted: Boolean(simulatedExit), exitFeeUSD: simulatedExit?.exitFeeUsd ?? 0,
       pnlPct,
       pnlUSD,
       indicators: { ema8, vwap, rsi3 },
@@ -5107,6 +5388,7 @@ async function run(tvSignal = null, symbol = null) {
       if (!regimeOk) {
         console.log(`🚫 MOMENTUM BLOCK — momentum entries are negative-EV outside a confirmed uptrend (regime: ${regime.regime}/${regime.btcTrend}). Skipping ${symbol} +${gainerInfo.change24h.toFixed(1)}% mover.`);
       } else if (rsiOk && stochOk && priceOk && volOk && notTooHot && trendOk) {
+        if (entryCapReached()) { pushSignal(symbol, "BLOCKED", "Momentum entry cap reached"); return; }
         console.log(`\n✅ MOMENTUM ENTRY — big mover conditions met. Position (40% size, 2% SL, trailing stop).`);
         pushSignal(symbol, "ENTRY", `Big mover +${gainerInfo.change24h.toFixed(1)}% — momentum entry`);
         const momSize = Math.min(currentPortfolio * sizePct * 0.40, CONFIG.maxTradeSizeUSD ?? Infinity);
@@ -5526,7 +5808,7 @@ async function run(tvSignal = null, symbol = null) {
     else if (!weeklyOkForSwing) console.log(`  📊 Strategy: SCALP — weekly trend bearish, no swing`);
     else if (openSwingCount >= SWING.maxOpen) console.log(`  📊 Strategy: SCALP — max swing positions (${SWING.maxOpen}) already open`);
 
-    if (!vwapBounceMode && !(log.swingPositions || {})[symbol]?.open &&
+    if (process.env.INLINE_SWING_ENABLED === "true" && !vwapBounceMode && !(log.swingPositions || {})[symbol]?.open &&
         openSwingCount < SWING.maxOpen && !swingOffHours && weeklyOkForSwing) {
       const swingSetup = scoreSwingSetup(
         closes4h, candlesDay.map(c => c.close), closesWeek,
@@ -5536,9 +5818,21 @@ async function run(tvSignal = null, symbol = null) {
       console.log(`\n  📊 ${swingSetup.score >= 5 ? "🔄 SWING" : "📉 SCALP"} selected — ${swingLabel}`);
 
       if (swingSetup.score >= 5) {
+        if (entryCapReached()) { pushSignal(symbol, "BLOCKED", "Swing entry cap reached"); return; }
         console.log(`   Swing targets +${(SWING.takeProfit * 100).toFixed(0)}% over 1-5 days vs scalp's +1% — better R:R here`);
-        const swingSize = (log.portfolioValue || acct().portfolioValue) * SWING.sizePct;
-        let qty = swingSize / price;
+        const inlineBt = await backtestSwingCoin(symbol).catch(() => null);
+        if (!inlineBt || inlineBt.recommendation !== "TRADE" || inlineBt.oosTrades < 8) {
+          console.log("⛔ INLINE SWING BACKTEST BLOCK — no validated out-of-sample edge");
+          return;
+        }
+        const swingSize = Math.min((log.portfolioValue || acct().portfolioValue) * SWING.sizePct,
+          sizedOrder(log.portfolioValue || acct().portfolioValue, SWING.stopLoss));
+        if (!swingSize) return;
+        const inlinePaperFill = CONFIG.paperTrading ? paperEntry({
+          marketPrice:price,notionalUsd:swingSize,
+          feeFraction:PAPER_FEE_FRACTION,slippageFraction:PAPER_SLIPPAGE_FRACTION,
+        }) : null;
+        let qty = inlinePaperFill?.quantity ?? (swingSize / price);
         let orderId = `PAPER-SWING-${Date.now()}`;
 
         if (!CONFIG.paperTrading) {
@@ -5558,7 +5852,7 @@ async function run(tvSignal = null, symbol = null) {
         }
 
         // Reload fresh to prevent concurrent writes clobbering other swing positions
-        try { log.swingPositions = { ...(loadLog().swingPositions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId, tradeType: "swing", partialExitDone: false, tpPct: SWING.takeProfit, slPct: SWING.stopLoss } }; } catch { log.swingPositions = { ...(log.swingPositions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId, tradeType: "swing", partialExitDone: false, tpPct: SWING.takeProfit, slPct: SWING.stopLoss } }; }
+        try { log.swingPositions = { ...(loadLog().swingPositions || {}), [symbol]: { open: true, side: "long", entryPrice: inlinePaperFill?.fillPrice ?? price, entryFeeUsd: inlinePaperFill?.entryFeeUsd ?? 0, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId, tradeType: "swing", partialExitDone: false, tpPct: SWING.takeProfit, slPct: SWING.stopLoss } }; } catch { log.swingPositions = { ...(log.swingPositions || {}), [symbol]: { open: true, side: "long", entryPrice: inlinePaperFill?.fillPrice ?? price, entryFeeUsd: inlinePaperFill?.entryFeeUsd ?? 0, highWatermark: price, entryTime: new Date().toISOString(), quantity: qty.toFixed(6), orderId, tradeType: "swing", partialExitDone: false, tpPct: SWING.takeProfit, slPct: SWING.stopLoss } }; }
         if (!CONFIG.paperTrading) {
           const tpOrderId = await placeLimitSell(symbol, qty.toFixed(6), price * (1 + SWING.takeProfit));
           if (tpOrderId) {
@@ -5568,7 +5862,7 @@ async function run(tvSignal = null, symbol = null) {
         }
         const swingLog = {
           timestamp: new Date().toISOString(), type: "entry", symbol,
-          timeframe: "4H", price, strategy: "swing", swingScore: swingSetup.score,
+          timeframe: "4H", price: inlinePaperFill?.fillPrice ?? price, paperEntryFeeUsd: inlinePaperFill?.entryFeeUsd ?? 0, strategy: "swing", swingScore: swingSetup.score,
           tradeSize: swingSize, orderPlaced: true, orderId,
           liquidity: liquiditySnapshot(symbol),
           paperTrading: CONFIG.paperTrading,
@@ -5622,7 +5916,7 @@ async function run(tvSignal = null, symbol = null) {
       pushSignal(symbol, "BLOCKED", `1H RSI(14) ${rsi14_1h.toFixed(1)} < 50 — hourly downtrend, no entry`);
       return;
     }
-    if (rsi14_1h !== null) console.log(`  ✅ 1H RSI(14) ${rsi14_1h.toFixed(1)} ≥ 50 — hourly trend ok${bearSnapBack ? " (bypassed — bear snap-back)" : ""}`);
+    if (rsi14_1h !== null) console.log(`  ${rsi14_1h >= 50 ? "✅" : "⚡"} 1H RSI(14) ${rsi14_1h.toFixed(1)} ${rsi14_1h >= 50 ? "≥50 trend confirmed" : "below 50 (VWAP bounce/bear snap-back bypass)"}`);
 
     // 4H trend hard gate — medium-term trend must be bullish to scalp bounces
     // bearSnapBack exempt: regime.btcTrend==="bear" implies 4H is bearish — this gate would always fire
@@ -5688,11 +5982,12 @@ async function run(tvSignal = null, symbol = null) {
         console.log(`  🚫 ${symbol}: no valid setup found (65%+ WR, 5+ trades)`);
       }
     } catch (e) {
-      console.log(`  ⚠️  Backtest failed (${e.message}) — proceeding with caution`);
-      btResult = null;
+      console.log(`  ⛔ Backtest unavailable (${e.message}) — no new entry`);
+      pushSignal(symbol, "BLOCKED", "BACKTEST_UNAVAILABLE: " + e.message);
+      return;
     }
-    if (btResult && btResult.recommendation !== "TRADE") {
-      console.log(`🚫 BACKTEST BLOCK — ${symbol} WR ${btResult.winRate}% over ${btResult.trades} trades (need 75%+ TRADE rating). Skipping.`);
+    if (!btResult || btResult.recommendation !== "TRADE" || btResult.walkForward !== true || btResult.oosTrades < 8) {
+      console.log(`🚫 BACKTEST BLOCK — ${symbol} WR ${btResult?.winRate ?? "n/a"}% over ${btResult?.trades ?? 0} trades (need OOS TRADE rating). Skipping.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       pushSignal(symbol, "BLOCKED", `Backtest WR ${btResult.winRate}% — need 75%+ TRADE rating (got ${btResult.recommendation})`);
       return;
@@ -5899,7 +6194,7 @@ async function run(tvSignal = null, symbol = null) {
         claudeAnalysis = await analyzeWithClaude(price, ema8, vwap, rsi3, log.trades, null, tvSignal, { ema21, macd, bb, adx, patterns, sr, bullTrend4h: bullTrendConfirmed, vol }, symbol);
         recordClaudeCall();
         const meetsConfidence = claudeAnalysis.confidence >= CONFIDENCE_MIN;
-        allPass = claudeAnalysis.action === "BUY" && meetsConfidence;
+        allPass = rulesPass && claudeAnalysis.action === "BUY" && meetsConfidence;
         console.log(`  Decision:   ${claudeAnalysis.action} (${claudeAnalysis.confidence}% confidence) [${_claudeCallsToday}/${CLAUDE_DAILY_CAP} today]`);
         console.log(`  Min confidence required: ${CONFIDENCE_MIN}% (high-conviction mode)`);
         console.log(`  Reasoning:  ${claudeAnalysis.reasoning}`);
@@ -5978,7 +6273,7 @@ async function run(tvSignal = null, symbol = null) {
       ].filter(Boolean).length;
       const maxBonus = 8;
       const confidenceMultiplier = bonusSignals >= 6 ? 1.0 : bonusSignals >= 4 ? 0.90 : bonusSignals >= 2 ? 0.75 : 0.60;
-      const finalTradeSize = tradeSize * confidenceMultiplier;
+      const finalTradeSize = Math.min(tradeSize * confidenceMultiplier, sizedOrder(currentPortfolio, 0.05));
       logEntry.tradeSize = finalTradeSize;
       logEntry.entryConfidence = claudeAnalysis?.confidence ?? Math.round(confidenceMultiplier * 100);
       console.log(`\n📊 Confidence score: ${bonusSignals}/${maxBonus} bonus signals → ${(confidenceMultiplier * 100).toFixed(0)}% position size ($${finalTradeSize.toFixed(2)})`);
@@ -6012,17 +6307,35 @@ async function run(tvSignal = null, symbol = null) {
         } else {
           console.log(`  ✅ Slippage: ${slippage.toFixed(3)}% (< 0.3% — price stable, executing)`);
         }
-      } catch { /* non-critical — proceed on fetch failure */ }
+       } catch (err) {
+        console.log("🚫 ENTRY BLOCKED — unable to validate recent market price: " + err.message);
+        slippageOk = false;
+      }
 
       const posTpPct = bearSnapBack ? 0.03 : entryType === "momentum" ? 0.10 : (btResult?.takeProfit ?? 0.08);
       const posSlPct = bearSnapBack ? 0.02 : (btResult?.stopLoss ?? 0.04);
 
+      if (slippageOk && entryCapReached()) {
+        console.log("⛔ Scalp entry cap reached while calculating signal; skipping order");
+        return;
+      }
       if (slippageOk && CONFIG.paperTrading) {
-        console.log(`\n📋 PAPER TRADE — would buy ${symbol} ~$${finalTradeSize.toFixed(2)} at market`);
-        console.log(`   (Set PAPER_TRADING=false in .env to place real orders)`);
+        const simBuy = paperEntry({
+          marketPrice: price, notionalUsd: finalTradeSize,
+          feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+        });
+        console.log(`\n📋 PAPER TRADE — simulated buy ${symbol} ${finalTradeSize.toFixed(2)} at ${simBuy.fillPrice.toFixed(6)} including slippage`);
         logEntry.orderPlaced = true;
         logEntry.orderId = `PAPER-${Date.now()}`;
-        log.positions = { ...(log.positions || {}), [symbol]: { open: true, side: "long", entryPrice: price, highWatermark: price, entryTime: new Date().toISOString(), quantity: (finalTradeSize / price).toFixed(6), orderId: logEntry.orderId, entryType, bearMarket: bullTrendWeekly === false, bearSnapBack, tpPct: posTpPct, slPct: posSlPct } };
+        logEntry.price = simBuy.fillPrice;
+        logEntry.paperEntryFeeUsd = simBuy.entryFeeUsd;
+        log.positions = { ...(log.positions || {}), [symbol]: {
+          open: true, side: "long", entryPrice: simBuy.fillPrice, highWatermark: price,
+          entryFeeUsd: simBuy.entryFeeUsd,
+          entryTime: new Date().toISOString(), quantity: simBuy.quantity.toFixed(8),
+          orderId: logEntry.orderId, entryType, bearMarket: bullTrendWeekly === false,
+          bearSnapBack, tpPct: posTpPct, slPct: posSlPct,
+        } };
       } else if (slippageOk) {
         console.log(`\n🔴 PLACING LIVE ORDER — $${finalTradeSize.toFixed(2)} BUY ${symbol}`);
         try {
@@ -6101,11 +6414,71 @@ if (process.argv.includes("--tax-summary")) {
   const PORT = process.env.PORT || 3000;
 
   // ─── Dashboard PIN ───────────────────────────────────────────────────────────
-  const BOT_PIN = process.env.BOT_PIN || "2026";
+  const BOT_PIN = process.env.BOT_PIN || "";
+  const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "";
 
   function checkPin(url) {
     const pin = new URL(url, "http://localhost").searchParams.get("pin");
-    return pin === BOT_PIN;
+    return BOT_PIN.length >= 10 && typeof pin === "string" && pin.length === BOT_PIN.length && crypto.timingSafeEqual(Buffer.from(pin), Buffer.from(BOT_PIN));
+  }
+
+  // Close only simulated holdings. Live close-all is intentionally unavailable
+  // until exchange inventory and every strategy's order state are reconciled.
+  async function closeAllPaperPositions() {
+    if (!CONFIG.paperTrading) throw new Error("Real-money close-all is disabled; manage BitGet positions directly");
+    const stores = [["scalp", "positions"], ["swing", "swingPositions"],
+      ["breakout", "breakoutPositions"], ["sniper", "sniperPositions"], ["lt", "ltPositions"]];
+    const report = { closed: [], skipped: [] };
+    for (const [strategy, store] of stores) {
+      const current = loadLog();
+      for (const [sym, snapshot] of Object.entries(current[store] || {})) {
+        if (!snapshot?.open) continue;
+        if (_runningSymbols.has(sym) || _processingStops.has(sym)) {
+          report.skipped.push(sym + ":" + strategy + " busy"); continue;
+        }
+        _runningSymbols.add(sym);
+        try {
+          const log = loadLog();
+          const position = log[store]?.[sym];
+          if (!position?.open) continue;
+          const streamed = livePrices.get(sym);
+          const snap = coinSnapshots[sym];
+          let mark = streamed && Date.now() - streamed.ts <= 30000 ? streamed.price
+            : snap?.price && (Date.now() - Date.parse(snap.updatedAt)) < 60000 ? Number(snap.price) : null;
+          if (!mark) {
+            try {
+              const bars = await fetchCandles(sym, "1m", 2);
+              mark = bars.at(-1)?.close || null;
+            } catch (err) {
+              report.skipped.push(sym + ":" + strategy + " price unavailable: " + err.message);
+              continue;
+            }
+          }
+          const sale = paperExit({
+            entryFillPrice: Number(position.entryPrice), exitMarketPrice: Number(mark),
+            quantity: Number(position.quantity), entryFeeUsd: Number(position.entryFeeUsd || 0),
+            feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+          });
+          const trade = {
+            timestamp: new Date().toISOString(), type: "exit", symbol: sym,
+            tradeType: strategy, paperTrading: true, feeAdjusted: true,
+            quantity: position.quantity, entryPrice: position.entryPrice,
+            price: sale.exitFillPrice, pnlPct: sale.pnlPct, pnlUSD: sale.pnlUsd,
+            exitFeeUSD: sale.exitFeeUsd, shouldExit: true, orderPlaced: true,
+            orderId: "PAPER-MANUAL-" + Date.now(),
+            exitReasons: ["User requested close of all paper holdings"],
+          };
+          delete log[store][sym];
+          log.portfolioValue = (Number(log.portfolioValue) || CONFIG.portfolioValue) + sale.pnlUsd;
+          log.trades.push(trade);
+          saveLog(log);
+          writeTradeCsv(trade);
+          report.closed.push({ symbol: sym, strategy, pnlUSD: sale.pnlUsd });
+        } catch (err) { report.skipped.push(sym + ":" + strategy + " " + err.message); }
+        finally { _runningSymbols.delete(sym); }
+      }
+    }
+    return report;
   }
 
   async function buildStatusData() {
@@ -6225,12 +6598,24 @@ if (process.argv.includes("--tax-summary")) {
       const trailStop = trailActive ? hwm * (1 - SNIPER.trailPct) : null;
       openPositions.push({ coin: baseCoin, sym, qty, usdVal, price: snapPrice, entryPrice: pos.entryPrice, pnlPct, pnlUSD, minsOpen, entryType: "sniper", minsLeft, trailActive, trailStop, slPct: SNIPER.stopLossPct });
     }
-    const portfolioValue = usdtBalance + openPositionValue;
+    // A paper ledger already includes starting capital and realized P&L:
+    // do NOT add gross open holdings to it a second time.
+    const paperMark = CONFIG.paperTrading ? paperPortfolioValuation(log, coinSnapshots, {
+      feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+      startingEquityUsd: CONFIG.portfolioValue,
+    }) : null;
+    if (paperMark) {
+      usdtBalance = paperMark.cashUsd;
+      openPositionValue = paperMark.openLiquidationValueUsd;
+      openPositions.length = 0;
+      openPositions.push(...paperMark.positions);
+    }
+    const portfolioValue = paperMark ? paperMark.equityUsd : usdtBalance + openPositionValue;
     _livePortfolioValue = portfolioValue; // keep heat gate in sync with dashboard
     const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
     const adaptiveMode = getAdaptiveMode(log.trades || []);
     const heat = calcPortfolioHeat(log, portfolioValue);
-    const unrealizedPnlUSD = openPositions.reduce((s, p) => s + (p.pnlUSD ?? 0), 0);
+    const unrealizedPnlUSD = paperMark?.unrealizedPnlUSD ?? openPositions.reduce((s, p) => s + (p.pnlUSD ?? 0), 0);
     const todayGainUSD = totalPnlUSD + unrealizedPnlUSD;
     const allExits = (log.trades || []).filter(t => t.type === "exit" && t.pnlPct !== undefined && t.orderPlaced);
     const allWins = allExits.filter(t => t.pnlPct > 0);
@@ -6281,6 +6666,10 @@ if (process.argv.includes("--tax-summary")) {
     const lastTradeAt = (log.trades || []).filter(t => t.orderPlaced && t.timestamp).slice(-1)[0]?.timestamp || null;
     return {
       portfolioValue, usdtBalance, openPositions,
+      paperTrading: CONFIG.paperTrading,
+      valuationEstimated: Boolean(paperMark), paperStaleQuotes: paperMark?.staleQuotes ?? 0,
+      isExchangeVerified: !CONFIG.paperTrading && liveAssets.length > 0,
+      paperPerformance: CONFIG.paperTrading ? paperStats(log.trades) : null,
       regime: regimeMatch?.regime || "RANGING",
       paused: _tradingPaused || drawdown.paused,
       pauseReason: drawdown.paused ? "Drawdown limit hit" : _tradingPaused ? "Manually paused" : null,
@@ -6796,7 +7185,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Segoe UI',sa
   <form method="POST" action="/action?pin=${pin}&action=scan" style="display:contents"><button class="btn btn-blue" type="submit">⚡ Scan All Coins Now</button></form>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
     <form method="POST" action="/action?pin=${pin}&action=${d.paused?"resume":"pause"}" style="display:contents"><button class="btn btn-grey" type="submit">${d.paused?"▶ Resume":"⏸ Pause"}</button></form>
-    <form method="POST" action="/action?pin=${pin}&action=sell-all" style="display:contents" onsubmit="return confirm('Sell ALL open positions now?')"><button class="btn btn-red" type="submit">🚨 Sell All</button></form>
+    <form method="POST" action="/action?pin=${pin}&action=sell-all" style="display:contents" onsubmit="return confirm('Close ALL simulated positions? This changes only paper records.')"><button class="btn btn-red" type="submit" ${d.paperTrading?"":"disabled"}>${d.paperTrading?"Close Paper Positions":"Live positions: use BitGet"}</button></form>
   </div>
 </div>
 <div style="text-align:center;color:#5B6478;font-size:11px;margin:18px 0 4px">Refreshing in <span id="refresh-in">15s</span></div>
@@ -7637,6 +8026,12 @@ async function togglePause(){
   }
 
   const server = http.createServer((req, res) => {
+    // The dashboard PIN currently arrives in query strings. Prevent its
+    // accidental forwarding via Referer and disable caching of private data.
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Cache-Control", "no-store");
     const urlObj = new URL(req.url, "http://localhost");
     const path = urlObj.pathname;
 
@@ -7646,7 +8041,9 @@ async function togglePause(){
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         status: "OK",
-        build: "2026-07-06-bitmart-off",
+        build: "2026-10-19-recovery-guard",
+        mode: CONFIG.paperTrading ? "PAPER_LOCKED" : "LIVE_AUTHORIZED",
+        exchangeWritesAllowed: EXCHANGE_WRITES_ALLOWED,
         accounts: ACCOUNTS.map(a => `${a.id}:${a.exchange}`),
         guards: { blacklist: [...HARD_BLACKLIST], entryCapPerDay: MAX_ENTRIES_PER_DAY, minBookDepthUSD: MIN_BOOK_DEPTH_USD },
       }));
@@ -7753,12 +8150,9 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         (async () => { for (const sym of CONFIG.symbols) await run(null, sym).catch((err) => { console.error(`Webhook scan ${sym}:`, err.message); pushSignal(sym, "BLOCKED", `Scan error: ${err.message?.slice(0, 60)}`); }); })();
       } else if (action === "sell-all") {
         redirect();
-        (async () => {
-          const log = loadLog();
-          const open = Object.entries(log.positions || {}).filter(([, p]) => p && p.open).map(([sym]) => sym);
-          console.log(`\n🚨 Dashboard sell-all: ${open.join(", ")}`);
-          for (const sym of open) await run("SELL", sym).catch(e => console.error(`Force sell ${sym}:`, e.message));
-        })();
+        closeAllPaperPositions()
+          .then(result => console.log("📋 Paper close all completed: " + JSON.stringify(result)))
+          .catch(err => console.error("Paper close-all refused: " + err.message));
       } else if (action === "add-coin") {
         const addSym = (urlObj.searchParams.get("symbol") || "").toUpperCase();
         if (addSym && addSym.endsWith("USDT")) {
@@ -7775,7 +8169,8 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         }
         res.writeHead(302, { Location: `/coin?symbol=${addSym}&pin=${pin}` }); res.end();
       } else if (action === "clear-position") {
-        // Remove a stale position from the log without placing a sell order
+        if (!CONFIG.paperTrading) { console.warn("🚫 Live position clearing blocked"); redirect(); return; }
+        // Remove a stale paper position from the log without placing a sell order
         const cpSym = (urlObj.searchParams.get("symbol") || "").toUpperCase();
         if (cpSym) {
           const cpLog = loadLog();
@@ -7878,7 +8273,17 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           openPositions.push({ coin: asset.coin, qty, usdVal, entryPrice: null, pnlPct: null });
         }
 
-        const portfolioValue = usdtBalance + openPositionValue;
+        const paperMark = CONFIG.paperTrading ? paperPortfolioValuation(log, coinSnapshots, {
+          feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+          startingEquityUsd: CONFIG.portfolioValue,
+        }) : null;
+        if (paperMark) {
+          usdtBalance = paperMark.cashUsd;
+          openPositionValue = paperMark.openLiquidationValueUsd;
+          openPositions.length = 0;
+          openPositions.push(...paperMark.positions);
+        }
+        const portfolioValue = paperMark?.equityUsd ?? (usdtBalance + openPositionValue);
         const regimeMatch = (log.trades || []).slice(-20).reverse().find(t => t.regime);
         const regime = regimeMatch?.regime || "RANGING";
 
@@ -7890,6 +8295,10 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
           portfolioValue,
           usdtBalance,
           openPositions,
+          valuationEstimated: Boolean(paperMark),
+          paperStaleQuotes: paperMark?.staleQuotes ?? 0,
+          paperPerformance: CONFIG.paperTrading ? paperStats(log.trades) : null,
+          realMoneyOrdersAllowed: EXCHANGE_WRITES_ALLOWED,
           todayTrades: todayTrades.length,
           todayPnlUSD: totalPnlUSD,
           winRate: winRate ? `${winRate.wins}/${winRate.sample} (${(winRate.winRate * 100).toFixed(0)}%)` : "not enough data",
@@ -7943,20 +8352,16 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       return;
     }
 
-    // Sell all open positions
+    // Intentionally paper-only; never silently liquidate real account via UI.
     if (req.method === "POST" && path === "/api/sell-all") {
       if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Wrong PIN" })); return; }
-      (async () => {
-        const log = loadLog();
-        const open = Object.entries(log.positions || {}).filter(([, p]) => p && p.open).map(([sym]) => sym);
-        if (open.length === 0) { res.writeHead(200); res.end(JSON.stringify({ message: "No open positions to sell" })); return; }
+      closeAllPaperPositions().then(report => {
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ message: `Selling ${open.length} position(s)...` }));
-        console.log(`\n🚨 Dashboard: force sell-all triggered (${open.join(", ")})`);
-        for (const sym of open) {
-          await run("SELL", sym).catch(e => console.error(`Force sell ${sym}:`, e.message));
-        }
-      })().catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+        res.end(JSON.stringify(report));
+      }).catch(err => {
+        res.writeHead(CONFIG.paperTrading ? 500 : 403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      });
       return;
     }
 
@@ -8007,7 +8412,15 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
 
     // Status endpoint — also prints to Railway logs so you can read it there
+    if (req.method === "GET" && path === "/api/recovery") {
+      if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({ error: "Unauthorized" })); return; }
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(historicalRecoverySummary()));
+      return;
+    }
+
     if (req.method === "GET" && path === "/status") {
+      if (!checkPin(req.url)) { res.writeHead(401); res.end(JSON.stringify({error:"Unauthorized"})); return; }
       const log = loadLog();
       const openPositions = Object.entries(log.positions || {}).filter(([, p]) => p?.open);
       const positionSummary = openPositions.map(([sym, p]) => {
@@ -8043,10 +8456,29 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     // TradingView webhook
     if (req.method === "POST" && path === "/webhook") {
       let body = "";
-      req.on("data", (chunk) => (body += chunk.toString()));
+      let oversized = false;
+      req.on("data", (chunk) => {
+        if (oversized) return;
+        if (Buffer.byteLength(body) + chunk.length > 8192) {
+          oversized = true;
+          body = "";
+          return;
+        }
+        body += chunk.toString();
+      });
       req.on("end", async () => {
+        if (oversized) {
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Webhook payload too large" }));
+          return;
+        }
         try {
           const payload = JSON.parse(body);
+          // TradingView cannot add custom headers; accept a per-alert JSON secret instead.
+          const presented = req.headers["x-webhook-secret"] || payload.secret;
+          if (!WEBHOOK_SECRET || typeof presented !== "string" || presented.length !== WEBHOOK_SECRET.length || !crypto.timingSafeEqual(Buffer.from(presented), Buffer.from(WEBHOOK_SECRET))) {
+            res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({error:"Unauthorized webhook"})); return;
+          }
           const action = (payload.action || "").toUpperCase();
           const sym = (payload.symbol || CONFIG.symbols[0]).toUpperCase();
           if (!["BUY", "SELL"].includes(action)) {
@@ -8120,10 +8552,29 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     // LT portfolio webhook — receives buy/sell signals from NeonGreenHF / DETONATOR A/B/C
     if (req.method === "POST" && path === "/lt-webhook") {
       let body = "";
-      req.on("data", (chunk) => (body += chunk.toString()));
+      let oversized = false;
+      req.on("data", (chunk) => {
+        if (oversized) return;
+        if (Buffer.byteLength(body) + chunk.length > 8192) {
+          oversized = true;
+          body = "";
+          return;
+        }
+        body += chunk.toString();
+      });
       req.on("end", async () => {
+        if (oversized) {
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Webhook payload too large" }));
+          return;
+        }
         try {
           const payload = JSON.parse(body);
+          // TradingView cannot add custom headers; accept a per-alert JSON secret instead.
+          const presented = req.headers["x-webhook-secret"] || payload.secret;
+          if (!WEBHOOK_SECRET || typeof presented !== "string" || presented.length !== WEBHOOK_SECRET.length || !crypto.timingSafeEqual(Buffer.from(presented), Buffer.from(WEBHOOK_SECRET))) {
+            res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({error:"Unauthorized webhook"})); return;
+          }
           const action  = (payload.action || "").toUpperCase();
           const sym     = (payload.symbol || "").toUpperCase().replace(/[^A-Z]/g, "");
           const source  = payload.source || "indicator";
@@ -8248,18 +8699,40 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         saveLog(log);
       }
 
-      // Partial exit at +5%
+      // Partial profit is an actual realized exit, not just a quantity reduction.
       if (!swingPos.partialExitDone && pnlPct >= SWING.partialAt * 100) {
-        const partialQty = parseFloat(swingPos.quantity) * SWING.partialQty;
-        console.log(`\n📈 SWING PARTIAL TP — ${symbol} +${pnlPct.toFixed(2)}% | selling 30%`);
-        if (!CONFIG.paperTrading) {
-          try { await placeOrder(symbol, "sell", null, price, partialQty.toFixed(6)); }
-          catch (e) { console.log(`  ⚠️ Partial failed: ${e.message}`); }
+        const beforeQty = Number(swingPos.quantity);
+        const partialQty = Number((beforeQty * SWING.partialQty).toFixed(6));
+        if (partialQty > 0) {
+          console.log(`\n📈 SWING PARTIAL TP — ${symbol} +${pnlPct.toFixed(2)}% | selling 30%`);
+          if (!CONFIG.paperTrading) {
+            try { await placeOrder(symbol, "sell", null, price, partialQty.toFixed(6)); }
+            catch (e) { console.log(`  ⚠️ Partial failed: ${e.message}`); return; }
+          }
+          const proportionalBuyFee = Number(swingPos.entryFeeUsd || 0) * (partialQty / beforeQty);
+          const partialFill = CONFIG.paperTrading ? paperExit({
+            entryFillPrice: swingPos.entryPrice, exitMarketPrice: price, quantity: partialQty,
+            entryFeeUsd: proportionalBuyFee,
+            feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+          }) : null;
+          const realizedUSD = partialFill?.pnlUsd ?? ((price - swingPos.entryPrice) * partialQty);
+          swingPos.quantity = (beforeQty - partialQty).toFixed(6);
+          swingPos.entryFeeUsd = Math.max(0, Number(swingPos.entryFeeUsd || 0) - proportionalBuyFee);
+          swingPos.partialExitDone = true;
+          log.swingPositions[symbol] = swingPos;
+          log.portfolioValue = (log.portfolioValue || acct().portfolioValue) + realizedUSD;
+          const partialRecord = {
+            timestamp: new Date().toISOString(), type: "exit", symbol,
+            tradeType: "swing", timeframe: SWING.tf, paperTrading: CONFIG.paperTrading,
+            partial: true, orderPlaced: true, quantity: partialQty,
+            price: partialFill?.exitFillPrice ?? price, pnlUSD: realizedUSD,
+            pnlPct: partialFill?.pnlPct ?? pnlPct, feeAdjusted: Boolean(partialFill),
+            exitFeeUSD: partialFill?.exitFeeUsd ?? 0,
+          };
+          log.trades.push(partialRecord);
+          saveLog(log);
+          writeTradeCsv(partialRecord);
         }
-        swingPos.quantity = (parseFloat(swingPos.quantity) - partialQty).toFixed(6);
-        swingPos.partialExitDone = true;
-        log.swingPositions[symbol] = swingPos;
-        saveLog(log);
       }
 
       // Stepped profit lock on ATR trail
@@ -8284,7 +8757,12 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       if (!dailyBull && pnlPct < -1)        exitReasons.push(`Daily trend reversed at ${pnlPct.toFixed(1)}%`);
 
       if (exitReasons.length > 0) {
-        const pnlUSD = (price - swingPos.entryPrice) * parseFloat(swingPos.quantity);
+        const simulated = CONFIG.paperTrading ? paperExit({
+          entryFillPrice: swingPos.entryPrice, exitMarketPrice: price,
+          quantity: Number(swingPos.quantity), entryFeeUsd: Number(swingPos.entryFeeUsd || 0),
+          feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+        }) : null;
+        const pnlUSD = simulated?.pnlUsd ?? ((price - swingPos.entryPrice) * Number(swingPos.quantity));
         console.log(`\n📈 SWING EXIT — ${symbol} | ${exitReasons.join(" | ")}`);
         console.log(`   P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% ($${pnlUSD >= 0 ? "+" : ""}${pnlUSD.toFixed(4)}) | Held ${holdH.toFixed(1)}h`);
 
@@ -8297,7 +8775,10 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
         const exitEntry = {
           timestamp: new Date().toISOString(), type: "exit", symbol,
-          timeframe: SWING.tf, price, pnlPct, pnlUSD,
+          timeframe: SWING.tf, price: simulated?.exitFillPrice ?? price,
+          quantity: swingPos.quantity, entryPrice: swingPos.entryPrice, orderId: swingPos.orderId,
+          pnlPct: simulated?.pnlPct ?? pnlPct, pnlUSD,
+          exitFeeUSD: simulated?.exitFeeUsd ?? 0, feeAdjusted: Boolean(simulated),
           reasons: exitReasons, orderPlaced: true,
           paperTrading: CONFIG.paperTrading, tradeType: "swing",
         };
@@ -8322,6 +8803,14 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
 
     // ── Entry check ─────────────────────────────────────────────────────────
+    // Existing swing positions are managed above; new entries require explicit opt-in.
+    if (!ALLOW_NEW_SWING_ENTRIES) return;
+    // Paper simulation must honour the same entry cap, pause and loss breaker.
+    // This check stays BELOW the open-position management block, so exits remain live.
+    if (_tradingPaused || entryCapReached() || checkDailyDrawdown(log).paused) {
+      pushSignal(symbol, "BLOCKED", "Entry blocked: pause, daily cap or loss breaker");
+      return;
+    }
     if (openSwingCount >= SWING.maxOpen) return;
 
     // Cross-strategy dedup — don't swing if scalp or breakout already open on same coin
@@ -8360,7 +8849,7 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
     // ── Backtest gate ────────────────────────────────────────────────────────
     const btResult = await backtestSwingCoin(symbol);
-    if (btResult.recommendation === "SKIP") return;
+    if (btResult.recommendation !== "TRADE" || btResult.oosTrades < 8) return;
 
     // ── Score confirmations ──────────────────────────────────────────────────
     let score = 0;
@@ -8377,9 +8866,11 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     if (btResult.recommendation === "TRADE")    score++;  // backtest says go
 
     if (score < 3) return; // need at least 3 confirmations across all timeframes
+    if (entryCapReached()) { pushSignal(symbol, "BLOCKED", "Swing entry cap reached"); return; }
 
     const portfolio  = log.portfolioValue || acct().portfolioValue;
-    const swingSize  = portfolio * SWING.sizePct;
+    const swingSize = Math.min(portfolio * SWING.sizePct, sizedOrder(portfolio, btResult.stopLoss ?? SWING.stopLoss));
+    if (!swingSize) { console.log("🛡️  Swing skipped: notional below exchange minimum after risk cap"); return; }
 
     console.log(`\n📈 SWING ENTRY — ${symbol} | Score:${score}/10 | BT:${btResult.recommendation}`);
     console.log(`   Weekly: ${weeklyBull ? "✅ bullish" : "❌"} RSI:${weeklyRsi14.toFixed(0)} | Daily: ${dailyBull ? "✅ uptrend" : "❌"} RSI:${dailyRsi14.toFixed(0)} ${dailyAbove50 ? "above 50MA ✅" : "below 50MA ⚠️"}`);
@@ -8387,7 +8878,11 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     console.log(`   TP: +${(btResult.takeProfit * 100).toFixed(0)}% | Stop: -${(btResult.stopLoss * 100).toFixed(0)}% | Size: $${swingSize.toFixed(2)}`);
     if (dblBtm?.detected) console.log(`   🔔 Double bottom${dblBtm.strongConfirmation ? " + RSI divergence" : ""}`);
 
-    let qty = swingSize / price;
+    const paperSwingFill = CONFIG.paperTrading ? paperEntry({
+      marketPrice: price, notionalUsd: swingSize,
+      feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+    }) : null;
+    let qty = paperSwingFill?.quantity ?? (swingSize / price);
     let orderId = `PAPER-SWING-${Date.now()}`;
 
     if (!CONFIG.paperTrading) {
@@ -8408,8 +8903,9 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
 
     log.swingPositions = { ...(log.swingPositions || {}), [symbol]: {
-      open: true, side: "long", entryPrice: price, highWatermark: price,
-      entryTime: new Date().toISOString(), quantity: qty.toFixed(6),
+      open: true, side: "long", entryPrice: paperSwingFill?.fillPrice ?? price, highWatermark: price,
+      entryFeeUsd: paperSwingFill?.entryFeeUsd ?? 0,
+      entryTime: new Date().toISOString(), quantity: CONFIG.paperTrading ? qty.toFixed(8) : qty.toFixed(6),
       orderId, tradeType: "swing", partialExitDone: false,
       tpPct: btResult.takeProfit, slPct: btResult.stopLoss,
     }};
@@ -8423,7 +8919,8 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
     const entryLog = {
       timestamp: new Date().toISOString(), type: "entry", symbol,
-      timeframe: SWING.tf, price, tradeSize: swingSize,
+      timeframe: SWING.tf, price: paperSwingFill?.fillPrice ?? price, tradeSize: swingSize,
+      paperEntryFeeUsd: paperSwingFill?.entryFeeUsd ?? 0,
       indicators: { rsi3, rsi14, vwap, ema8, ema21, adx: adx?.adx },
       liquidity: liquiditySnapshot(symbol),
       score, entryConfidence: Math.round(Math.min(score, 9) / 9 * 100),
@@ -8503,7 +9000,12 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
       if (bkPos.targetPrice && price >= bkPos.targetPrice) exitReasons.push(`Target hit +${pnlPct.toFixed(1)}%`);
 
       if (exitReasons.length > 0) {
-        const pnlUSD = (price - bkPos.entryPrice) * parseFloat(bkPos.quantity);
+        const simulated = CONFIG.paperTrading ? paperExit({
+          entryFillPrice: bkPos.entryPrice, exitMarketPrice: price,
+          quantity: Number(bkPos.quantity), entryFeeUsd: Number(bkPos.entryFeeUsd || 0),
+          feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+        }) : null;
+        const pnlUSD = simulated?.pnlUsd ?? ((price - bkPos.entryPrice) * Number(bkPos.quantity));
         console.log(`\n🚀 BREAKOUT EXIT — ${symbol} | ${exitReasons.join(" | ")} | P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`);
         if (!CONFIG.paperTrading) {
           try { await placeOrder(symbol, "sell", null, price, bkPos.quantity); }
@@ -8513,7 +9015,10 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
         }
         const exitEntry = {
           timestamp: new Date().toISOString(), type: "exit", symbol, timeframe: "1H",
-          price, pnlPct, pnlUSD: +pnlUSD.toFixed(4), reasons: exitReasons,
+          price: simulated?.exitFillPrice ?? price,
+          quantity: bkPos.quantity, entryPrice: bkPos.entryPrice, orderId: bkPos.orderId,
+          pnlPct: simulated?.pnlPct ?? pnlPct, pnlUSD: +pnlUSD.toFixed(4), reasons: exitReasons,
+          exitFeeUSD: simulated?.exitFeeUsd ?? 0, feeAdjusted: Boolean(simulated),
           orderPlaced: true, paperTrading: CONFIG.paperTrading, tradeType: "breakout",
         };
         if (!CONFIG.paperTrading && bkPos.tpOrderId) {
@@ -8537,6 +9042,14 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
 
     // ── Entry check ─────────────────────────────────────────────────────────
+    // Existing breakout positions are managed above; new entries require explicit opt-in.
+    if (!ALLOW_NEW_BREAKOUT_ENTRIES) return;
+    // Paper simulation must honour the same entry cap, pause and loss breaker.
+    // This check stays BELOW the open-position management block, so exits remain live.
+    if (_tradingPaused || entryCapReached() || checkDailyDrawdown(log).paused) {
+      pushSignal(symbol, "BLOCKED", "Entry blocked: pause, daily cap or loss breaker");
+      return;
+    }
     const openBreakouts = Object.values(log.breakoutPositions || {}).filter(p => p?.open).length;
     if (openBreakouts >= 5) return;
 
@@ -8586,13 +9099,15 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
 
     // Walk-forward backtest gate — same gate as scalp, using 1H candles
     const bkBtResult = await backtestCoin(symbol).catch(() => null);
-    if (bkBtResult && bkBtResult.recommendation === "SKIP") {
+    if (!bkBtResult || bkBtResult.recommendation !== "TRADE" || bkBtResult.walkForward !== true || bkBtResult.oosTrades < 8) {
       console.log(`🚫 BREAKOUT BACKTEST BLOCK — ${symbol} failed walk-forward gate (WR<65%). Skipping.`);
       return;
     }
 
     const portfolio = log.portfolioValue || acct().portfolioValue;
-    const bkSize = portfolio * 0.15;
+    const bkSize = sizedOrder(portfolio, 0.03);
+    if (!bkSize) { console.log("🛡️  Breakout skipped: notional below exchange minimum after risk cap"); return; }
+    if (entryCapReached()) { pushSignal(symbol, "BLOCKED", "Breakout entry cap reached"); return; }
 
     console.log(`\n🚀 BREAKOUT ENTRY — ${symbol} | Regime:${regime.regime}`);
     console.log(`   Consolidation: $${rangeLow.toFixed(4)}–$${rangeHigh.toFixed(4)} | Breakout @ $${price.toFixed(4)}`);
@@ -8600,7 +9115,11 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     console.log(`   Vol: ${(vol.current/vol.avg*100).toFixed(0)}% of avg | Ichimoku: ${ichimoku ? (ichimoku.aboveCloud ? "above cloud ✅" : "in cloud ⚠️") : "n/a"}`);
     if (heat.heatPct > 0) console.log(`   Portfolio heat: ${heat.heatPct}% of 8% max`);
 
-    let qty = bkSize / price;
+    const paperBkFill = CONFIG.paperTrading ? paperEntry({
+      marketPrice: price, notionalUsd: bkSize,
+      feeFraction: PAPER_FEE_FRACTION, slippageFraction: PAPER_SLIPPAGE_FRACTION,
+    }) : null;
+    let qty = paperBkFill?.quantity ?? (bkSize / price);
     let orderId = `PAPER-BK-${Date.now()}`;
     if (!CONFIG.paperTrading) {
       try {
@@ -8619,8 +9138,9 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     const bkTpPct = (targetPrice - price) / price;
     const bkSlPct = 0.03;
     log.breakoutPositions = { ...(log.breakoutPositions || {}), [symbol]: {
-      open: true, side: "long", entryPrice: price, highWatermark: price,
-      entryTime: new Date().toISOString(), quantity: qty.toFixed(6),
+      open: true, side: "long", entryPrice: paperBkFill?.fillPrice ?? price, highWatermark: price,
+      entryFeeUsd: paperBkFill?.entryFeeUsd ?? 0,
+      entryTime: new Date().toISOString(), quantity: CONFIG.paperTrading ? qty.toFixed(8) : qty.toFixed(6),
       orderId, tradeType: "breakout", breakoutLevel: rangeHigh,
       targetPrice, rangeLow, rangeHigh, tpPct: bkTpPct, slPct: bkSlPct,
     }};
@@ -8633,7 +9153,9 @@ button{width:100%;max-width:300px;padding:16px;border-radius:14px;border:none;ba
     }
     const entryLog = {
       timestamp: new Date().toISOString(), type: "entry", symbol, timeframe: "1H",
-      price, tradeSize: bkSize, indicators: { ema8, ema21, range, volRatio: vol.current/vol.avg },
+      price: paperBkFill?.fillPrice ?? price, tradeSize: bkSize,
+      paperEntryFeeUsd: paperBkFill?.entryFeeUsd ?? 0,
+      indicators: { ema8, ema21, range, volRatio: vol.current/vol.avg },
       liquidity: liquiditySnapshot(symbol),
       breakoutLevel: rangeHigh, targetPrice, orderPlaced: true,
       paperTrading: CONFIG.paperTrading, tradeType: "breakout",
@@ -8817,6 +9339,8 @@ async function checkUpcomingListings() {
 }
 
 async function sniperBuy(symbol) {
+  requireExchangeWrites("New listing sniper");
+  if (process.env.SNIPER_ENABLED !== "true") return;
   // Block sniper entries during bear regime or crash block — new listings crash hardest in bear markets
   const regime = _regimeCache?.value;
   if (regime?.btcTrend === "bear") {
@@ -8893,6 +9417,7 @@ async function sniperBuy(symbol) {
     const ts = await getBitGetServerTime();
     const path = "/api/v2/spot/trade/place-order";
     const body = JSON.stringify({ symbol, side: "buy", orderType: "market", size: sizeUSD.toFixed(2) });
+    requireExchangeWrites("Direct sniper buy");
     const sig = signBitGet(ts, "POST", path, body);
     const res = await fetch(`${acct().baseUrl}${path}`, {
       method: "POST",
@@ -9090,8 +9615,13 @@ async function monitorSniperPositions() {
 
   server.listen(PORT, () => {
     console.log(`\n🌐 Webhook server listening on port ${PORT}`);
+    console.log(`🔒 EXCHANGE WRITES: ${EXCHANGE_WRITES_ALLOWED ? "AUTHORIZED" : "LOCKED"} | mode: ${CONFIG.paperTrading ? "PAPER" : "LIVE"}`);
     // Deploy-verification banner — confirms which guards the RUNNING code has (grep logs for GUARDS).
-    console.log(`🛡️  GUARDS ACTIVE — blacklist(${HARD_BLACKLIST.size}): ${[...HARD_BLACKLIST].join(",")} | entryCap ${MAX_ENTRIES_PER_DAY}/day | minBookDepth $${MIN_BOOK_DEPTH_USD}`);
+    console.log(`🛡️  GUARDS ACTIVE — blacklist(${HARD_BLACKLIST.size}): ${[...HARD_BLACKLIST].join(",")} | entryCap ${MAX_ENTRIES_PER_DAY}/day | minBookDepth ${MIN_BOOK_DEPTH_USD}`);
+    console.log("🔎 RECOVERY INVENTORY " + JSON.stringify(historicalRecoverySummary()));
+    if (process.env.READ_ONLY_ACCOUNT_AUDIT === "true") {
+      readOnlyBitGetSnapshot().then(summary => console.log("🔎 EXCHANGE READ-ONLY SNAPSHOT " + JSON.stringify(summary))).catch(err => console.log("🔎 EXCHANGE SNAPSHOT ERROR " + err.message));
+    }
     mergeCustomWatchlist();
     console.log(`   Symbols:     ${CONFIG.symbols.join(", ")}`);
     console.log(`   Polling:     every 5 minutes\n`);
@@ -9104,7 +9634,11 @@ async function monitorSniperPositions() {
 
       // Start price stream immediately, then refresh top movers and restart with updated symbols
       startPriceStream(CONFIG.symbols);
-      refreshTopMovers().then(() => startPriceStream(CONFIG.symbols)).catch(e => console.error("refreshTopMovers failed:", e.message));
+      if (ENABLE_MOVER_DISCOVERY) {
+        refreshTopMovers().then(() => startPriceStream(CONFIG.symbols)).catch(e => console.error("refreshTopMovers failed:", e.message));
+      } else {
+        console.log("🧪 Controlled paper test: dynamic movers disabled; only configured symbols scanned");
+      }
 
       for (const account of ACCOUNTS) {
         await _accountStore.run(account, async () => {
@@ -9171,12 +9705,14 @@ async function monitorSniperPositions() {
 
   // Swap to fresh top movers every 4 hours (restarts price stream with new symbols)
   setInterval(async () => {
+    if (!ENABLE_MOVER_DISCOVERY) return;
     await refreshTopMovers();
     startPriceStream(CONFIG.symbols);
   }, 4 * 60 * 60 * 1000);
 
-  // Quick gainer scan every 15 minutes — adds any new 3%+ mover immediately, no 4h wait
+  // Quick gainer scan every 15 minutes — optional for controlled paper trials.
   setInterval(async () => {
+    if (!ENABLE_MOVER_DISCOVERY) return;
     try {
       const res  = await fetch("https://api.bitget.com/api/v2/spot/market/tickers");
       const json = await res.json();
