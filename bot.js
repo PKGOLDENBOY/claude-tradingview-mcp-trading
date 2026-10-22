@@ -373,6 +373,10 @@ let _livePortfolioValue = null;
 // ─── Onboarding ───────────────────────────────────────────────────────────────
 
 function checkOnboarding() {
+  // Public-price paper mode must NOT demand real exchange credentials or
+  // manufacture a .env file containing empty account secrets. This makes
+  // read-only rehearsal possible with ZERO authenticated exchange access.
+  if (CONFIG.paperTrading) return;
   const required = ["BITGET_API_KEY", "BITGET_SECRET_KEY", "BITGET_PASSPHRASE"];
   const missing = required.filter((k) => !process.env[k]);
 
