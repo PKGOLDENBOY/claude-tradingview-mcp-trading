@@ -22,6 +22,7 @@ import { summarizePaperLedgerForLog } from "./lib/paper-ledger-telemetry.mjs";
 import { formatTradeSizeSummary } from "./lib/trade-size-report.mjs";
 import { startBitgetHeartbeat } from "./lib/bitget-ws-heartbeat.mjs";
 import { fetchMarketCandles } from "./lib/market-data.mjs";
+import { fetchWalkForwardHistory } from "./lib/walkforward-history.mjs";
 import { safePositionNotional, paperEntry, paperExit, paperStats, paperPortfolioValuation } from "./lib/risk-engine.mjs";
 import { simulateSwingTrades, swingTradeMetrics } from "./lib/swing-backtest.mjs";
 import { planSpotSellQuantity, confirmSpotSellFill, confirmZeroFillCancellation } from "./lib/order-safety.mjs";
@@ -962,27 +963,22 @@ async function backtestCoin(symbol) {
   // 3. Only trade if the strategy holds on recent market conditions
   // This prevents over-fitting to conditions that no longer exist
   const simTF = ["5m","15m","30m","1H"].includes(CONFIG.timeframe) ? CONFIG.timeframe : "15m";
-  const candles = await fetchMarketCandles(symbol, simTF, 1000, { closedOnly: true });
-  // BitGet caps one fetch at 1000 candles. OOS may span only ~2.6 days for 15m.
-
-
-  if (candles.length < 200) {
-    // Not enough history for walk-forward — use simple backtest
-    const result = optimiseCoin(symbol, candles);
-    result.symbol = symbol;
-    BACKTEST[symbol] = result;
-    return result;
-  }
-
+  // Fetch the genuine 30-day window (23d training, 7d unseen OOS) with 30 warmup bars.
+  // The old single 1000-candle fetch provided only ~2.6d of OOS on 15m charts.
+  // Insufficient/stale/gapped history now blocks entries instead of silently truncating OOS.
+  const candles = await fetchWalkForwardHistory(fetchMarketCandles, symbol, simTF);
   const perDay = { "5m":288,"15m":96,"30m":48,"1H":24 }[simTF];
-  const oosSize = Math.min(7 * perDay, Math.floor(candles.length * 0.25));
+  const oosSize = 7 * perDay;
+  console.log(`  📚 Walk-forward history — ${symbol} ${simTF}: ${candles.length} closed bars, 23d training + 7d OOS`);
   const inSample    = candles.slice(0, candles.length - oosSize);
   const outOfSample = candles.slice(candles.length - oosSize);
 
   // Optimize on in-sample window
   const inResult = optimiseCoin(symbol, inSample);
   if (inResult.recommendation === "SKIP") {
-    BACKTEST[symbol] = { ...inResult, symbol };
+    BACKTEST[symbol] = { ...inResult, symbol, historyBars:candles.length,
+      walkForward:false, oosTrades:null, reasonCode:"NO_IN_SAMPLE_POSITIVE_EDGE" };
+    console.log(`  🚫 Backtest training gate — ${symbol}: no qualifying profitable in-sample strategy on ${candles.length - oosSize} closed bars`);
     return BACKTEST[symbol];
   }
 
@@ -992,7 +988,7 @@ async function backtestCoin(symbol) {
   const oosWR   = oosTrades.length > 0 ? oosWins / oosTrades.length : 0;
   const oosExp  = oosTrades.length > 0 ? oosTrades.reduce((s, t) => s + t.pct, 0) / oosTrades.length : 0; // net %/trade
 
-  const result = { ...inResult, symbol, timeframe:simTF, oosDays:+(oosSize/perDay).toFixed(2),
+  const result = { ...inResult, symbol, timeframe:simTF, historyBars:candles.length, oosDays:+(oosSize/perDay).toFixed(2),
     oosWinRate: +(oosWR * 100).toFixed(1), oosExpectancy: +oosExp.toFixed(3),
     oosTrades: oosTrades.length, walkForward: true };
 
@@ -5994,7 +5990,7 @@ async function run(tvSignal = null, symbol = null) {
       return;
     }
     if (!btResult || btResult.recommendation !== "TRADE" || btResult.walkForward !== true || btResult.oosTrades < 8) {
-      console.log(`🚫 BACKTEST BLOCK — ${symbol} WR ${btResult?.winRate ?? "n/a"}% over ${btResult?.trades ?? 0} trades (need OOS TRADE rating). Skipping.`);
+      console.log(`🚫 BACKTEST BLOCK — ${symbol}: recommendation=${btResult?.recommendation ?? "missing"}, walkForward=${btResult?.walkForward ?? false}, in-sample trades=${btResult?.trades ?? "n/a"}, OOS trades=${btResult?.oosTrades ?? "not tested"}, OOS net expectancy=${btResult?.oosExpectancy ?? "n/a"}%/trade. Skipping.`);
       console.log("═══════════════════════════════════════════════════════════\n");
       pushSignal(symbol, "BLOCKED", `BACKTEST_GATE: recommendation=${btResult?.recommendation ?? "missing"}, walkForward=${btResult?.walkForward ?? false}, OOS trades=${btResult?.oosTrades ?? "n/a"}/8, OOS net expectancy=${btResult?.oosExpectancy ?? "n/a"}%/trade; entry remains blocked`);
       return;
