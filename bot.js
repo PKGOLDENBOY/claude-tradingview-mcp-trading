@@ -5996,7 +5996,7 @@ async function run(tvSignal = null, symbol = null) {
     if (!btResult || btResult.recommendation !== "TRADE" || btResult.walkForward !== true || btResult.oosTrades < 8) {
       console.log(`🚫 BACKTEST BLOCK — ${symbol} WR ${btResult?.winRate ?? "n/a"}% over ${btResult?.trades ?? 0} trades (need OOS TRADE rating). Skipping.`);
       console.log("═══════════════════════════════════════════════════════════\n");
-      pushSignal(symbol, "BLOCKED", `Backtest WR ${btResult.winRate}% — need 75%+ TRADE rating (got ${btResult.recommendation})`);
+      pushSignal(symbol, "BLOCKED", `BACKTEST_GATE: recommendation=${btResult?.recommendation ?? "missing"}, walkForward=${btResult?.walkForward ?? false}, OOS trades=${btResult?.oosTrades ?? "n/a"}/8, OOS net expectancy=${btResult?.oosExpectancy ?? "n/a"}%/trade; entry remains blocked`);
       return;
     }
 
