@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fetchWalkForwardHistory } from "../lib/walkforward-history.mjs";
+import { fetchWalkForwardHistory, isFreshWalkForwardResult, splitWalkForwardWindow } from "../lib/walkforward-history.mjs";
 
 const BAR = 900000;
 const NOW = Date.UTC(2026, 9, 23, 15, 30);
@@ -65,4 +65,29 @@ test("fails closed when there is insufficient historical data", async () => {
       "BTCUSDT", "15m", { now: NOW }),
     /WALK_FORWARD_INSUFFICIENT_HISTORY/,
   );
+});
+
+test("warmup is training-only; all 7 OOS days remain eligible for simulation", () => {
+  const full = bars.slice(-2910);
+  const { inSample, validationWithWarmup, oosSize, oosStartTime } = splitWalkForwardWindow(full, "15m");
+  assert.equal(oosSize, 672);
+  assert.equal(inSample.length, 2238); // 23d plus 30 indicators-only bars
+  assert.equal(validationWithWarmup.length, 702);
+  assert.equal(validationWithWarmup[0].time, inSample.at(-30).time);
+  assert.equal(validationWithWarmup[30].time, oosStartTime);
+  assert.equal(inSample.at(-1).time + BAR, oosStartTime);
+  assert.equal(validationWithWarmup.at(-1).time, full.at(-1).time);
+  assert.throws(() => splitWalkForwardWindow(full.slice(-1000), "15m"), /Invalid walk-forward/);
+});
+
+test("legacy cached backtests are never trusted as full-window OOS evidence", () => {
+  const valid = { schemaVersion: 2, timeframe: "15m", oosDays: 7, historyBars: 2910,
+    testedAt: new Date(NOW - 60000).toISOString(), recommendation: "TRADE" };
+  assert.equal(isFreshWalkForwardResult(valid, "15m", NOW), true);
+  assert.equal(isFreshWalkForwardResult({...valid, schemaVersion:1}, "15m", NOW), false);
+  assert.equal(isFreshWalkForwardResult({...valid, historyBars:1000}, "15m", NOW), false);
+  assert.equal(isFreshWalkForwardResult({...valid, oosDays:2.6}, "15m", NOW), false);
+  assert.equal(isFreshWalkForwardResult({...valid, timeframe:"5m"}, "15m", NOW), false);
+  assert.equal(isFreshWalkForwardResult({...valid, testedAt: new Date(NOW - 21*3600000).toISOString()}, "15m", NOW), false);
+  assert.equal(isFreshWalkForwardResult({...valid, testedAt: new Date(NOW + 10000).toISOString()}, "15m", NOW), false);
 });
