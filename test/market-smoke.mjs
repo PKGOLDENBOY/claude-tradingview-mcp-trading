@@ -16,12 +16,14 @@ for (const [symbol,interval,count,min] of [
     first:new Date(c[0].time).toISOString(),last:new Date(c.at(-1).time).toISOString()}));
 }
 
-const history = await fetchWalkForwardHistory(fetchMarketCandles, "BTCUSDT", "15m");
-assert.equal(history.length, 2910, "Walk-forward must have 23d IS + 7d OOS + warmup");
-assert(history.every((x, i) => i === 0 || x.time - history[i-1].time === 900000),
-  "Walk-forward market candles must be contiguous 15-minute bars");
-console.log("WALK_FORWARD_MARKET_SMOKE_PASS", JSON.stringify({
-  symbol:"BTCUSDT", interval:"15m", closed:history.length,
-  first:new Date(history[0].time).toISOString(), last:new Date(history.at(-1).time).toISOString(),
-  trainingDays:23, oosDays:7,
-}));
+for (const symbol of ["BTCUSDT", "ETHUSDT", "SOLUSDT", "LINKUSDT", "ADAUSDT"]) {
+  const history = await fetchWalkForwardHistory(fetchMarketCandles, symbol, "15m");
+  assert.equal(history.length, 2910, "Walk-forward must have 23d IS + 7d OOS + warmup: " + symbol);
+  assert(history.every((x, i) => i === 0 || x.time - history[i-1].time === 900000),
+    "Walk-forward market candles must be contiguous 15-minute bars: " + symbol);
+  console.log("WALK_FORWARD_MARKET_SMOKE_PASS", JSON.stringify({
+    symbol, interval:"15m", closed:history.length,
+    first:new Date(history[0].time).toISOString(), last:new Date(history.at(-1).time).toISOString(),
+    trainingDays:23, oosDays:7,
+  }));
+}
