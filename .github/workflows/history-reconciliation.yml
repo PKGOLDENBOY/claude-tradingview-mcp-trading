@@ -1,0 +1,43 @@
+name: AlphaBot read-only history reconciliation
+
+on:
+  push:
+    branches:
+      - audit/read-only-history-reconciliation-20261023
+    paths:
+      - lib/trade-history-reconciliation.mjs
+      - scripts/reconcile-trade-history.mjs
+      - test/trade-history-reconciliation.test.mjs
+      - .github/workflows/history-reconciliation.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - lib/trade-history-reconciliation.mjs
+      - scripts/reconcile-trade-history.mjs
+      - test/trade-history-reconciliation.test.mjs
+      - .github/workflows/history-reconciliation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-read-only-reconciliation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Syntax checks (no exchange credentials)
+        run: |
+          node --check lib/trade-history-reconciliation.mjs
+          node --check scripts/reconcile-trade-history.mjs
+          node --check test/trade-history-reconciliation.test.mjs
+      - name: Deterministic offline reconciliation and no-write tests
+        run: node --test test/trade-history-reconciliation.test.mjs
