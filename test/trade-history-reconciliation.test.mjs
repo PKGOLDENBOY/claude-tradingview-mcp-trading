@@ -27,7 +27,7 @@ test("legacy LIVE, PAPER and unknown are never mixed in fee-adjusted paper P&L",
     exit("P1", -1),
     exit("P2", -5, true, { feeAdjusted: false }),
     exit("L1", 100, false),
-    exit("U1", -20, undefined),
+    exit("U1", -20, null),
     entry("A1", true),
   ] };
   const out = summarizeState(state);
