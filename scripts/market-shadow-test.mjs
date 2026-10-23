@@ -54,6 +54,49 @@ const emit = (tag,obj) => {
 const n = v => Number(v);
 const wait = ms => new Promise(ok=>setTimeout(ok,ms));
 
+/**
+ * Resume the separate shadow research ledger from its dedicated Railway volume.
+ * Never delete or reset pre-existing evidence. A corrupt snapshot prevents start.
+ */
+function saveState() {
+  const pos = Object.fromEntries(STRATEGIES.map(strategy => [strategy,[...positions[strategy].entries()]]));
+  saveShadowCheckpoint(SHADOW_CHECKPOINT_PATH,{
+    startedAt: STARTED, endsAt:ENDS, lastSavedAt:Date.now(),
+    cycles, errors, quotes, knownListingsCount,
+    previousListings: previousListings ? [...previousListings] : null,
+    positions:pos, summary,
+  });
+}
+function resumeState() {
+  const checkpoint=loadShadowCheckpoint(SHADOW_CHECKPOINT_PATH);
+  if(!checkpoint) { saveState();return false; }
+  if(checkpoint.endsAt < checkpoint.startedAt || checkpoint.startedAt > Date.now())
+    throw new Error("SHADOW_CHECKPOINT_WINDOW_INVALID");
+  for(const strategy of STRATEGIES) {
+    if(!Array.isArray(checkpoint.positions[strategy]) ||
+       !checkpoint.summary[strategy] ||
+       !Number.isSafeInteger(checkpoint.summary[strategy].entries) ||
+       !Number.isFinite(checkpoint.summary[strategy].realizedUSD))
+      throw new Error("SHADOW_CHECKPOINT_STRATEGY_MISSING: "+strategy);
+    positions[strategy].clear();
+    for(const [symbol,pos] of checkpoint.positions[strategy]) {
+      if(!/^[A-Z0-9]{2,24}$/.test(symbol) || !Number.isFinite(pos?.quantity) ||
+         pos.quantity<=0 || !Number.isFinite(pos.entryPrice) || pos.entryPrice<=0 ||
+         !Number.isFinite(pos.totalCost) || pos.totalCost<=0 ||
+         !Number.isSafeInteger(pos.opened))
+         throw new Error("SHADOW_CHECKPOINT_POSITION_INVALID: "+strategy);
+      positions[strategy].set(symbol,pos);
+    }
+    Object.assign(summary[strategy],checkpoint.summary[strategy]);
+  }
+  STARTED=checkpoint.startedAt; ENDS=checkpoint.endsAt; DURATION_MS=ENDS-STARTED;
+  cycles=checkpoint.cycles;errors=checkpoint.errors;quotes=checkpoint.quotes;
+  knownListingsCount=checkpoint.knownListingsCount??0;
+  previousListings=Array.isArray(checkpoint.previousListings)?new Set(checkpoint.previousListings):null;
+  return true;
+}
+
+
 export function rsi(values,length=14) {
   if (!Array.isArray(values) || values.length < length+1) return null;
   let up=0,down=0;
@@ -174,6 +217,7 @@ function manageOpen(tickers) {
     state.peakRealizedUSD=Math.max(state.peakRealizedUSD,state.realizedUSD);
     state.maxRealizedDrawdownUSD=Math.max(state.maxRealizedDrawdownUSD,state.peakRealizedUSD-state.realizedUSD);
     emit("SHADOW_EXIT",{strategy:strat,symbol,reason,simulatedPnlUSD:f(pnl,4),heldMinutes:f(held,1)});
+    saveState();
   }
 }
 function enter(strat,symbol,quote){
@@ -189,6 +233,7 @@ function enter(strat,symbol,quote){
   positions[strat].set(symbol,{opened:Date.now(),quantity,entryPrice,totalCost});
   state.entries++;state.dailyEntries++;
   emit("SHADOW_ENTRY",{strategy:strat,symbol,simulatedNotionalUSD:VIRTUAL_USD,entryPrice:f(entryPrice,8)});
+  saveState();
 }
 function snapshot(tickers){
   return Object.fromEntries(STRATEGIES.map(strat=>{
@@ -248,12 +293,16 @@ async function cycle(){
     }
   }
   const progress=(Date.now()-STARTED)/DURATION_MS;
+  saveState();
   emit("SHADOW_CYCLE",{cycle:cycles,progressPct:f(progress*100,1),durationSec:f((Date.now()-start)/1000,2),
     trackedSymbols:symbols,marketQuotes:tickers.size,knownListings:knownListingsCount,newListings:[...listings],errors,
     stats:snapshot(tickers)});
 }
 async function main(){
-  emit("SHADOW_START",{startedAt:new Date(STARTED).toISOString(),targetEndAt:new Date(ENDS).toISOString(),
+  const resumed=resumeState();
+  process.on("SIGTERM",()=>{try{saveState();}catch(e){console.error("SHADOW_CHECKPOINT_SAVE_FAILED",e.message);}process.exit(0);});
+  emit("SHADOW_START",{resumed,checkpointPath:SHADOW_CHECKPOINT_PATH,evidencePath:SHADOW_EVENTS_PATH,
+    startedAt:new Date(STARTED).toISOString(),targetEndAt:new Date(ENDS).toISOString(),
     durationHours:f(DURATION_MS/3600000,3),strategies:STRATEGIES,symbols:CORE,
     method:"PUBLIC READ-ONLY REAL MARKET DATA; independent rule-level signal proxies, not production bot fills",
     estimatedPerSideFeePct:FEES*100,estimatedPerSideSlippagePct:SLIPPAGE*100,
@@ -269,7 +318,8 @@ async function main(){
   emit("SHADOW_FINAL",{startedAt:new Date(STARTED).toISOString(),finishedAt:time(),
     elapsedHours:f((Date.now()-STARTED)/3600000,3),cycles,errors,quoteRecords:quotes,
     strategies:snapshot(last),noOrders:true,noExchangeWrites:true,
-    limitation:"7 hours is too short for representative multi-day swings, long-term holds or rare listings; rule-level shadow signals are not exact Claude/TradingView production decisions."});
+    limitation:"Separate public-GET-only rule-level signals are NOT production PAPER fills, not the full Claude/TradingView engine, and cannot prove live-money readiness."});
+  saveState();
   process.exitCode=0;
 }
 if(process.argv[1] && fileURLToPath(import.meta.url)===fileURLToPath(new URL("file://"+process.argv[1])))
