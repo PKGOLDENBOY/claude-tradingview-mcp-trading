@@ -22,7 +22,7 @@ import { summarizePaperLedgerForLog } from "./lib/paper-ledger-telemetry.mjs";
 import { formatTradeSizeSummary } from "./lib/trade-size-report.mjs";
 import { startBitgetHeartbeat } from "./lib/bitget-ws-heartbeat.mjs";
 import { fetchMarketCandles } from "./lib/market-data.mjs";
-import { fetchWalkForwardHistory } from "./lib/walkforward-history.mjs";
+import { fetchWalkForwardHistory, isFreshWalkForwardResult, splitWalkForwardWindow } from "./lib/walkforward-history.mjs";
 import { safePositionNotional, paperEntry, paperExit, paperStats, paperPortfolioValuation } from "./lib/risk-engine.mjs";
 import { simulateSwingTrades, swingTradeMetrics } from "./lib/swing-backtest.mjs";
 import { planSpotSellQuantity, confirmSpotSellFill, confirmZeroFillCancellation } from "./lib/order-safety.mjs";
@@ -963,9 +963,10 @@ function optimiseCoin(symbol, candles) {
 }
 
 async function backtestCoin(symbol) {
+  const simTF = ["5m","15m","30m","1H"].includes(CONFIG.timeframe) ? CONFIG.timeframe : "15m";
   const existing = BACKTEST[symbol];
-  if (existing?.testedAt && Date.now() - new Date(existing.testedAt).getTime() < 20 * 60 * 60 * 1000) {
-    return existing; // fresh enough — skip re-test
+  if (isFreshWalkForwardResult(existing, simTF)) {
+    return existing; // only cache full-window version 2; legacy 1000-bar records are not safe
   }
 
   // Walk-forward backtesting:
@@ -973,33 +974,32 @@ async function backtestCoin(symbol) {
   // 2. Validate those parameters on the most recent 7 days (out-of-sample)
   // 3. Only trade if the strategy holds on recent market conditions
   // This prevents over-fitting to conditions that no longer exist
-  const simTF = ["5m","15m","30m","1H"].includes(CONFIG.timeframe) ? CONFIG.timeframe : "15m";
   // Fetch the genuine 30-day window (23d training, 7d unseen OOS) with 30 warmup bars.
   // The old single 1000-candle fetch provided only ~2.6d of OOS on 15m charts.
   // Insufficient/stale/gapped history now blocks entries instead of silently truncating OOS.
   const candles = await fetchWalkForwardHistory(fetchMarketCandles, symbol, simTF);
+  const { inSample, validationWithWarmup, oosSize } = splitWalkForwardWindow(candles, simTF);
   const perDay = { "5m":288,"15m":96,"30m":48,"1H":24 }[simTF];
-  const oosSize = 7 * perDay;
-  console.log(`  📚 Walk-forward history — ${symbol} ${simTF}: ${candles.length} closed bars, 23d training + 7d OOS`);
-  const inSample    = candles.slice(0, candles.length - oosSize);
-  const outOfSample = candles.slice(candles.length - oosSize);
+  console.log(`  📚 Walk-forward history — ${symbol} ${simTF}: ${candles.length} closed bars, 23d training + 7d OOS (30 warmup bars)`);
 
   // Optimize on in-sample window
   const inResult = optimiseCoin(symbol, inSample);
   if (inResult.recommendation === "SKIP") {
-    BACKTEST[symbol] = { ...inResult, symbol, historyBars:candles.length,
-      walkForward:false, oosTrades:null, reasonCode:inResult.reasonCode ?? "NO_IN_SAMPLE_POSITIVE_EDGE" };
+    BACKTEST[symbol] = { ...inResult, symbol, timeframe:simTF, schemaVersion:2,
+      historyBars:candles.length, oosDays:7, walkForward:false, oosTrades:null,
+      reasonCode:inResult.reasonCode ?? "NO_IN_SAMPLE_POSITIVE_EDGE" };
     console.log(`  🚫 Backtest training gate — ${symbol}: ${inResult.reasonCode}, max historical closed simulations=${inResult.maxSimulatedTrades}, parameter sets with 8+ trades=${inResult.sampledParameterSets}, positive-net-expectancy sets=${inResult.positiveExpectancySets}, best sampled net expectancy=${inResult.bestSampledExpectancy ?? "n/a"}%`);
     return BACKTEST[symbol];
   }
 
   // Validate on out-of-sample (most recent 7 days) — net of fees
-  const oosTrades = runBacktestSim(outOfSample, inResult.rsiThreshold, inResult.takeProfit, inResult.stopLoss);
+  // The first 30 bars are training-only indicator context; fills and entries are OOS only.
+  const oosTrades = runBacktestSim(validationWithWarmup, inResult.rsiThreshold, inResult.takeProfit, inResult.stopLoss);
   const oosWins = oosTrades.filter(t => t.win).length;
   const oosWR   = oosTrades.length > 0 ? oosWins / oosTrades.length : 0;
   const oosExp  = oosTrades.length > 0 ? oosTrades.reduce((s, t) => s + t.pct, 0) / oosTrades.length : 0; // net %/trade
 
-  const result = { ...inResult, symbol, timeframe:simTF, historyBars:candles.length, oosDays:+(oosSize/perDay).toFixed(2),
+  const result = { ...inResult, symbol, timeframe:simTF, schemaVersion:2, historyBars:candles.length, oosDays:+(oosSize/perDay).toFixed(2),
     oosWinRate: +(oosWR * 100).toFixed(1), oosExpectancy: +oosExp.toFixed(3),
     oosTrades: oosTrades.length, walkForward: true };
 
