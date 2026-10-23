@@ -11,6 +11,7 @@
  * Every report labels simulation P&L as simulated, not actual account profit.
  */
 import { fileURLToPath } from "node:url";
+import { loadShadowCheckpoint, saveShadowCheckpoint, appendShadowEvidence } from "../lib/shadow-checkpoint.mjs";
 
 export const SAFETY = Object.freeze({
   exchangeWrites: false,
@@ -25,24 +26,76 @@ const MINUTES = 60_000;
 const FEES = 0.001; // 0.1% per side
 const SLIPPAGE = 0.001; // adverse 0.1% per side
 const VIRTUAL_USD = 100; // simulated independent risk budget per position
-const MAX_ENTRIES_PER_STRATEGY = 3;
-const STARTED = Date.now();
-const DURATION_MS = Math.max(1, Number(process.env.SHADOW_DURATION_MINUTES || 420)) * MINUTES;
-const ENDS = STARTED + DURATION_MS;
+const MAX_ENTRIES_PER_STRATEGY_PER_DAY = 3; // preserve cap as a daily limit across a two-month test
+const SHADOW_CHECKPOINT_PATH = process.env.SHADOW_STATE_FILE || "/shadow-data/shadow-checkpoint.json";
+const SHADOW_EVENTS_PATH = process.env.SHADOW_EVENTS_FILE || "/shadow-data/shadow-events.ndjson";
+let STARTED = Date.now();
+let DURATION_MS = Math.max(1, Number(process.env.SHADOW_DURATION_MINUTES || 420)) * MINUTES;
+const explicitEnd = Date.parse(process.env.SHADOW_END_AT || "");
+let ENDS = Number.isFinite(explicitEnd) ? explicitEnd : STARTED + DURATION_MS;
+if (ENDS <= STARTED) throw new Error("SHADOW_INVALID_TEST_END: end must be in the future");
+DURATION_MS = ENDS - STARTED;
 const TICK_MS = Math.max(30_000, Number(process.env.SHADOW_CYCLE_SECONDS || 300) * 1000);
 const candleTtlMs = Object.freeze({"15min":5*MINUTES,"1h":10*MINUTES,"4h":45*MINUTES,"1day":60*MINUTES,"1week":90*MINUTES});
 const candleBarMs = Object.freeze({"15min":15*MINUTES,"1h":60*MINUTES,"4h":240*MINUTES,"1day":1440*MINUTES,"1week":10080*MINUTES});
 const cache = new Map();
 const positions = Object.fromEntries(STRATEGIES.map(s=>[s,new Map()]));
-const summary = Object.fromEntries(STRATEGIES.map(s=>[s,{evaluations:0,qualifyingSignals:0,entries:0,exits:0,wins:0,losses:0,realizedUSD:0,markedUSD:0,open:0,blocked:{}}]));
+const summary = Object.fromEntries(STRATEGIES.map(s=>[s,{evaluations:0,qualifyingSignals:0,entries:0,exits:0,wins:0,losses:0,realizedUSD:0,markedUSD:0,open:0,blocked:{},dailyDate:"",dailyEntries:0,grossProfitUSD:0,grossLossUSD:0,peakRealizedUSD:0,maxRealizedDrawdownUSD:0}]));
 let previousListings = null;
 let knownListingsCount = 0;
 let errors = 0, cycles = 0, quotes = 0, pendingEvents = [];
 const time = () => new Date().toISOString();
 const f = (n,d=4) => Number(n?.toFixed(d));
-const emit = (tag,obj) => console.log(JSON.stringify({tag,time:time(),safety:SAFETY.mode,...obj}));
+const emit = (tag,obj) => {
+  const event = {tag,time:time(),safety:SAFETY.mode,...obj};
+  if(tag==="SHADOW_ENTRY" || tag==="SHADOW_EXIT") appendShadowEvidence(SHADOW_EVENTS_PATH,event);
+  console.log(JSON.stringify(event));
+};
 const n = v => Number(v);
 const wait = ms => new Promise(ok=>setTimeout(ok,ms));
+
+/**
+ * Resume the separate shadow research ledger from its dedicated Railway volume.
+ * Never delete or reset pre-existing evidence. A corrupt snapshot prevents start.
+ */
+function saveState() {
+  const pos = Object.fromEntries(STRATEGIES.map(strategy => [strategy,[...positions[strategy].entries()]]));
+  saveShadowCheckpoint(SHADOW_CHECKPOINT_PATH,{
+    startedAt: STARTED, endsAt:ENDS, lastSavedAt:Date.now(),
+    cycles, errors, quotes, knownListingsCount,
+    previousListings: previousListings ? [...previousListings] : null,
+    positions:pos, summary,
+  });
+}
+function resumeState() {
+  const checkpoint=loadShadowCheckpoint(SHADOW_CHECKPOINT_PATH);
+  if(!checkpoint) { saveState();return false; }
+  if(checkpoint.endsAt < checkpoint.startedAt || checkpoint.startedAt > Date.now())
+    throw new Error("SHADOW_CHECKPOINT_WINDOW_INVALID");
+  for(const strategy of STRATEGIES) {
+    if(!Array.isArray(checkpoint.positions[strategy]) ||
+       !checkpoint.summary[strategy] ||
+       !Number.isSafeInteger(checkpoint.summary[strategy].entries) ||
+       !Number.isFinite(checkpoint.summary[strategy].realizedUSD))
+      throw new Error("SHADOW_CHECKPOINT_STRATEGY_MISSING: "+strategy);
+    positions[strategy].clear();
+    for(const [symbol,pos] of checkpoint.positions[strategy]) {
+      if(!/^[A-Z0-9]{2,24}$/.test(symbol) || !Number.isFinite(pos?.quantity) ||
+         pos.quantity<=0 || !Number.isFinite(pos.entryPrice) || pos.entryPrice<=0 ||
+         !Number.isFinite(pos.totalCost) || pos.totalCost<=0 ||
+         !Number.isSafeInteger(pos.opened))
+         throw new Error("SHADOW_CHECKPOINT_POSITION_INVALID: "+strategy);
+      positions[strategy].set(symbol,pos);
+    }
+    Object.assign(summary[strategy],checkpoint.summary[strategy]);
+  }
+  STARTED=checkpoint.startedAt; ENDS=checkpoint.endsAt; DURATION_MS=ENDS-STARTED;
+  cycles=checkpoint.cycles;errors=checkpoint.errors;quotes=checkpoint.quotes;
+  knownListingsCount=checkpoint.knownListingsCount??0;
+  previousListings=Array.isArray(checkpoint.previousListings)?new Set(checkpoint.previousListings):null;
+  return true;
+}
+
 
 export function rsi(values,length=14) {
   if (!Array.isArray(values) || values.length < length+1) return null;
@@ -159,19 +212,28 @@ function manageOpen(tickers) {
     const pnl=positionPnl(pos,quote);if(pnl===null)continue;
     positions[strat].delete(symbol);
     const state=summary[strat];state.exits++;state.realizedUSD+=pnl;
-    if(pnl>0)state.wins++;else state.losses++;
+    if(pnl>0){state.wins++;state.grossProfitUSD+=pnl;}
+    else{state.losses++;state.grossLossUSD+=Math.abs(pnl);}
+    state.peakRealizedUSD=Math.max(state.peakRealizedUSD,state.realizedUSD);
+    state.maxRealizedDrawdownUSD=Math.max(state.maxRealizedDrawdownUSD,state.peakRealizedUSD-state.realizedUSD);
     emit("SHADOW_EXIT",{strategy:strat,symbol,reason,simulatedPnlUSD:f(pnl,4),heldMinutes:f(held,1)});
+    saveState();
   }
 }
 function enter(strat,symbol,quote){
-  const state=summary[strat];if(state.entries>=MAX_ENTRIES_PER_STRATEGY)return;
+  const state=summary[strat];if(state.dailyDate!==new Date().toISOString().slice(0,10)) {
+    state.dailyDate=new Date().toISOString().slice(0,10);
+    state.dailyEntries=0;
+  }
+  if(state.dailyEntries>=MAX_ENTRIES_PER_STRATEGY_PER_DAY)return;
   if(positions[strat].has(symbol)||positions[strat].size>=2)return;
   const entryPrice=virtualFill(quote,"buy");
   if(!entryPrice)return;
   const quantity=VIRTUAL_USD/entryPrice, totalCost=VIRTUAL_USD*(1+FEES);
   positions[strat].set(symbol,{opened:Date.now(),quantity,entryPrice,totalCost});
-  state.entries++;
+  state.entries++;state.dailyEntries++;
   emit("SHADOW_ENTRY",{strategy:strat,symbol,simulatedNotionalUSD:VIRTUAL_USD,entryPrice:f(entryPrice,8)});
+  saveState();
 }
 function snapshot(tickers){
   return Object.fromEntries(STRATEGIES.map(strat=>{
@@ -181,6 +243,9 @@ function snapshot(tickers){
     return [strat,{evaluations:state.evaluations,qualifyingSignals:state.qualifyingSignals,entries:state.entries,
       exits:state.exits,wins:state.wins,losses:state.losses,open:state.open,unpricedOpen:uncertain,
       realizedPnlUSD:f(state.realizedUSD),openMarkedPnlUSD:f(marked),
+      winRatePct:state.exits>0?f(state.wins/state.exits*100,2):null,
+      profitFactor:state.grossLossUSD>0?f(state.grossProfitUSD/state.grossLossUSD,3):null,
+      realizedPeakToTroughDrawdownUSD:f(state.maxRealizedDrawdownUSD),
       combinedSimulatedPnlUSD:uncertain===0?f(state.realizedUSD+marked):null}];
   }));
 }
@@ -228,19 +293,29 @@ async function cycle(){
     }
   }
   const progress=(Date.now()-STARTED)/DURATION_MS;
+  saveState();
   emit("SHADOW_CYCLE",{cycle:cycles,progressPct:f(progress*100,1),durationSec:f((Date.now()-start)/1000,2),
     trackedSymbols:symbols,marketQuotes:tickers.size,knownListings:knownListingsCount,newListings:[...listings],errors,
     stats:snapshot(tickers)});
 }
 async function main(){
-  emit("SHADOW_START",{startedAt:new Date(STARTED).toISOString(),targetEndAt:new Date(ENDS).toISOString(),
+  const resumed=resumeState();
+  process.on("SIGTERM",()=>{try{saveState();process.exit(0);}catch(e){console.error("SHADOW_CHECKPOINT_SAVE_FAILED",e.message);process.exit(1);}});
+  emit("SHADOW_START",{resumed,checkpointPath:SHADOW_CHECKPOINT_PATH,evidencePath:SHADOW_EVENTS_PATH,
+    startedAt:new Date(STARTED).toISOString(),targetEndAt:new Date(ENDS).toISOString(),
     durationHours:f(DURATION_MS/3600000,3),strategies:STRATEGIES,symbols:CORE,
     method:"PUBLIC READ-ONLY REAL MARKET DATA; independent rule-level signal proxies, not production bot fills",
     estimatedPerSideFeePct:FEES*100,estimatedPerSideSlippagePct:SLIPPAGE*100,
-    exchangeKeyPresent:false,exchangeCalls:"GET ONLY; NO ORDERS",maxEntriesPerStrategy:MAX_ENTRIES_PER_STRATEGY});
+    exchangeKeyPresent:false,exchangeCalls:"GET ONLY; NO ORDERS",maxEntriesPerStrategyPerDay:MAX_ENTRIES_PER_STRATEGY_PER_DAY});
   let last=new Map();
   while(Date.now()<ENDS){
-    try {await cycle();}catch(err){errors++;emit("SHADOW_CYCLE_ERROR",{error:String(err?.message||err).slice(0,250)});}
+    try {await cycle();}catch(err){
+      errors++;
+      emit("SHADOW_CYCLE_ERROR",{error:String(err?.message||err).slice(0,250)});
+      // No unrecorded simulated trading: stop if checkpoint or event-journal storage fails.
+      if(["EACCES","ENOSPC","EROFS","EIO","ENOENT"].includes(err?.code) ||
+         /SHADOW_CHECKPOINT|SHADOW_EVENT/.test(String(err?.message||err))) throw err;
+    }
     const ms=Math.min(TICK_MS,Math.max(0,ENDS-Date.now()));
     if(ms>0)await wait(ms);
   }
@@ -249,7 +324,8 @@ async function main(){
   emit("SHADOW_FINAL",{startedAt:new Date(STARTED).toISOString(),finishedAt:time(),
     elapsedHours:f((Date.now()-STARTED)/3600000,3),cycles,errors,quoteRecords:quotes,
     strategies:snapshot(last),noOrders:true,noExchangeWrites:true,
-    limitation:"7 hours is too short for representative multi-day swings, long-term holds or rare listings; rule-level shadow signals are not exact Claude/TradingView production decisions."});
+    limitation:"Separate public-GET-only rule-level signals are NOT production PAPER fills, not the full Claude/TradingView engine, and cannot prove live-money readiness."});
+  saveState();
   process.exitCode=0;
 }
 if(process.argv[1] && fileURLToPath(import.meta.url)===fileURLToPath(new URL("file://"+process.argv[1])))
