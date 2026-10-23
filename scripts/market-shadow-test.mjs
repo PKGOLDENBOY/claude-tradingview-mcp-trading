@@ -300,7 +300,7 @@ async function cycle(){
 }
 async function main(){
   const resumed=resumeState();
-  process.on("SIGTERM",()=>{try{saveState();}catch(e){console.error("SHADOW_CHECKPOINT_SAVE_FAILED",e.message);}process.exit(0);});
+  process.on("SIGTERM",()=>{try{saveState();process.exit(0);}catch(e){console.error("SHADOW_CHECKPOINT_SAVE_FAILED",e.message);process.exit(1);}});
   emit("SHADOW_START",{resumed,checkpointPath:SHADOW_CHECKPOINT_PATH,evidencePath:SHADOW_EVENTS_PATH,
     startedAt:new Date(STARTED).toISOString(),targetEndAt:new Date(ENDS).toISOString(),
     durationHours:f(DURATION_MS/3600000,3),strategies:STRATEGIES,symbols:CORE,
@@ -309,7 +309,13 @@ async function main(){
     exchangeKeyPresent:false,exchangeCalls:"GET ONLY; NO ORDERS",maxEntriesPerStrategyPerDay:MAX_ENTRIES_PER_STRATEGY_PER_DAY});
   let last=new Map();
   while(Date.now()<ENDS){
-    try {await cycle();}catch(err){errors++;emit("SHADOW_CYCLE_ERROR",{error:String(err?.message||err).slice(0,250)});}
+    try {await cycle();}catch(err){
+      errors++;
+      emit("SHADOW_CYCLE_ERROR",{error:String(err?.message||err).slice(0,250)});
+      // No unrecorded simulated trading: stop if checkpoint or event-journal storage fails.
+      if(["EACCES","ENOSPC","EROFS","EIO","ENOENT"].includes(err?.code) ||
+         /SHADOW_CHECKPOINT|SHADOW_EVENT/.test(String(err?.message||err))) throw err;
+    }
     const ms=Math.min(TICK_MS,Math.max(0,ENDS-Date.now()));
     if(ms>0)await wait(ms);
   }
