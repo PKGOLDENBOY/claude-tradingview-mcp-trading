@@ -923,20 +923,27 @@ function runBacktestSim(candles, rsiThreshold, takeProfit, stopLoss = 0.04, feeR
 
 function optimiseCoin(symbol, candles) {
   let best = null;
+  // Distinguish no historical setups from inadequate samples and negative fee-adjusted EV.
+  let maxSimulatedTrades = 0, sampledParameterSets = 0, positiveExpectancySets = 0;
+  let bestSampledExpectancy = null;
   for (const rsi of [15, 20, 25, 30, 35, 40, 45, 50]) {
     for (const tp of [0.03, 0.04, 0.05, 0.06, 0.08, 0.10]) { // extended to 10% (mega-backtest winner)
       for (const sl of [0.02, 0.03, 0.04, 0.05, 0.06]) {
         if (tp <= sl) continue; // TP must be larger than SL
         const trades = runBacktestSim(candles, rsi, tp, sl); // net-of-fee trades
+        maxSimulatedTrades = Math.max(maxSimulatedTrades, trades.length);
         if (trades.length < 8) continue; // need a real sample — 5 lucky bars over-fit
+        sampledParameterSets++;
         const wins = trades.filter(t => t.win), losses = trades.filter(t => !t.win);
         const wr = wins.length / trades.length;
         const aw = wins.length > 0 ? wins.reduce((s, t) => s + t.pct, 0) / wins.length : 0;
         const al = losses.length > 0 ? losses.reduce((s, t) => s + t.pct, 0) / losses.length : 0;
         const exp = wr * aw + (1 - wr) * al; // net expectancy %/trade (fees already inside pct)
+        bestSampledExpectancy = bestSampledExpectancy === null ? exp : Math.max(bestSampledExpectancy, exp);
         // Select on EXPECTANCY after fees, not raw win rate. A 35%-WR setup with big winners can be
         // +EV; a 75%-WR setup of tiny scalps is -EV after fees (exactly what was happening live).
         if (exp <= 0) continue; // must be profitable AFTER fees
+        positiveExpectancySets++;
         const score = exp * Math.sqrt(trades.length); // reward edge AND sample size
         if (!best || score > best.score) {
           best = { rsiThreshold: rsi, takeProfit: tp, stopLoss: sl, trades: trades.length,
@@ -946,9 +953,13 @@ function optimiseCoin(symbol, candles) {
     }
   }
   const testedAt = new Date().toISOString();
-  if (!best) return { symbol, trades: 0, winRate: 0, expectancy: 0, recommendation: "SKIP", rsiThreshold: 25, takeProfit: 0.05, stopLoss: 0.04, testedAt };
+  const diagnostics = { maxSimulatedTrades, sampledParameterSets, positiveExpectancySets,
+    bestSampledExpectancy:bestSampledExpectancy === null ? null : +bestSampledExpectancy.toFixed(3) };
+  if (!best) return { symbol, trades: 0, winRate: 0, expectancy: 0, recommendation: "SKIP",
+    reasonCode:maxSimulatedTrades < 8 ? "INSUFFICIENT_HISTORICAL_SETUP_SAMPLE" : "NO_POSITIVE_IN_SAMPLE_EXPECTANCY",
+    rsiThreshold: 25, takeProfit: 0.05, stopLoss: 0.04, testedAt, ...diagnostics };
   // In-sample +EV is necessary but NOT sufficient — only OOS validation (backtestCoin) can say TRADE.
-  return { symbol, ...best, recommendation: "CAUTION", testedAt };
+  return { symbol, ...best, recommendation: "CAUTION", testedAt, ...diagnostics };
 }
 
 async function backtestCoin(symbol) {
@@ -977,8 +988,8 @@ async function backtestCoin(symbol) {
   const inResult = optimiseCoin(symbol, inSample);
   if (inResult.recommendation === "SKIP") {
     BACKTEST[symbol] = { ...inResult, symbol, historyBars:candles.length,
-      walkForward:false, oosTrades:null, reasonCode:"NO_IN_SAMPLE_POSITIVE_EDGE" };
-    console.log(`  🚫 Backtest training gate — ${symbol}: no qualifying profitable in-sample strategy on ${candles.length - oosSize} closed bars`);
+      walkForward:false, oosTrades:null, reasonCode:inResult.reasonCode ?? "NO_IN_SAMPLE_POSITIVE_EDGE" };
+    console.log(`  🚫 Backtest training gate — ${symbol}: ${inResult.reasonCode}, max historical closed simulations=${inResult.maxSimulatedTrades}, parameter sets with 8+ trades=${inResult.sampledParameterSets}, positive-net-expectancy sets=${inResult.positiveExpectancySets}, best sampled net expectancy=${inResult.bestSampledExpectancy ?? "n/a"}%`);
     return BACKTEST[symbol];
   }
 
