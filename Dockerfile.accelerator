@@ -1,0 +1,29 @@
+# SECURITY BOUNDARY: this service image intentionally excludes bot.js, .env,
+# exchange clients, trading dependencies, and any production source code.
+# It can ONLY evaluate historical public-market data: no order execution logic.
+FROM node:22-alpine
+WORKDIR /app
+COPY lib/accelerator-core.mjs lib/accelerator-core.mjs
+COPY lib/accelerator-data.mjs lib/accelerator-data.mjs
+COPY lib/accelerator-ml.mjs lib/accelerator-ml.mjs
+COPY lib/accelerator-runner.mjs lib/accelerator-runner.mjs
+COPY scripts/accelerated-research.mjs scripts/accelerated-research.mjs
+COPY scripts/accelerator-worker.mjs scripts/accelerator-worker.mjs
+COPY scripts/accelerator-benchmark.mjs scripts/accelerator-benchmark.mjs
+COPY test/helpers.mjs test/helpers.mjs
+COPY test/accelerator-core.test.mjs test/accelerator-core.test.mjs
+COPY test/accelerator-data.test.mjs test/accelerator-data.test.mjs
+COPY test/accelerator-ml.test.mjs test/accelerator-ml.test.mjs
+COPY test/accelerator-runner.test.mjs test/accelerator-runner.test.mjs
+RUN node --check scripts/accelerated-research.mjs && \
+    node --check scripts/accelerator-worker.mjs && \
+    node --check lib/accelerator-core.mjs && \
+    node --check lib/accelerator-data.mjs && \
+    node --check lib/accelerator-ml.mjs && \
+    node --check lib/accelerator-runner.mjs && \
+    node --test test/accelerator-core.test.mjs test/accelerator-data.test.mjs test/accelerator-ml.test.mjs test/accelerator-runner.test.mjs
+ENV NODE_ENV=production
+# The Railway /research-data volume mounts with root ownership by default.
+# This isolated container has no credentials and runs as root solely to persist
+# checksum-verified candle caches; never add production secrets to this service.
+CMD ["node","scripts/accelerated-research.mjs","--days=180","--workers=4","--cache-dir=/research-data/cache","--output=/research-data/reports/latest.json"]

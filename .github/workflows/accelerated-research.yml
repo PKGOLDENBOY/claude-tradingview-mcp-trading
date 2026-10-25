@@ -1,0 +1,76 @@
+name: AlphaBot independent accelerated public-data research
+
+on:
+  push:
+    branches:
+      - research/parallel-accelerator-20261025
+    paths:
+      - "lib/accelerator-*.mjs"
+      - "scripts/accelerat*.mjs"
+      - "test/accelerator-*.test.mjs"
+      - "test/helpers.mjs"
+      - ".github/workflows/accelerated-research.yml"
+  workflow_dispatch:
+  schedule:
+    # This only takes effect if the workflow exists on GitHub's default branch.
+    # Railway has a separate six-hour CRON schedule when deployed.
+    - cron: "37 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alphabot-independent-readonly-research-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test-and-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+      ALPHABOT_UNSEAL_HOLDOUT: "SEALED"
+    steps:
+      - name: Checkout independent research code
+        uses: actions/checkout@v4
+      - name: Node 22 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Static syntax verification
+        run: |
+          node --check scripts/accelerated-research.mjs
+          node --check scripts/accelerator-worker.mjs
+          node --check lib/accelerator-core.mjs
+          node --check lib/accelerator-data.mjs
+          node --check lib/accelerator-runner.mjs
+          node --check lib/accelerator-ml.mjs
+      - name: Unit and risk tests - offline
+        run: node --test test/accelerator-core.test.mjs test/accelerator-data.test.mjs test/accelerator-runner.test.mjs test/accelerator-ml.test.mjs
+      - name: Synthetic engine throughput benchmark - NOT trading evidence
+        run: node scripts/accelerator-benchmark.mjs
+      - name: Restore checksum-verified historical candle cache
+        uses: actions/cache/restore@v4
+        with:
+          path: research-data/cache
+          key: bitget-v3-public-1h-${{ github.run_id }}
+          restore-keys: |
+            bitget-v3-public-1h-
+      - name: 516-config parallel rules plus genuinely trained ML REAL public-data research, no holdout, no orders
+        run: node scripts/accelerated-research.mjs --days=180 --workers=4
+      - name: Save new candle cache snapshot
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: research-data/cache
+          key: bitget-v3-public-1h-${{ github.run_id }}
+      - name: Upload research evidence (no keys and no exchange writes)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alphabot-public-candle-research-${{ github.run_id }}
+          path: research-data/reports/latest.json
+          if-no-files-found: warn
+          retention-days: 30
