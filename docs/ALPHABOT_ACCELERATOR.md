@@ -16,8 +16,8 @@ The accelerator is a SECOND process, strictly separate from the existing Railway
 
 - Git branch: `research/parallel-accelerator-20261025`.
 - Service: `alphabot-accelerated-research` with no Bitget keys or TradingView secrets.
-- Runs every **six hours**, not permanently; `/research-data` is its separate persistent volume.
-- Configure the separate service using Railway native settings: start command `node scripts/accelerated-research.mjs --days=180 --workers=4 --cache-dir=/research-data/cache --output=/research-data/reports/latest.json`, cron `0 */6 * * *`, restart policy `NEVER`. **New Railway services can no longer opt into legacy `railway.json` as of October 2026.**
+- Runs **hourly**, at minute 15 UTC, rather than permanently; `/research-data` is a separate 1GB persistent volume. New closed 1h candles are evaluated after the market closes the hour.
+- Configure the separate service using Railway native settings: start command `node scripts/accelerated-research.mjs --days=180 --workers=4 --cache-dir=/research-data/cache --output=/research-data/reports/latest.json`, cron `15 * * * *`, restart policy `NEVER`, and Dockerfile `Dockerfile.accelerator`. This Docker image deliberately EXCLUDES production bot code and all exchange trading dependencies.
 - Look for structured `ACCELERATOR_RESEARCH_START`, `ACCELERATOR_CANDLE_CACHE` and `ACCELERATOR_RESEARCH_RESULT` log records. Inspect `/research-data/reports/latest.json` when volume access is available.
 - If the API is unavailable or incomplete, the run fails; it NEVER substitutes synthetic bars into the real-data report.
 - GitHub Actions runs strict offline unit tests and an explicitly **synthetic** speed benchmark, and can create 30-day research artifacts. The scheduled GitHub workflow only runs automatically after it is merged into the repository's default branch; the standalone Railway service has independent scheduling.
@@ -40,3 +40,6 @@ Official public API reference: https://www.bitget.com/docs/catalog/market/market
 - Offline safety and leakage tests: 15/15 passed under Node 22 before the code was published.
 - Synthetic speed test (five coins x 180 days x 1h): 420 fixed-rule candidates evaluated in 0.37 seconds in one thread and 0.53 seconds with four workers on the available machine. Multiple workers are *not always faster*, because thread startup costs can dominate a short simulation.
 - Synthetic ML test: 96 ML configurations with 48 independently trained models evaluated in ~1.09 seconds on the same machine. These numbers measure compute throughput only, not the live API download, not 100x faster model learning, and not profitable trades.
+- **First verified Bitget real-market data run 25 October 2026 13:55 UTC:** five assets, 180 days (4,320 closed one-hour candles per asset), 516 evaluated strategy variants, 48 logistic model fits, 1 fixed-rule candidate passed validation eligibility (`reversion-0192`), zero ML candidate passes, final 20% holdout **SEALED**. These are retrospective rule checks, NOT live profit evidence; no trades or orders were placed.
+- The first attempt failed safely on a gap in older Bitget data; after switching to the allowlisted history-candles endpoint for data older than 30 days, all five assets downloaded with no gaps or exclusions, and the full research report completed.
+- **Running service:** `alphabot-accelerated-research` in the same Railway project as the original bot but with its own source branch and volume, absolutely no exchange API keys or order capabilities. Existing production and shadow services were not modified.
