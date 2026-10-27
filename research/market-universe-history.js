@@ -26,10 +26,10 @@ export function normalizeSpotSymbols(records, {quotes = DEFAULT_QUOTES} = {}) {
   return result.sort((a,b) => a.symbol.localeCompare(b.symbol));
 }
 
-export function planHistoryWindows({symbol, firstAvailableMs, nowMs, maxCandlesPerRequest = 200, yearsDays = TEN_YEARS_DAYS}) {
+export function planHistoryWindows({symbol, firstAvailableMs, nowMs, maxCandlesPerRequest = 90, yearsDays = TEN_YEARS_DAYS}) {
   if (!symbol || !Number.isFinite(firstAvailableMs) || !Number.isFinite(nowMs) ||
-      !Number.isInteger(maxCandlesPerRequest) || maxCandlesPerRequest < 1 ||
-      !Number.isInteger(yearsDays) || yearsDays < 1) throw new TypeError("Invalid history parameters");
+      !Number.isInteger(maxCandlesPerRequest) || maxCandlesPerRequest < 1 || maxCandlesPerRequest > 100 ||
+      !Number.isInteger(yearsDays) || yearsDays < 1 || yearsDays > TEN_YEARS_DAYS) throw new TypeError("Invalid history parameters");
   const lastClosedHour = Math.floor(nowMs / HOUR_MS) * HOUR_MS - HOUR_MS;
   const earliestRequested = Math.max(firstAvailableMs, nowMs - yearsDays * DAY_MS);
   const firstHour = Math.ceil(earliestRequested / HOUR_MS) * HOUR_MS;
