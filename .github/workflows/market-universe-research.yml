@@ -28,3 +28,4 @@ jobs:
         run: |
           node --check research/market-universe-history.js
           node --check research/market-discovery.js
+          node --check scripts/research-market-discovery.mjs
