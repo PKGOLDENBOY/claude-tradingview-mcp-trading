@@ -7,6 +7,7 @@
 - research/market-discovery.js: public unauthenticated GET-only Bitget instruments and tickers discovery. Inventories all currently ONLINE SPOT USDT/USDC crypto pairs, preserving illiquid and newly listed symbols separately from the quality-screened research set.
 - research/market-universe-history.js: plan requests for up to 3,653 days of completed hourly candles, bounded to 90 bars/page to remain under Bitget's 100-history-candle limit. This plans requests; it does NOT fetch the planned history.
 - Historical-data auditing: detect missing, duplicate, invalid and out-of-window hourly timestamps without interpolation.
+- scripts/research-market-discovery.mjs: executable PUBLIC-GET-ONLY market metadata inventory pilot. Estimates historical GET page counts for up to the selected number of eligible markets, but never downloads historical candles. Creates immutable (no overwrite) JSON snapshots.
 - test/market-universe-history.test.mjs: deterministic synthetic tests; no exchange credentials, orders, authenticated requests, or production imports.
 
 ## Explicit limitations
@@ -26,6 +27,12 @@
 4. Historic delisting/point-in-time universe and liquidity datasets to reduce survivorship bias.
 5. Offline evaluation across uneven listings, fee/slippage stress, regimes, chronological folds and a newly sealed expanded-data holdout.
 6. Independent validation, code review and CI before ANY separate research deployment.
+
+## Run the inventory pilot (only when you want public metadata from Bitget)
+
+    node scripts/research-market-discovery.mjs --max-plan-markets=100
+
+This makes exactly two public metadata GET requests and writes a new snapshot under research-data/market-universe/. No historical candles, trading, or Railway deployments. The output folder is on the machine running the command.
 
 ## Run the offline unit tests
 
