@@ -1,3 +1,7 @@
+import {mkdtempSync,rmSync,existsSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {discoveryMain,parseDiscoveryArgs} from '../scripts/research-market-discovery.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {classifySpotUniverse,publicSpotMetadata,discoverBitgetSpotUniverse} from '../research/market-discovery.js';
@@ -95,4 +99,32 @@ test('hourly audit exposes gaps, duplicates and invalid/out-of-window records',(
     [base+3*HOUR,1],[base+111,1],[base+20*HOUR,1]],
     {startMs:base,endMs:base+3*HOUR});
   assert.deepEqual(audit,{expected:4,unique:3,missing:1,duplicates:1,invalid:1,outside:1});
+});
+
+test('executable pilot fetches metadata only, estimates history, and never overwrites snapshots',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'alpha-universe-'));
+  try {
+    const output=join(dir,'snapshot.json');
+    const calls=[];
+    const fetchFn=async(url,options)=>{
+      const u=new URL(url);
+      assert.ok(u.pathname.includes('market/instruments') || u.pathname.includes('market/tickers'));
+      assert.equal(options.method,'GET');calls.push(u.pathname);
+      return {ok:true,json:async()=>({code:'00000',
+        data:u.pathname.endsWith('instruments')?sample():[
+          ticker('BTCUSDT',100000000,100,100.01),ticker('NEWUSDT',1000000,1,1.01)]})};
+    };
+    const result=await discoveryMain(['--max-plan-markets=2','--output='+output],{fetchFn,nowMs:NOW});
+    assert.equal(calls.length,2);
+    assert.equal(result.historyPlanning.marketsEstimated,1);
+    assert.ok(result.historyPlanning.estimatedHistoryGetRequests>1);
+    assert.equal(result.safety.historicalCandlesDownloaded,0);
+    assert.equal(existsSync(output),true);
+    await assert.rejects(discoveryMain(['--output='+output],{fetchFn,nowMs:NOW}),/EEXIST/);
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+test('CLI rejects unknown, unsafe or unbounded parameters',()=>{
+  assert.throws(()=>parseDiscoveryArgs(['--backfill=true']),/UNKNOWN/);
+  assert.throws(()=>parseDiscoveryArgs(['--max-plan-markets=20000']),/INVALID/);
+  assert.throws(()=>parseDiscoveryArgs(['--min-turnover-24h=-1']),/INVALID/);
 });
