@@ -1,0 +1,30 @@
+name: AlphaBot market universe research tests
+
+on:
+  push:
+    branches:
+      - research/ten-year-market-universe-20261027
+  pull_request:
+    paths:
+      - 'research/**'
+      - 'test/market-universe-history.test.mjs'
+      - '.github/workflows/market-universe-research.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  offline-unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify public-only market universe planner tests
+        run: node --test test/market-universe-history.test.mjs
+      - name: Syntax-check offline modules
+        run: |
+          node --check research/market-universe-history.js
+          node --check research/market-discovery.js
