@@ -210,6 +210,8 @@ test('CLI rejects unbounded, secret, and unknown options',()=>{
   assert.throws(()=>parsePilotArgs(['--api-key=test']),/UNKNOWN/);
   assert.throws(()=>parsePilotArgs(['--market-offset=-1']),/INVALID/);
   assert.throws(()=>parsePilotArgs(['--inventory-file=plain.txt']),/INVALID/);
+  assert.throws(()=>parsePilotArgs(['--max-new-pages-per-market=101']),/INVALID/);
+  assert.equal(parsePilotArgs(['--max-new-pages-per-market=1']).maxNewPagesPerMarket,1);
 });
 
 test('all 529 currently listed markets can be partitioned into non-overlapping frozen batches',()=>{
@@ -257,4 +259,30 @@ test('shared immutable inventory enables offset batches without repeated metadat
   await assert.rejects(historyPilotMain([...args,'--market-offset=2'],{
     fetchFn,sleepFn:async()=>{}
   }),/FROZEN_PLAN|UNKNOWN/);
+}));
+
+test('fair per-market quota samples two markets rather than exhausting first market',()=>withDir(async dir=>{
+  const p=createHistoricalPlan(universe(),{nowMs:NOW,lookbackDays:1,
+    maxMarkets:2,candlesPerPage:2});
+  const calls=[];
+  const run=()=>backfillHistoricalPages({
+    plan:p,outputDir:dir,maxNewPages:2,maxNewPagesPerMarket:1,
+    maxStorageBytes:1_000_000,minDelayMs:0,
+    sleepFn:async()=>{},fetchFn:goodMock(calls)
+  });
+  const first=await run();
+  assert.equal(first.downloadedPages,2);
+  assert.equal(first.downloadedMarkets,2);
+  assert.equal(first.perMarketCapReached,2);
+  assert.equal(first.complete,false);
+  assert.equal(first.stoppedBecause,'PER_MARKET_PAGE_BUDGET');
+  assert.deepEqual(calls.map(x=>new URL(x.url).searchParams.get('symbol')),
+    ['BTCUSDT','THINUSDT']);
+  const next=await run();
+  assert.equal(next.resumedPages,2);
+  assert.equal(next.downloadedMarkets,2);
+  assert.equal(calls.length,4);
+  await assert.rejects(backfillHistoricalPages({
+    plan:p,outputDir:dir,maxNewPages:2,maxNewPagesPerMarket:0
+  }),/INVALID_BACKFILL_BUDGET/);
 }));
