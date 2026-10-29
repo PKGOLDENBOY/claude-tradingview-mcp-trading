@@ -9,9 +9,10 @@ import {createHash} from 'node:crypto';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {reconcileShadowEventJournal} from '../lib/shadow-journal-reconcile.mjs';
+import {loadShadowCheckpoint} from '../lib/shadow-checkpoint.mjs';
 
 const MAX_JOURNAL_BYTES=32*1024*1024;
-export function auditShadowJournalFile(path){
+export function auditShadowJournalFile(path,checkpointPath=null){
   if(typeof path!=='string'||!path.trim()||path.includes('\0'))
     throw new Error('SHADOW_AUDIT_FILE_PATH_INVALID');
   const full=resolve(path);
@@ -30,16 +31,49 @@ export function auditShadowJournalFile(path){
     try{return JSON.parse(row);}
     catch{throw new Error('SHADOW_AUDIT_CORRUPT_JSON_LINE_'+(i+1));}
   });
-  return {
+  const audit=reconcileShadowEventJournal(events);
+  const report={
     sha256:createHash('sha256').update(bytes).digest('hex'),
     sourceFile:full,
-    ...reconcileShadowEventJournal(events),
+    ...audit,
+    checkpointCountersMatch:null,
+    checkpointMismatches:[],
   };
+  if(checkpointPath!==null){
+    if(typeof checkpointPath!=='string'||!checkpointPath.trim()||checkpointPath.includes('\0'))
+      throw new Error('SHADOW_AUDIT_CHECKPOINT_PATH_INVALID');
+    const checkpoint=loadShadowCheckpoint(checkpointPath);
+    if(!checkpoint)throw new Error('SHADOW_AUDIT_CHECKPOINT_MISSING');
+    for(const strategy of Object.keys(checkpoint.summary||{})){
+      const summary=checkpoint.summary[strategy];
+      const expectedEntries=summary?.entries,expectedExits=summary?.exits;
+      const entries=events.filter(e=>e?.tag==='SHADOW_ENTRY'&&e.strategy===strategy).length;
+      const exits=events.filter(e=>e?.tag==='SHADOW_EXIT'&&e.strategy===strategy).length;
+      const open=checkpoint.positions?.[strategy];
+      if(!Number.isSafeInteger(expectedEntries)||!Number.isSafeInteger(expectedExits)||
+        !Array.isArray(open)||expectedEntries!==entries||expectedExits!==exits||
+        expectedEntries-expectedExits!==open.length){
+        report.checkpointMismatches.push({
+          strategy,journalEntries:entries,journalExits:exits,
+          checkpointEntries:expectedEntries??null,checkpointExits:expectedExits??null,
+          checkpointOpenPositionCount:Array.isArray(open)?open.length:null
+        });
+      }
+    }
+    report.checkpointCountersMatch=report.checkpointMismatches.length===0;
+    if(!report.checkpointCountersMatch){
+      report.structuralIntegrityIssues.push({type:'CHECKPOINT_JOURNAL_COUNT_MISMATCH',positionId:null});
+      report.structurallyReconciledClosedProxies=false;
+      report.locallyPairedV2JournalNoLegacy=false;
+    }
+  }
+  return report;
 }
 if(process.argv[1] && import.meta.url===pathToFileURL(resolve(process.argv[1])).href){
   try{
-    if(process.argv.length!==3)throw new Error('USAGE: node scripts/audit-shadow-journal.mjs /local/exported/shadow-events.ndjson');
-    const report=auditShadowJournalFile(process.argv[2]);
+    if(process.argv.length!==3&&process.argv.length!==4)
+      throw new Error('USAGE: node scripts/audit-shadow-journal.mjs /local/exported/shadow-events.ndjson [/local/exported/shadow-checkpoint.json]');
+    const report=auditShadowJournalFile(process.argv[2],process.argv[3]??null);
     console.log(JSON.stringify(report,null,2));
     if(report.structuralIntegrityIssues.length)process.exitCode=1;
   }catch(error){
