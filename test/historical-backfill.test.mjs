@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { mkdtempSync,rmSync,readFileSync,writeFileSync,existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,14 +15,15 @@ import { historyPilotMain,parsePilotArgs } from '../scripts/research-history-pil
 const H=3_600_000, NOW=Date.UTC(2026,9,29,12);
 const row=(ts,price=100)=>[String(ts),String(price),String(price+1),
   String(price-1),String(price), '2.0','200.0'];
-const universe=()=>({
-  exchange:'Bitget',market:'SPOT',asof:new Date(NOW).toISOString(),
-  inventorySha256:'a'.repeat(64),marketCount:2,
-  markets:[
+const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const universe=()=>{
+  const markets=[
     {symbol:'BTCUSDT',firstListedMs:NOW-5*H,researchEligible:true},
     {symbol:'THINUSDT',firstListedMs:null,researchEligible:false}
-  ]
-});
+  ];
+  return {exchange:'Bitget',market:'SPOT',asof:new Date(NOW).toISOString(),
+    inventorySha256:hash(markets),marketCount:markets.length,markets};
+};
 const plan=()=>createHistoricalPlan(universe(),{nowMs:NOW,lookbackDays:1,maxMarkets:1,candlesPerPage:2});
 const windows=()=>planHistoryWindows({
   symbol:'BTCUSDT',firstAvailableMs:NOW-5*H,nowMs:NOW,maxCandlesPerRequest:2,yearsDays:1
@@ -206,4 +208,25 @@ test('CLI rejects unbounded, secret, and unknown options',()=>{
   assert.throws(()=>parsePilotArgs(['--max-new-pages=1000']),/INVALID/);
   assert.throws(()=>parsePilotArgs(['--min-delay-ms=0']),/INVALID/);
   assert.throws(()=>parsePilotArgs(['--api-key=test']),/UNKNOWN/);
+});
+
+test('all 529 currently listed markets can be partitioned into non-overlapping frozen batches',()=>{
+  const markets=Array.from({length:529},(_,i)=>({symbol:'COIN'+String(i).padStart(4,'0')+'USDT',
+    firstListedMs:NOW-5*H,researchEligible:i%3===0}));
+  const snapshot={exchange:'Bitget',market:'SPOT',asof:new Date(NOW).toISOString(),
+    inventorySha256:hash(markets),marketCount:markets.length,markets};
+  const batches=[];
+  for(let marketOffset=0;marketOffset<markets.length;marketOffset+=100){
+    batches.push(createHistoricalPlan(snapshot,{nowMs:NOW,lookbackDays:3653,
+      maxMarkets:100,marketOffset}));
+  }
+  const symbols=batches.flatMap(p=>p.markets.map(m=>m.symbol));
+  assert.equal(symbols.length,529);
+  assert.equal(new Set(symbols).size,529);
+  assert.deepEqual(symbols,markets.map(m=>m.symbol));
+  assert.equal(batches.at(-1).marketOffset,500);
+  assert.equal(batches.at(-1).selectedMarketCount,29);
+  assert.throws(()=>createHistoricalPlan(snapshot,{nowMs:NOW,marketOffset:529}),/OFFSET_OUT_OF_RANGE/);
+  assert.throws(()=>createHistoricalPlan({...snapshot,inventorySha256:'f'.repeat(64)},
+    {nowMs:NOW,maxMarkets:1}),/CHECKSUM_MISMATCH/);
 });
