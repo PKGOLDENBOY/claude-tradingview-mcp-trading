@@ -208,6 +208,8 @@ test('CLI rejects unbounded, secret, and unknown options',()=>{
   assert.throws(()=>parsePilotArgs(['--max-new-pages=1000']),/INVALID/);
   assert.throws(()=>parsePilotArgs(['--min-delay-ms=0']),/INVALID/);
   assert.throws(()=>parsePilotArgs(['--api-key=test']),/UNKNOWN/);
+  assert.throws(()=>parsePilotArgs(['--market-offset=-1']),/INVALID/);
+  assert.throws(()=>parsePilotArgs(['--inventory-file=plain.txt']),/INVALID/);
 });
 
 test('all 529 currently listed markets can be partitioned into non-overlapping frozen batches',()=>{
@@ -230,3 +232,29 @@ test('all 529 currently listed markets can be partitioned into non-overlapping f
   assert.throws(()=>createHistoricalPlan({...snapshot,inventorySha256:'f'.repeat(64)},
     {nowMs:NOW,maxMarkets:1}),/CHECKSUM_MISMATCH/);
 });
+
+test('shared immutable inventory enables offset batches without repeated metadata GETs',()=>withDir(async dir=>{
+  const inventory=join(dir,'shared-market-inventory.json');
+  writeFileSync(inventory,JSON.stringify({
+    event:'CURRENT_MARKET_UNIVERSE_SNAPSHOT',
+    safety:'UNAUTHENTICATED_GET_ONLY',universe:universe()
+  }));
+  const reports=[],calls=[];
+  const fetchFn=goodMock(calls);
+  const args=['--inventory-file='+inventory,'--output-dir='+join(dir,'batch-1'),
+    '--market-offset=1','--max-markets=1','--lookback-days=1',
+    '--max-new-pages=1','--min-delay-ms=250'];
+  const result=await historyPilotMain(args,{fetchFn,nowMs:NOW+H,
+    sleepFn:async()=>{},log:x=>reports.push(x)});
+  assert.equal(result.discoveredNewInventory,false);
+  assert.equal(result.marketOffset,1);
+  assert.equal(result.chosenMarketCount,1);
+  assert.equal(calls.length,1);
+  assert.equal(new URL(calls[0].url).searchParams.get('symbol'),'THINUSDT');
+  const frozen=loadHistoricalPlan(join(dir,'batch-1','frozen-plan.json'));
+  assert.equal(frozen.anchorNowMs,NOW);
+  assert.equal(frozen.markets[0].symbol,'THINUSDT');
+  await assert.rejects(historyPilotMain([...args,'--market-offset=2'],{
+    fetchFn,sleepFn:async()=>{}
+  }),/FROZEN_PLAN|UNKNOWN/);
+}));
