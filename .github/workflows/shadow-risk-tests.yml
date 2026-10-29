@@ -32,4 +32,4 @@ jobs:
           node --check lib/shadow-execution-safety.mjs
       - name: Run isolated no-network tests
         run: |
-          node --test test/shadow-checkpoint.test.mjs test/shadow-execution-safety.test.mjs test/shadow-price-risk.test.mjs
+          node --test test/shadow-*.test.mjs
