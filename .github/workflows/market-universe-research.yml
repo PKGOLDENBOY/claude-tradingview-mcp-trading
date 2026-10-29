@@ -33,3 +33,37 @@ jobs:
           node --check scripts/research-history-pilot.mjs
           node --check research/market-discovery.js
           node --check scripts/research-market-discovery.mjs
+
+  public-api-smoke:
+    name: Read-only Bitget single-page live API pilot
+    needs: offline-unit-tests
+    if: github.event_name == 'pull_request' && github.head_ref == 'research/ten-year-market-universe-20261027'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Hard-capped public GET pilot; no secrets or orders
+        run: |
+          node scripts/research-history-pilot.mjs \
+            --output-dir=research-data/history-pilot \
+            --max-markets=1 \
+            --max-new-pages=1 \
+            --max-storage-bytes=1000000 \
+            --max-runtime-seconds=90 \
+            --lookback-days=14 \
+            --min-delay-ms=500
+      - name: Save immutable pilot evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-get-only-history-pilot
+          path: research-data/history-pilot/
+          retention-days: 7
+          if-no-files-found: warn
