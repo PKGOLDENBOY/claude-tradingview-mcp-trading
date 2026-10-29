@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "reviewedAtUtc": "2026-10-29T15:40:00Z",
+  "status": "INCOMPLETE",
+  "profitabilityDemonstrated": false,
+  "fixes": [],
+  "strategyEvaluations": [],
+  "research": {
+    "chronologicalFolds": true,
+    "trainingOnlyFeatures": true,
+    "dataQualityAudited": true,
+    "bothSideCosts": true,
+    "selectionFrozenBeforeOos": true,
+    "holdoutUsedOnceOnly": false,
+    "noHoldoutRetuning": true,
+    "foldsAndQualityReportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/blob/research/parallel-accelerator-20261025/docs/ALPHABOT_ACCELERATOR.md",
+    "fixedRule": {
+      "trained": true,
+      "validated": true,
+      "untouchedOosCompleted": false,
+      "trainReportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/17",
+      "validationReportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/17"
+    },
+    "ml": {
+      "trained": true,
+      "validated": true,
+      "untouchedOosCompleted": false,
+      "trainReportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/17",
+      "validationReportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/17"
+    }
+  },
+  "safety": {
+    "paperTrading": true,
+    "liveTradingEnabled": false,
+    "exchangeWritesLocked": true,
+    "actualValuesVerified": false,
+    "note": "Railway runtime paper/writes-locked logs observed, but connected OAuth supplies variable NAMES ONLY, not the actual values. This section does not independently verify effective flags."
+  },
+  "decision": {
+    "type": "forward-paper",
+    "paper": {
+      "basis": "forward-paper",
+      "independentClosedRoundTrips": 0,
+      "positionIdsReconciled": false,
+      "rawFillsChecked": false,
+      "feesAndSlippageIncluded": false,
+      "portfolioEquityCurveAvailable": false,
+      "independentAuditPassed": false,
+      "netRealizedPnlUsd": null,
+      "winRatePct": null,
+      "profitFactor": null,
+      "maxPortfolioDrawdownPct": null,
+      "riskLimitViolations": null,
+      "safetyLimitsReviewed": false
+    },
+    "observedRailwayLedgerNote": "At 2026-10-29 15:28 UTC the main service reported 0 auditable fee-adjusted exit EVENTS and unknown independent complete round trips. Historical recovery logs 330 bot exit events are not round-trip proof."
+  },
+  "finalReport": {
+    "published": false,
+    "limitationsPublished": false,
+    "url": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/blob/research/completion-evidence-gate-20261029-v1/docs/ALPHABOT_MILESTONE_EVIDENCE_REVIEW_20261029.md"
+  },
+  "limitations": [
+    "The accelerator's final 20 percent holdout remains sealed and no independent out-of-sample result has been published.",
+    "Historical backtest exits cannot substitute for forward paper fills.",
+    "No conclusive independently reviewed no-validated-edge decision for expanded strategy search.",
+    "No independently verified account-level equity curve, max portfolio drawdown or risk breach audit.",
+    "Environment flag values were not readable through the current OAuth connector."
+  ]
+}
