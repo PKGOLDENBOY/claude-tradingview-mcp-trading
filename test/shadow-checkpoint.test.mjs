@@ -14,11 +14,12 @@ test("shadow checkpoint survives restart and uses atomic snapshot", () => fixtur
   assert.equal(loadShadowCheckpoint(path),null);
   const state={startedAt:1_800_000_000_000,endsAt:1_805_000_000_000,cycles:22,errors:0,
     quotes:4000,positions:{scalp:[["BTCUSDT",{opened:1_800_000_000_001,quantity:1,entryPrice:100,totalCost:100.1}]]},
-    summary:{scalp:{entries:1,exits:0,realizedUSD:0}}};
+    summary:{scalp:{entries:1,exits:0,realizedUSD:0,lastStopBySymbol:{BTCUSDT:1_800_000_000_010}}}};
   saveShadowCheckpoint(path,state);
   assert.equal(existsSync(path+".tmp"),false);
   assert.deepEqual(loadShadowCheckpoint(path).positions,state.positions);
   assert.equal(loadShadowCheckpoint(path).cycles,22);
+  assert.equal(loadShadowCheckpoint(path).summary.scalp.lastStopBySymbol.BTCUSDT,1_800_000_000_010);
   assert.equal(loadShadowCheckpoint(path).safetyMode,SHADOW_MODE);
 }));
 test("shadow evidence accepts ONLY simulated entry/exit records",()=>fixture(dir=>{

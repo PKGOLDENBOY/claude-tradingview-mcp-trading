@@ -1,0 +1,35 @@
+name: Shadow paper-risk regression tests
+
+on:
+  pull_request:
+    paths:
+      - "scripts/market-shadow-test.mjs"
+      - "lib/shadow-execution-safety.mjs"
+      - "lib/shadow-checkpoint.mjs"
+      - "test/shadow-*.test.mjs"
+      - ".github/workflows/shadow-risk-tests.yml"
+  push:
+    branches:
+      - "fix/shadow-spread-cooldown-20261024"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-shadow-risk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (read-only)
+        uses: actions/checkout@v4
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Verify module syntax
+        run: |
+          node --check scripts/market-shadow-test.mjs
+          node --check lib/shadow-execution-safety.mjs
+      - name: Run isolated no-network tests
+        run: |
+          node --test test/shadow-*.test.mjs

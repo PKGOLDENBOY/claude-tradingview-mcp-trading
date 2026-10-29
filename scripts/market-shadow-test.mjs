@@ -12,6 +12,7 @@
  */
 import { fileURLToPath } from "node:url";
 import { loadShadowCheckpoint, saveShadowCheckpoint, appendShadowEvidence } from "../lib/shadow-checkpoint.mjs";
+import { entrySafety, exitThresholdReason, spreadBps } from "../lib/shadow-execution-safety.mjs";
 
 export const SAFETY = Object.freeze({
   exchangeWrites: false,
@@ -40,7 +41,7 @@ const candleTtlMs = Object.freeze({"15min":5*MINUTES,"1h":10*MINUTES,"4h":45*MIN
 const candleBarMs = Object.freeze({"15min":15*MINUTES,"1h":60*MINUTES,"4h":240*MINUTES,"1day":1440*MINUTES,"1week":10080*MINUTES});
 const cache = new Map();
 const positions = Object.fromEntries(STRATEGIES.map(s=>[s,new Map()]));
-const summary = Object.fromEntries(STRATEGIES.map(s=>[s,{evaluations:0,qualifyingSignals:0,entries:0,exits:0,wins:0,losses:0,realizedUSD:0,markedUSD:0,open:0,blocked:{},dailyDate:"",dailyEntries:0,grossProfitUSD:0,grossLossUSD:0,peakRealizedUSD:0,maxRealizedDrawdownUSD:0}]));
+const summary = Object.fromEntries(STRATEGIES.map(s=>[s,{evaluations:0,qualifyingSignals:0,entries:0,exits:0,wins:0,losses:0,realizedUSD:0,markedUSD:0,open:0,blocked:{},lastStopBySymbol:{},dailyDate:"",dailyEntries:0,grossProfitUSD:0,grossLossUSD:0,peakRealizedUSD:0,maxRealizedDrawdownUSD:0}]));
 let previousListings = null;
 let knownListingsCount = 0;
 let errors = 0, cycles = 0, quotes = 0, pendingEvents = [];
@@ -88,6 +89,10 @@ function resumeState() {
       positions[strategy].set(symbol,pos);
     }
     Object.assign(summary[strategy],checkpoint.summary[strategy]);
+    if (!summary[strategy].lastStopBySymbol || typeof summary[strategy].lastStopBySymbol !== "object" || Array.isArray(summary[strategy].lastStopBySymbol))
+      throw new Error("SHADOW_CHECKPOINT_COOLDOWN_INVALID: "+strategy);
+    if (Object.entries(summary[strategy].lastStopBySymbol).some(([sym,ms])=> !/^[A-Z0-9]{2,24}$/.test(sym) || !Number.isSafeInteger(ms) || ms<0))
+      throw new Error("SHADOW_CHECKPOINT_COOLDOWN_INVALID: "+strategy);
   }
   STARTED=checkpoint.startedAt; ENDS=checkpoint.endsAt; DURATION_MS=ENDS-STARTED;
   cycles=checkpoint.cycles;errors=checkpoint.errors;quotes=checkpoint.quotes;
@@ -182,11 +187,18 @@ async function candles(symbol,granularity) {
   return closed;
 }
 function virtualFill(quote,side) {
-  const last=n(quote?.lastPr), raw=side==="buy"?n(quote?.askPr):n(quote?.bidPr);
-  const quotePx=Number.isFinite(raw)&&raw>0?raw:last;
+  // Never fabricate an executable bid/ask from last trade price.
+  const quotePx=side==="buy"?n(quote?.askPr):n(quote?.bidPr);
   if(!Number.isFinite(quotePx)||quotePx<=0)return null;
   return side==="buy"?quotePx*(1+SLIPPAGE):quotePx*(1-SLIPPAGE);
 }
+/** Preserve executable quotes even when last trade is stale or absent. */
+export function mapTickerQuotes(data) {
+  if(!Array.isArray(data))throw new TypeError("INVALID_SHADOW_TICKERS");
+  return new Map(data.filter(q=>typeof q?.symbol==="string" && /^[A-Z0-9]{2,24}$/.test(q.symbol))
+    .map(q=>[q.symbol,q]));
+}
+
 export function positionPnl(pos,quote) {
   const exit=virtualFill(quote,"sell");
   if(!exit)return null;
@@ -205,35 +217,48 @@ function manageOpen(tickers) {
   const now=Date.now();
   for(const strat of STRATEGIES)for(const [symbol,pos] of positions[strat]){
     const quote=tickers.get(symbol);if(!quote)continue;
-    const px=n(quote.lastPr);if(!Number.isFinite(px)||px<=0)continue;
-    const moves=(px/pos.entryPrice)-1, held=(now-pos.opened)/MINUTES,rule=exits[strat];
-    let reason=moves<=-rule.stop?"STOP":moves>=rule.tp?"TAKE_PROFIT":held>=rule.maxMin?"TIME_EXIT":null;
-    if(!reason)continue;
+    // Do not gate risk management on lastPr: it can be stale or absent while
+    // the actual bid is available and the simulated stop is already breached.
+    const held=(now-pos.opened)/MINUTES,rule=exits[strat];
     const pnl=positionPnl(pos,quote);if(pnl===null)continue;
+    // Trigger using the executable bid-side net return, including fees/slippage;
+    // last-trade prices can conceal a large spread. A market gap can still
+    // produce a loss beyond the nominal stop; never claim guaranteed fills.
+    const reason=exitThresholdReason(pnl,pos.totalCost,rule) || (held>=rule.maxMin?"TIME_EXIT":null);
+    if(!reason)continue;
     positions[strat].delete(symbol);
     const state=summary[strat];state.exits++;state.realizedUSD+=pnl;
     if(pnl>0){state.wins++;state.grossProfitUSD+=pnl;}
     else{state.losses++;state.grossLossUSD+=Math.abs(pnl);}
+    if(reason==="STOP")state.lastStopBySymbol[symbol]=now;
     state.peakRealizedUSD=Math.max(state.peakRealizedUSD,state.realizedUSD);
     state.maxRealizedDrawdownUSD=Math.max(state.maxRealizedDrawdownUSD,state.peakRealizedUSD-state.realizedUSD);
-    emit("SHADOW_EXIT",{strategy:strat,symbol,reason,simulatedPnlUSD:f(pnl,4),heldMinutes:f(held,1)});
+    emit("SHADOW_EXIT",{strategy:strat,symbol,reason,simulatedPnlUSD:f(pnl,4),
+      realizedReturnPct:f(pnl/pos.totalCost*100,2),spreadBps:f(spreadBps(quote)??-1,2),
+      executableBid:quote.bidPr??null,quotedAsk:quote.askPr??null,lastTrade:quote.lastPr??null,
+      heldMinutes:f(held,1)});
     saveState();
   }
 }
 function enter(strat,symbol,quote){
-  const state=summary[strat];if(state.dailyDate!==new Date().toISOString().slice(0,10)) {
+  const state=summary[strat];
+  const skip=reason=>{state.blocked[reason]=(state.blocked[reason]||0)+1;return false;};if(state.dailyDate!==new Date().toISOString().slice(0,10)) {
     state.dailyDate=new Date().toISOString().slice(0,10);
     state.dailyEntries=0;
   }
-  if(state.dailyEntries>=MAX_ENTRIES_PER_STRATEGY_PER_DAY)return;
-  if(positions[strat].has(symbol)||positions[strat].size>=2)return;
+  if(state.dailyEntries>=MAX_ENTRIES_PER_STRATEGY_PER_DAY)return skip("daily-entry-cap");
+  if(positions[strat].has(symbol))return skip("already-open");
+  if(positions[strat].size>=2)return skip("position-cap");
+  const safety=entrySafety(quote,state.lastStopBySymbol[symbol]);
+  if(!safety.allowed)return skip(safety.reason);
   const entryPrice=virtualFill(quote,"buy");
-  if(!entryPrice)return;
+  if(!entryPrice)return skip("invalid-entry-price");
   const quantity=VIRTUAL_USD/entryPrice, totalCost=VIRTUAL_USD*(1+FEES);
   positions[strat].set(symbol,{opened:Date.now(),quantity,entryPrice,totalCost});
   state.entries++;state.dailyEntries++;
-  emit("SHADOW_ENTRY",{strategy:strat,symbol,simulatedNotionalUSD:VIRTUAL_USD,entryPrice:f(entryPrice,8)});
+  emit("SHADOW_ENTRY",{strategy:strat,symbol,simulatedNotionalUSD:VIRTUAL_USD,entryPrice:f(entryPrice,8),spreadBps:f(spreadBps(quote),2)});
   saveState();
+  return true;
 }
 function snapshot(tickers){
   return Object.fromEntries(STRATEGIES.map(strat=>{
@@ -246,6 +271,7 @@ function snapshot(tickers){
       winRatePct:state.exits>0?f(state.wins/state.exits*100,2):null,
       profitFactor:state.grossLossUSD>0?f(state.grossProfitUSD/state.grossLossUSD,3):null,
       realizedPeakToTroughDrawdownUSD:f(state.maxRealizedDrawdownUSD),
+      skippedSignalEvaluationsByGate:{...state.blocked},
       combinedSimulatedPnlUSD:uncertain===0?f(state.realizedUSD+marked):null}];
   }));
 }
@@ -258,7 +284,9 @@ function collectNewListings(rows){
 async function cycle(){
   cycles++;const start=Date.now();
   const data=await publicGet("/api/v2/spot/market/tickers");
-  const tickers=new Map(data.filter(q=>q.symbol&&Number.isFinite(n(q.lastPr))&&n(q.lastPr)>0).map(q=>[q.symbol,q]));
+  // Keep quotes even when lastPr is absent/stale: open-position risk must still
+  // see the bid and can never depend on the last trade printing.
+  const tickers=mapTickerQuotes(data);
   quotes+=tickers.size;
   let listings=new Set();
   try { listings=collectNewListings(await publicGet("/api/v2/spot/public/symbols")); }
