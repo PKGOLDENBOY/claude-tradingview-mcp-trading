@@ -1,0 +1,27 @@
+name: AlphaBot shadow strategy review (offline)
+on:
+  pull_request:
+    paths:
+      - 'lib/shadow-strategy-review.mjs'
+      - 'test/shadow-strategy-review.test.mjs'
+      - 'reports/shadow-strategy-snapshot-20261029.json'
+      - 'reports/alphabot-shadow-strategy-evaluation-20261029.md'
+      - '.github/workflows/shadow-strategy-review.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  read-only-evidence-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check offline research module syntax
+        run: node --check lib/shadow-strategy-review.mjs
+      - name: Reject invalid and misrepresented paper results
+        run: node --test test/shadow-strategy-review.test.mjs
