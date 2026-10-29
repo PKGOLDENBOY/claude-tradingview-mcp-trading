@@ -8,6 +8,8 @@ on:
     paths:
       - 'research/**'
       - 'test/market-universe-history.test.mjs'
+      - 'test/historical-backfill.test.mjs'
+      - 'scripts/research-history-pilot.mjs'
       - '.github/workflows/market-universe-research.yml'
 
 permissions:
@@ -23,9 +25,11 @@ jobs:
         with:
           node-version: '22'
       - name: Verify public-only market universe planner tests
-        run: node --test test/market-universe-history.test.mjs
+        run: node --test test/market-universe-history.test.mjs test/historical-backfill.test.mjs
       - name: Syntax-check offline modules
         run: |
           node --check research/market-universe-history.js
+          node --check research/historical-backfill.js
+          node --check scripts/research-history-pilot.mjs
           node --check research/market-discovery.js
           node --check scripts/research-market-discovery.mjs
