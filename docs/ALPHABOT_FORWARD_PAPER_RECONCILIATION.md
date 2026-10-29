@@ -15,7 +15,7 @@ The current production ledger's hourly `PAPER_LEDGER_EVIDENCE` record on **29 Oc
 - Fills must be chronological; sells cannot exceed buys; a position ID cannot be reused after closing; duplicate fill identifiers are rejected; partial exits count only when the original full position has closed.
 - Computes net USD P&L directly from entry/exit fill notionals less **both-side fees**, compares it to the application's reported P&L, and reports completed **position count**, win rate and profit factor. Adverse slippage must already be reflected in execution prices; do not subtract it twice.
 - Optional sampled account-level drawdown requires chronological **marked-to-market portfolio equity** observations covering all fills, valid positive equity, and at most 60-minute observation gaps. Reports **sampled** drawdown only; cannot know true between-sample extremes.
-- Requires an explicit reviewed risk-limit report and zero reported violations before marking a dataset **ready for an independent human audit**. Even then, `profitabilityDemonstrated: false` and `liveMoneyReady: false` remain mandatory: this tool cannot authenticate or corroborate source events by itself.
+- Requires an explicit reviewed risk-limit report, zero reported violations, **and zero unresolved open paper positions** before marking a dataset **ready for an independent human audit**. Even when 100 historic positions are fully closed, one remaining open position can carry unrecognized risk, so the gate now fails closed. Even then, `profitabilityDemonstrated: false` and `liveMoneyReady: false` remain mandatory: this tool cannot authenticate or corroborate source events by itself.
 
 ## Not evidence of profitability
 

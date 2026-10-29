@@ -141,3 +141,23 @@ test('tiny fractional quantity half-exit is NOT treated as fully closed',()=>{
   assert.deepEqual(audit.incompleteOpenPositionIds,['P0']);
   assert.equal(audit.auditReadyForHumanReview,false);
 });
+
+test('100 fully closed positions plus one unresolved live paper position never pass the human-review gate',()=>{
+  const ledger=paperLedger();
+  const unresolved=position(100);
+  const first=unresolved.fills[0];
+  unresolved.fills=[
+    first,
+    {...first,fillId:'P100-extra-entry',timestamp:iso(base+100*60_000+10_000),
+      quantity:0.25,feeUsd:0.025},
+  ];
+  ledger.positions.push(unresolved);
+  const audit=auditForwardPaperRoundTrips(ledger);
+  assert.equal(audit.completedIndependentRoundTrips,100);
+  assert.equal(audit.excludedPositionIds.length,0);
+  assert.deepEqual(audit.incompleteOpenPositionIds,['P100']);
+  assert.equal(audit.equityCurveValidated,true);
+  assert.equal(audit.auditReadyForHumanReview,false);
+  assert.equal(audit.profitabilityDemonstrated,false);
+  assert.equal(audit.liveMoneyReady,false);
+});
