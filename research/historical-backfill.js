@@ -48,7 +48,8 @@ export function createHistoricalPlan(universe, {
     schemaVersion:1, exchange:'Bitget', market:'SPOT',
     asof:universe.asof, anchorNowMs:nowMs, lookbackDays, candlesPerPage,
     universeSha256:universe.inventorySha256,
-    inventoryMarketCount:universe.marketCount, selectedMarketCount:markets.length,
+    inventoryMarketCount:universe.marketCount, requestedMaxMarkets:maxMarkets,
+    selectedMarketCount:markets.length,
     selection:'CURRENT_ONLINE_SPOT_USDT_USDC_TOP_N_BY_TURNOVER;NOT_POINT_IN_TIME',
     historicalCompleteness:'UNKNOWN_UNTIL_DOWNLOADED_AND_AUDITED',
     markets
@@ -62,7 +63,9 @@ export function verifyHistoricalPlan(plan) {
       !integer(plan.lookbackDays) || plan.lookbackDays < 1 || plan.lookbackDays > TEN_YEARS_DAYS ||
       !integer(plan.candlesPerPage) || plan.candlesPerPage < 1 || plan.candlesPerPage > 90 ||
       !Array.isArray(plan.markets) || plan.markets.length < 1 || plan.markets.length > 100 ||
-      !Number.isSafeInteger(plan.selectedMarketCount) ||
+      !Number.isSafeInteger(plan.requestedMaxMarkets) || plan.requestedMaxMarkets<1 ||
+      plan.requestedMaxMarkets>100 || !Number.isSafeInteger(plan.selectedMarketCount) ||
+      plan.selectedMarketCount>plan.requestedMaxMarkets ||
       plan.selectedMarketCount !== plan.markets.length ||
       plan.markets.some(m => !safeSymbol(m?.symbol) || !integer(m.firstAvailableMs) ||
         m.firstAvailableMs <= 0 || m.firstAvailableMs > plan.anchorNowMs) ||
