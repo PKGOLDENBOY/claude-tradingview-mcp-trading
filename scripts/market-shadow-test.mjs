@@ -210,7 +210,8 @@ function manageOpen(tickers) {
   const now=Date.now();
   for(const strat of STRATEGIES)for(const [symbol,pos] of positions[strat]){
     const quote=tickers.get(symbol);if(!quote)continue;
-    const px=n(quote.lastPr);if(!Number.isFinite(px)||px<=0)continue;
+    // Do not gate risk management on lastPr: it can be stale or absent while
+    // the actual bid is available and the simulated stop is already breached.
     const held=(now-pos.opened)/MINUTES,rule=exits[strat];
     const pnl=positionPnl(pos,quote);if(pnl===null)continue;
     // Trigger using the executable bid-side net return, including fees/slippage;
@@ -226,7 +227,9 @@ function manageOpen(tickers) {
     state.peakRealizedUSD=Math.max(state.peakRealizedUSD,state.realizedUSD);
     state.maxRealizedDrawdownUSD=Math.max(state.maxRealizedDrawdownUSD,state.peakRealizedUSD-state.realizedUSD);
     emit("SHADOW_EXIT",{strategy:strat,symbol,reason,simulatedPnlUSD:f(pnl,4),
-      realizedReturnPct:f(pnl/pos.totalCost*100,2),spreadBps:f(spreadBps(quote)??-1,2),heldMinutes:f(held,1)});
+      realizedReturnPct:f(pnl/pos.totalCost*100,2),spreadBps:f(spreadBps(quote)??-1,2),
+      executableBid:quote.bidPr??null,quotedAsk:quote.askPr??null,lastTrade:quote.lastPr??null,
+      heldMinutes:f(held,1)});
     saveState();
   }
 }
