@@ -3,7 +3,35 @@
   "reviewedAtUtc": "2026-10-29T15:40:00Z",
   "status": "INCOMPLETE",
   "profitabilityDemonstrated": false,
-  "fixes": [],
+  "fixes": [
+    {
+      "category": "order",
+      "isolatedBranch": true,
+      "branch": "fix/alphabot-safety-audit-20261020",
+      "testsPassed": true,
+      "testUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/actions/runs/39383171928",
+      "diffUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/4",
+      "defectAndResolution": "Partial SELL quantity ignored, ambiguous fill statuses, TP cancellations and duplicates fixed with fail-closed mocked order-adapter tests."
+    },
+    {
+      "category": "accounting",
+      "isolatedBranch": true,
+      "branch": "fix/risk-and-data-hardening-20261019",
+      "testsPassed": true,
+      "testUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/actions/runs/39828985476",
+      "diffUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/2",
+      "defectAndResolution": "Two-sided paper fee and cash/equity double-count accounting bugs corrected and verified; separate PR #10 also fixes sniper PAPER fee/CSV mode. No independent production ledger reconciliation yet."
+    },
+    {
+      "category": "risk",
+      "isolatedBranch": true,
+      "branch": "fix/shadow-spread-cooldown-20261024",
+      "testsPassed": true,
+      "testUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/actions/runs/40864405350",
+      "diffUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/16",
+      "defectAndResolution": "Wide/missing spreads, executable stops and post-stop re-entry cooldown have isolated passing tests; draft PR #16 requires replay before deployment."
+    }
+  ],
   "strategyEvaluations": [
     {
       "strategy": "scalp",
@@ -88,6 +116,7 @@
     "No conclusive independently reviewed no-validated-edge decision for expanded strategy search.",
     "No independently verified account-level equity curve, max portfolio drawdown or risk breach audit.",
     "Environment flag values were not readable through the current OAuth connector.",
-    "Shadow scalp/momentum/swing observations are evaluated but use only simulated signal proxies; swing has no realized exits; PR #21 holds separately frozen evidence."
+    "Shadow scalp/momentum/swing observations are evaluated but use only simulated signal proxies; swing has no realized exits; PR #21 holds separately frozen evidence.",
+    "Known order/accounting/risk fixes now have an evidence matrix on isolated PR #19, but this is not an exhaustive end-to-end execution/account review."
   ]
 }
