@@ -69,15 +69,16 @@ jobs:
             --max-runtime-seconds=90 \
             --lookback-days=3653 \
             --min-delay-ms=500
-      - name: Probe separate liquid-altcoin batch from the same frozen inventory
+      - name: Sample 10 distinct current spot markets from the same frozen inventory
         run: |
           node scripts/research-history-pilot.mjs \
             --inventory-file=research-data/history-pilot/market-inventory.json \
-            --output-dir=research-data/history-altcoin-probe \
+            --output-dir=research-data/history-ten-market-pilot \
             --market-offset=10 \
-            --max-markets=1 \
-            --max-new-pages=1 \
-            --max-storage-bytes=1000000 \
+            --max-markets=10 \
+            --max-new-pages=10 \
+            --max-new-pages-per-market=1 \
+            --max-storage-bytes=1500000 \
             --max-runtime-seconds=90 \
             --lookback-days=14 \
             --min-delay-ms=500
