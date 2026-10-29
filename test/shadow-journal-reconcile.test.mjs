@@ -40,7 +40,7 @@ test('partial journal entry cannot silently count as a completed round trip',()=
   const r=reconcileShadowEventJournal([entry]);
   assert.equal(r.completedShadowProxyPositions,0);
   assert.equal(r.openProxyPositionIds.length,1);
-  assert.equal(r.completeUninterruptedV2Journal,false);
+  assert.equal(r.locallyPairedV2JournalNoLegacy,false);
 });
 test('journal missing entry cannot fabricate its opening fill',()=>{
   const {exit}=pair();
@@ -63,7 +63,7 @@ test('legacy event is excluded without invented IDs or hidden recovery',()=>{
   const r=reconcileShadowEventJournal([legacy,entry,exit]);
   assert.equal(r.legacyEventsExcluded,1);
   assert.equal(r.completedShadowProxyPositions,1);
-  assert.equal(r.completeUninterruptedV2Journal,false);
+  assert.equal(r.locallyPairedV2JournalNoLegacy,false);
   assert.equal(r.independentlyReconciledProductionPaperRoundTrips,0);
 });
 test('changed fee, PnL and opposite symbol cannot fake reconciled profit',()=>{
