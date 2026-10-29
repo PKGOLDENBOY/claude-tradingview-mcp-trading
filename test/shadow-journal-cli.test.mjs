@@ -50,7 +50,6 @@ test('offline CLI reads a v2 journal, compares checkpoint and never writes to ei
 }));
 test('crash/replay count mismatch fails closed rather than counting silently',()=>withDir(dir=>{
   const {file,checkpoint}=saved(dir);
-  saveShadowCheckpoint; // Strictly read-only source; no state modification by auditor.
   const savedState=JSON.parse(readFileSync(checkpoint,'utf8'));
   savedState.summary.scalp.entries=2;
   writeFileSync(checkpoint,JSON.stringify(savedState)+'\n');
