@@ -6,7 +6,7 @@
 
 1. Discovery: two unauthenticated GET requests obtain currently ONLINE Bitget SPOT USDT/USDC markets. The immutable inventory includes illiquid and new markets even if they fail research-quality filters.
 2. History planning: up to 3,653 days of 1H fully closed bars, using at most 90 desired candles per window and the Bitget v3 history endpoint with a conservative 100-row response limit. Historical endpoints have a <=90-day request-range rule; query bounds include adjacent boundary candles, and any excess is explicitly audited.
-3. Real-data download code: fixed public endpoint only, GET only, no API keys, authenticated methods or trading calls. Limits are 100 selected markets per pilot, 100 new pages per invocation, 500 MB maximum configured storage (default 5 MB), 60-minute maximum runtime (default two minutes), and minimum 250 ms inter-request delay.
+3. Real-data download code: fixed public endpoint only, GET only, no API keys, authenticated methods or trading calls. Limits are 100 selected markets per pilot, with a frozen inventory and a market-offset selector for non-overlapping batches, 100 new pages per invocation, 500 MB maximum configured storage (default 5 MB), 60-minute maximum runtime (default two minutes), and minimum 250 ms inter-request delay.
 4. Durable restart: the first execution saves a checksummed, frozen market plan and the complete current-universe inventory. Every fetched page is immutable, separately checksummed, audited for missing/duplicated/out-of-window/invalid candles, and verified before it can be skipped on resume. Changed plan parameters fail rather than silently rewriting a previously defined history cohort.
 5. Paper research stays isolated: this branch changes neither the five-asset accelerator nor production nor the GET-only shadow trading service. No sealed 20% holdout has been read, amended or used for training.
 6. Automated offline tests: API GET allowlist; HTTP retry vs fail-closed; invalid OHLCV; boundary handling; sparse history and gaps; resume without redownload; corruption rejection; storage caps; frozen-plan/CLI validation.
@@ -15,13 +15,21 @@
 
     node scripts/research-history-pilot.mjs --output-dir=research-data/history-pilot --max-markets=2 --max-new-pages=2 --max-storage-bytes=5000000 --max-runtime-seconds=120 --lookback-days=3653 --min-delay-ms=300
 
-This performs **two public metadata GETs on the first run** and downloads **at most two pages of historical candles** (with a max of three attempts per page on network failures or HTTP 429/5xx). Repeat the same command to resume from the frozen plan; never delete or overwrite historical evidence. As of this document, **the command is not asserted to have run against live data**.
+This performs **two public metadata GETs on the first run** and downloads **at most two pages of historical candles** (with a max of three attempts per page on network failures or HTTP 429/5xx). Repeat the same command to resume from the frozen plan; never delete or overwrite historical evidence. **Verified live API pilot (29 October 2026, GitHub Actions):** public metadata returned 529 currently ONLINE qualifying SPOT USDT/USDC symbols. One BTCUSDT 1H window from 15 October 12:00 UTC to 19 October 05:00 UTC returned 90 auditable candles with zero gaps. A separate oldest-window BTCUSDT probe from 24 July 2018 18:00 UTC to 28 July 2018 11:00 UTC returned another 90 candles with zero gaps. Each response included one extra boundary candle; the auditor correctly excluded it. These two disjoint 90-bar windows are **not** continuous coverage, a 10-year completed backfill, or any backtest. The downloadable GitHub Actions evidence artifact preserves the frozen plans and page checksums.
 
-The pilot selects the first N markets ordered by *present-day* turnover for a **small test**; the saved inventory includes all currently ONLINE USDT/USDC spot markets. This is **not** proof that all markets were backfilled, all strategies were run, or full ten-year coverage exists.
+The pilot selects a bounded **offset batch** of N markets ordered by *present-day* turnover for a **small test**; the saved inventory includes all currently ONLINE USDT/USDC spot markets. To cover a frozen inventory larger than 100, run separate pilots with distinct output directories and offsets 0, 100, 200, etc., all referencing **the same immutable snapshot file** via the --inventory-file argument. The offline test proves that a synthetic 529-market snapshot partitions into six non-overlapping batches; **no 529-market backfill has happened**. This is **not** proof that all markets were backfilled, all strategies were run, or full ten-year coverage exists.
+
+## Immutable common snapshot — research batch example
+
+Extract the first pilot's market-inventory.json from its evidence artifact to a trusted local path. Example second batch, strictly capped:
+
+    node scripts/research-history-pilot.mjs --inventory-file=/path/to/market-inventory.json --market-offset=100 --max-markets=100 --output-dir=research-data/history-batch-100 --max-new-pages=2 --max-storage-bytes=5000000 --max-runtime-seconds=120 --lookback-days=3653 --min-delay-ms=300
+
+The shared inventory checksum, snapshot timestamp and batch offset are bound into the immutable plan. Re-running with a different offset, lookback or market count in the **same** output directory is refused. Batch planning is **not** proof of completed downloads or full history.
 
 ## Still outstanding — NOT DONE
 
-- Run the small live-data pilot; inspect its oldest returned candle and gap/invalid/empty-page counts. Correct API pagination behavior from real evidence before expanding.
+- The small live-data pilot **has now succeeded** on two distinct BTCUSDT 90-bar windows. Continue sampling other symbols, new listings, delistings, sparse markets, rate limits and pagination edges; verify large-scale retry/storage behavior before expanding.
 - Confirm long-term API/data-download availability and backfill costs; Bitget may not have ten years of history for any particular coin. Do **not** claim ten-year coverage until the actual timestamps support it.
 - Choose an appropriate dedicated research history store. The existing accelerator's **1 GB** Railway volume is not sufficient to assume safe all-market, ten-year history storage.
 - Scale beyond pilot batches to all current markets, evaluate historical listings/delistings and point-in-time selection to control survivorship bias, and collect historical liquidity/quotes to evaluate spreads/slippage.
