@@ -73,6 +73,18 @@ function validateReport(report,{sealed}){
       fail('HOLDOUT_RESULT_MISSING_OR_INVALID');
   }
 }
+/** Abort BEFORE opening the untouched holdout when fresh data/selection drifted. */
+export function assertHoldoutPrerequisites({candidateId,datasetSha256},{
+  expectedCandidate,expectedDatasetSha256
+}={}){
+  if(expectedCandidate!==CANDIDATE||candidateId!==CANDIDATE||
+    !HASH.test(expectedDatasetSha256??'') ||
+    !HASH.test(datasetSha256??'') ||
+    expectedDatasetSha256!==datasetSha256)
+    fail('PRE_UNSEAL_FROZEN_CANDIDATE_OR_DATASET_MISMATCH');
+  return true;
+}
+
 export function freezeSelection(validation){
   validateReport(validation,{sealed:true});
   const selected=config(validation.overall.selectedHypothesis);
