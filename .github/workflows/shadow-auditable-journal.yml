@@ -1,0 +1,36 @@
+name: AlphaBot shadow auditable journal (offline only)
+on:
+  pull_request:
+    paths:
+      - 'lib/shadow-auditable-events.mjs'
+      - 'lib/shadow-journal-reconcile.mjs'
+      - 'scripts/audit-shadow-journal.mjs'
+      - 'scripts/market-shadow-test.mjs'
+      - 'test/shadow-auditable-events.test.mjs'
+      - 'test/shadow-journal-reconcile.test.mjs'
+      - 'test/shadow-journal-cli.test.mjs'
+      - 'docs/ALPHABOT_SHADOW_V2_AUDIT_EVENTS.md'
+      - '.github/workflows/shadow-auditable-journal.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-shadow-reconciliation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Strict offline syntax validation
+        run: |
+          node --check lib/shadow-auditable-events.mjs
+          node --check lib/shadow-journal-reconcile.mjs
+          node --check scripts/market-shadow-test.mjs
+          node --check scripts/audit-shadow-journal.mjs
+      - name: Offline record/counter/legacy/crash regressions (never orders)
+        run: |
+          node --test test/shadow-auditable-events.test.mjs test/shadow-journal-reconcile.test.mjs test/shadow-journal-cli.test.mjs test/shadow-checkpoint.test.mjs test/shadow-execution-safety.test.mjs test/shadow-price-risk.test.mjs test/shadow-wide-spread-incident.test.mjs
