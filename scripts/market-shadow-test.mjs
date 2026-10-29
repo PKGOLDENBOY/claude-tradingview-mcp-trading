@@ -277,7 +277,10 @@ function collectNewListings(rows){
 async function cycle(){
   cycles++;const start=Date.now();
   const data=await publicGet("/api/v2/spot/market/tickers");
-  const tickers=new Map(data.filter(q=>q.symbol&&Number.isFinite(n(q.lastPr))&&n(q.lastPr)>0).map(q=>[q.symbol,q]));
+  // Keep quotes even when lastPr is absent/stale: open-position risk must still
+  // see the bid and can never depend on the last trade printing.
+  const tickers=new Map(data.filter(q=>typeof q?.symbol==="string" && /^[A-Z0-9]{2,24}$/.test(q.symbol))
+    .map(q=>[q.symbol,q]));
   quotes+=tickers.size;
   let listings=new Set();
   try { listings=collectNewListings(await publicGet("/api/v2/spot/public/symbols")); }
