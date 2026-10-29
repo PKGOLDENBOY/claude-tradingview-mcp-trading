@@ -1,0 +1,35 @@
+name: AlphaBot OOS preflight (NO holdout)
+on:
+  push:
+    branches:
+      - research/one-time-frozen-oos-20261029
+    paths:
+      - 'scripts/one-time-holdout-audit.mjs'
+      - 'scripts/accelerated-research.mjs'
+      - 'test/one-time-holdout-audit.test.mjs'
+      - '.github/workflows/alphabot-oos-offline-preflight.yml'
+  pull_request:
+    paths:
+      - 'scripts/one-time-holdout-audit.mjs'
+      - 'scripts/accelerated-research.mjs'
+      - 'test/one-time-holdout-audit.test.mjs'
+permissions:
+  contents: read
+jobs:
+  offline-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Syntax-check (no market/network requests)
+        run: |
+          node --check scripts/one-time-holdout-audit.mjs
+          node --check scripts/accelerated-research.mjs
+      - name: Run synthetic preregistration and accelerator regression tests
+        run: |
+          node --test test/one-time-holdout-audit.test.mjs test/accelerator-core.test.mjs test/accelerator-data.test.mjs test/accelerator-ml.test.mjs test/accelerator-runner.test.mjs

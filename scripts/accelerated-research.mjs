@@ -16,6 +16,7 @@ import { INTERVAL_MS,prepareSeries,chronologicalSplits,sealedHoldout } from '../
 import { trainMLCandidates,evaluateMLHoldout } from '../lib/accelerator-ml.mjs';
 import { loadHistoryForSymbols, CORE_SYMBOLS } from '../lib/accelerator-data.mjs';
 import { runResearch, suggestedWorkers } from '../lib/accelerator-runner.mjs';
+import { assertHoldoutPrerequisites } from './one-time-holdout-audit.mjs';
 
 function parseArgs(argv) {
   const opts={days:180,workers:suggestedWorkers(),cacheDir:'research-data/cache',
@@ -59,6 +60,17 @@ export async function researchMain(argv=process.argv.slice(2)){
   const machineLearning=trainMLCandidates(prepared,splits);
   const best=[analysis.validation.selected,machineLearning.selected].filter(Boolean)
     .sort((a,b)=>b.score-a.score||a.id.localeCompare(b.id))[0]??null;
+  // On this ISOLATED OOS review branch only, both candidate ID and original
+  // dataset digest must match the pre-registered sealed validation run.
+  // Check BEFORE computing any historical holdout result.
+  if(args.holdout){
+    assertHoldoutPrerequisites({
+      candidateId:best?.id??null,datasetSha256:downloaded.datasetSha256
+    },{
+      expectedCandidate:process.env.ALPHABOT_OOS_EXPECT_SELECTED,
+      expectedDatasetSha256:process.env.ALPHABOT_OOS_EXPECT_DATASET_SHA256
+    });
+  }
   let finalHoldout=null;
   if(args.holdout&&best){
     finalHoldout=best.family==='trained-logistic'?

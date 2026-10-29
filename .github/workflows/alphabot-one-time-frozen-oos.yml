@@ -1,0 +1,78 @@
+name: AlphaBot frozen OOS — ONE-TIME 2026-10-29
+on:
+  push:
+    branches:
+      - research/one-time-frozen-oos-20261029
+    paths:
+      - '.github/workflows/alphabot-one-time-frozen-oos.yml'
+permissions:
+  contents: read
+concurrency:
+  group: alphabot-frozen-oos-once-20261029
+  cancel-in-progress: false
+jobs:
+  one-time-no-orders-oos:
+    # A rerun, second push or manual restart CANNOT reopen the consumed holdout.
+    if: github.run_number == 1 && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PAPER_TRADING: 'true'
+      LIVE_TRADING_ENABLED: 'false'
+      RESEARCH_ONLY: 'true'
+      TZ: UTC
+    steps:
+      - name: Read-only checkout, never persist an access token
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Node 22 (no bot dependencies, no trading credentials)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Enforce unique workflow execution before any data access
+        run: |
+          test "$GITHUB_RUN_NUMBER" = 1
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$PAPER_TRADING" = true
+          test "$LIVE_TRADING_ENABLED" = false
+          test "$RESEARCH_ONLY" = true
+          mkdir -p research-data/oos
+          git rev-parse HEAD > research-data/oos/COMMIT_SHA.txt
+      - name: Offline preflight tests; NO historical holdout yet
+        run: |
+          node --check scripts/accelerated-research.mjs
+          node --check scripts/one-time-holdout-audit.mjs
+          node --test test/one-time-holdout-audit.test.mjs test/accelerator-core.test.mjs test/accelerator-data.test.mjs test/accelerator-ml.test.mjs test/accelerator-runner.test.mjs
+      - name: Validate and train with 20% OOS SEALED (PUBLIC GET ONLY)
+        run: |
+          node scripts/accelerated-research.mjs --days=180 --workers=4 --asof=2026-10-29T16:00:00.000Z --cache-dir=research-data/oos/cache --output=research-data/oos/validation.json
+      - name: Preregister EXACT validation-selected candidate and immutable dataset hash
+        run: |
+          node scripts/one-time-holdout-audit.mjs preflight research-data/oos/validation.json research-data/oos/selection.json
+      - name: Review the exact same candidate/dataset on OOS ONCE; never place orders
+        env:
+          ALPHABOT_UNSEAL_HOLDOUT: 'I_ACKNOWLEDGE_ONE_TIME_RESEARCH_REVIEW'
+        run: |
+          SELECTED="$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('research-data/oos/selection.json','utf8')).selected.id)")"
+          DATASET_SHA="$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('research-data/oos/selection.json','utf8')).datasetSha256)")"
+          export ALPHABOT_OOS_EXPECT_SELECTED="$SELECTED"
+          export ALPHABOT_OOS_EXPECT_DATASET_SHA256="$DATASET_SHA"
+          node scripts/accelerated-research.mjs --days=180 --workers=4 --asof=2026-10-29T16:00:00.000Z --cache-dir=research-data/oos/cache --output=research-data/oos/holdout.json --holdout
+      - name: Independently compare candidate, dataset, cost model, split and OOS result
+        run: |
+          node scripts/one-time-holdout-audit.mjs finalize research-data/oos/validation.json research-data/oos/selection.json research-data/oos/holdout.json research-data/oos/one-time-evaluation.json
+          sha256sum research-data/oos/*.json research-data/oos/cache/*.json > research-data/oos/SHA256SUMS.txt
+      - name: Preserve bounded immutable evidence including original public candles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alphabot-20261029-single-oos-original-public-data
+          path: |
+            research-data/oos/*.json
+            research-data/oos/cache/*.json
+            research-data/oos/history.ndjson
+            research-data/oos/SHA256SUMS.txt
+            research-data/oos/COMMIT_SHA.txt
+          if-no-files-found: warn
+          retention-days: 90
