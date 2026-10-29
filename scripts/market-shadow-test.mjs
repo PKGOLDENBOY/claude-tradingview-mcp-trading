@@ -192,6 +192,13 @@ function virtualFill(quote,side) {
   if(!Number.isFinite(quotePx)||quotePx<=0)return null;
   return side==="buy"?quotePx*(1+SLIPPAGE):quotePx*(1-SLIPPAGE);
 }
+/** Preserve executable quotes even when last trade is stale or absent. */
+export function mapTickerQuotes(data) {
+  if(!Array.isArray(data))throw new TypeError("INVALID_SHADOW_TICKERS");
+  return new Map(data.filter(q=>typeof q?.symbol==="string" && /^[A-Z0-9]{2,24}$/.test(q.symbol))
+    .map(q=>[q.symbol,q]));
+}
+
 export function positionPnl(pos,quote) {
   const exit=virtualFill(quote,"sell");
   if(!exit)return null;
@@ -279,8 +286,7 @@ async function cycle(){
   const data=await publicGet("/api/v2/spot/market/tickers");
   // Keep quotes even when lastPr is absent/stale: open-position risk must still
   // see the bid and can never depend on the last trade printing.
-  const tickers=new Map(data.filter(q=>typeof q?.symbol==="string" && /^[A-Z0-9]{2,24}$/.test(q.symbol))
-    .map(q=>[q.symbol,q]));
+  const tickers=mapTickerQuotes(data);
   quotes+=tickers.size;
   let listings=new Set();
   try { listings=collectNewListings(await publicGet("/api/v2/spot/public/symbols")); }
