@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { entrySafety, exitThresholdReason, spreadBps, STOP_REENTRY_COOLDOWN_MS } from "../lib/shadow-execution-safety.mjs";
+import { mapTickerQuotes, positionPnl } from "../scripts/market-shadow-test.mjs";
 
 // Regression: a newly listed, illiquid market can print an apparently stable
 // last trade while its executable bid is catastrophically lower.
@@ -30,4 +31,14 @@ test("executable net loss triggers stop even when last price does not", () => {
   const entryCost = 100.1;
   const executableNetPnl = -48.3836;
   assert.equal(exitThresholdReason(executableNetPnl, entryCost, { stop: 0.03, tp: 0.06 }), "STOP");
+});
+
+test("live quote mapping preserves executable bid when last trade is unavailable", () => {
+  const feed = [{ symbol: "RMSGKUSDT", bidPr: "85.8", askPr: "100" }];
+  const quote = mapTickerQuotes(feed).get("RMSGKUSDT");
+  assert.ok(quote);
+  const position = {quantity:1, entryPrice:100, totalCost:100.1, opened:Date.now()};
+  assert.equal(exitThresholdReason(positionPnl(position,quote),position.totalCost,
+    {stop:0.03,tp:0.06}), "STOP");
+  assert.equal(mapTickerQuotes([{symbol:"NOT/A/PAIR",bidPr:"1"}]).size, 0);
 });
