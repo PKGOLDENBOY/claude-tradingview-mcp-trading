@@ -242,13 +242,16 @@ function immutableWrite(path,body) {
  * saved page before skipping it; no overwrite, no silent state reset.
  */
 export async function backfillHistoricalPages({
-  plan,outputDir,maxNewPages=2,maxStorageBytes=5_000_000,
+  plan,outputDir,maxNewPages=2,maxNewPagesPerMarket=null,
+  maxStorageBytes=5_000_000,
   maxRuntimeMs=120_000,minDelayMs=300,fetchFn=globalThis.fetch,
   sleepFn=sleep,nowFn=Date.now
 }={}) {
   verifyHistoricalPlan(plan);
   if (typeof outputDir!=='string' || !outputDir.trim() ||
       !integer(maxNewPages) || maxNewPages<1 || maxNewPages>100 ||
+      maxNewPagesPerMarket!==null && (!integer(maxNewPagesPerMarket) ||
+        maxNewPagesPerMarket<1 || maxNewPagesPerMarket>100) ||
       !integer(maxStorageBytes) || maxStorageBytes<50_000 || maxStorageBytes>500_000_000 ||
       !integer(maxRuntimeMs) || maxRuntimeMs<1_000 || maxRuntimeMs>3_600_000 ||
       !integer(minDelayMs) || minDelayMs<0 || minDelayMs>60_000)
@@ -271,14 +274,21 @@ export async function backfillHistoricalPages({
   const started=nowFn();
   const result={event:'HISTORY_BACKFILL_PILOT',planSha256:plan.planSha256,
     marketCount:plan.markets.length,downloadedPages:0,resumedPages:0,
+    downloadedMarkets:0,perMarketCapReached:0,
+    maxNewPagesPerMarket,
     storedCandleRows:0,missingCandleSlots:0,emptyPages:0,
     bytesWritten:0,storedBytes,safety:'GET_ONLY_PAPER_RESEARCH',complete:false,
     stoppedBecause:null};
   outer:for (const market of plan.markets) {
+    let downloadedThisMarket=0;
     const windows=planHistoryWindows({symbol:market.symbol,
       firstAvailableMs:market.firstAvailableMs,nowMs:plan.anchorNowMs,
       maxCandlesPerRequest:plan.candlesPerPage,yearsDays:plan.lookbackDays});
     for(const window of windows) {
+      if(maxNewPagesPerMarket!==null && downloadedThisMarket>=maxNewPagesPerMarket) {
+        result.perMarketCapReached++;
+        break;
+      }
       if(nowFn()-started >= maxRuntimeMs) {result.stoppedBecause='RUNTIME_BUDGET';break outer;}
       const path=historyPagePath(root,window);
       if(existsSync(path)) {
@@ -297,11 +307,15 @@ export async function backfillHistoricalPages({
       if (storedBytes+textBytes > maxStorageBytes) throw new Error('BACKFILL_STORAGE_BUDGET_REACHED');
       immutableWrite(path,record);
       storedBytes+=textBytes;result.bytesWritten+=textBytes;result.downloadedPages++;
+      downloadedThisMarket++;
       result.storedCandleRows+=record.rows.length;
       result.missingCandleSlots+=record.audit.missing;
       if(record.rows.length===0)result.emptyPages++;
     }
+    if(downloadedThisMarket>0)result.downloadedMarkets++;
   }
+  if(result.stoppedBecause===null && result.perMarketCapReached>0)
+    result.stoppedBecause='PER_MARKET_PAGE_BUDGET';
   result.complete=result.stoppedBecause===null;
   result.storedBytes=storedBytes;
   return result;
