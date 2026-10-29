@@ -4,7 +4,29 @@
   "status": "INCOMPLETE",
   "profitabilityDemonstrated": false,
   "fixes": [],
-  "strategyEvaluations": [],
+  "strategyEvaluations": [
+    {
+      "strategy": "scalp",
+      "evaluated": true,
+      "reportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/blob/research/shadow-strategy-evaluation-20261029/reports/alphabot-shadow-strategy-evaluation-20261029.md",
+      "afterCosts": true,
+      "finding": "21 closed shadow signal-proxy positions; simulated cost-adjusted realized P&L -7.6831 USD; observed losing sample, not independently reconciled."
+    },
+    {
+      "strategy": "momentum",
+      "evaluated": true,
+      "reportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/blob/research/shadow-strategy-evaluation-20261029/reports/alphabot-shadow-strategy-evaluation-20261029.md",
+      "afterCosts": true,
+      "finding": "21 closed shadow signal-proxy positions; simulated cost-adjusted realized P&L -75.3685 USD; observed losing sample, not independently reconciled."
+    },
+    {
+      "strategy": "swing",
+      "evaluated": true,
+      "reportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/blob/research/shadow-strategy-evaluation-20261029/reports/alphabot-shadow-strategy-evaluation-20261029.md",
+      "afterCosts": true,
+      "finding": "Two shadow signal-proxy swing positions remain open; mark-to-market -3.0940 USD; zero completed exits so realized performance remains unknown."
+    }
+  ],
   "research": {
     "chronologicalFolds": true,
     "trainingOnlyFeatures": true,
@@ -65,6 +87,7 @@
     "Historical backtest exits cannot substitute for forward paper fills.",
     "No conclusive independently reviewed no-validated-edge decision for expanded strategy search.",
     "No independently verified account-level equity curve, max portfolio drawdown or risk breach audit.",
-    "Environment flag values were not readable through the current OAuth connector."
+    "Environment flag values were not readable through the current OAuth connector.",
+    "Shadow scalp/momentum/swing observations are evaluated but use only simulated signal proxies; swing has no realized exits; PR #21 holds separately frozen evidence."
   ]
 }
