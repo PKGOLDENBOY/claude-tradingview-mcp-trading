@@ -74,13 +74,30 @@ test('partial exits count once only after full close',()=>{
   assert.equal(unclosed.completedIndependentRoundTrips,1);
   assert.deepEqual(unclosed.incompleteOpenPositionIds,['P0']);
 });
-test('duplicate fill IDs cannot inflate count and fail the audit',()=>{
+test('duplicate fill IDs invalidate BOTH positions and fail the audit',()=>{
   const ledger=paperLedger();
   ledger.positions[1].fills[0].fillId=ledger.positions[0].fills[0].fillId;
   const audit=auditForwardPaperRoundTrips(ledger);
+  assert.equal(audit.completedIndependentRoundTrips,98);
+  assert.equal(audit.auditReadyForHumanReview,false);
+  assert.ok(audit.excludedPositionIds.some(x=>x.positionId==='P0'));
+  assert.ok(audit.excludedPositionIds.some(x=>x.positionId==='P1'));
+});
+test('duplicate position IDs invalidate BOTH positions rather than the first one winning',()=>{
+  const ledger=paperLedger();
+  ledger.positions[1].positionId=ledger.positions[0].positionId;
+  const audit=auditForwardPaperRoundTrips(ledger);
+  assert.equal(audit.completedIndependentRoundTrips,98);
+  assert.equal(audit.auditReadyForHumanReview,false);
+  assert.equal(audit.excludedPositionIds.filter(x=>x.positionId==='P0').length,2);
+});
+test('sub-cent reported PnL disagreement is rejected on small positions',()=>{
+  const ledger=paperLedger();
+  ledger.positions[0].reportedNetPnlUsd+=0.005;
+  const audit=auditForwardPaperRoundTrips(ledger);
   assert.equal(audit.completedIndependentRoundTrips,99);
   assert.equal(audit.auditReadyForHumanReview,false);
-  assert.ok(audit.excludedPositionIds.some(x=>x.positionId==='P1'));
+  assert.ok(audit.excludedPositionIds.some(x=>x.reason==='ACCOUNTING_DISAGREEMENT'));
 });
 test('reported P&L disagreement, missing fees, or sell before buy are invalid',()=>{
   const ledger=paperLedger();
