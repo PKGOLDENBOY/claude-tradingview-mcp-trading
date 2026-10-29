@@ -307,12 +307,12 @@ export async function backfillHistoricalPages({
       if (storedBytes+textBytes > maxStorageBytes) throw new Error('BACKFILL_STORAGE_BUDGET_REACHED');
       immutableWrite(path,record);
       storedBytes+=textBytes;result.bytesWritten+=textBytes;result.downloadedPages++;
+      if(downloadedThisMarket===0)result.downloadedMarkets++;
       downloadedThisMarket++;
       result.storedCandleRows+=record.rows.length;
       result.missingCandleSlots+=record.audit.missing;
       if(record.rows.length===0)result.emptyPages++;
     }
-    if(downloadedThisMarket>0)result.downloadedMarkets++;
   }
   if(result.stoppedBecause===null && result.perMarketCapReached>0)
     result.stoppedBecause='PER_MARKET_PAGE_BUDGET';
