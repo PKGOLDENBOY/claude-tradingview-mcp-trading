@@ -285,12 +285,11 @@ export async function backfillHistoricalPages({
       firstAvailableMs:market.firstAvailableMs,nowMs:plan.anchorNowMs,
       maxCandlesPerRequest:plan.candlesPerPage,yearsDays:plan.lookbackDays});
     for(const window of windows) {
-      if(maxNewPagesPerMarket!==null && downloadedThisMarket>=maxNewPagesPerMarket) {
-        result.perMarketCapReached++;
-        break;
-      }
       if(nowFn()-started >= maxRuntimeMs) {result.stoppedBecause='RUNTIME_BUDGET';break outer;}
       const path=historyPagePath(root,window);
+      // Resume MUST validate previously stored pages before enforcing the
+      // per-run NEW-page cap. Otherwise a cap of one skips validation of
+      // cached pages after the first new page and hides later corruption.
       if(existsSync(path)) {
         const record=loadHistoryRecord(path,plan,window);
         result.resumedPages++;
@@ -298,6 +297,10 @@ export async function backfillHistoricalPages({
         result.missingCandleSlots+=record.audit.missing;
         if(record.rows.length===0)result.emptyPages++;
         continue;
+      }
+      if(maxNewPagesPerMarket!==null && downloadedThisMarket>=maxNewPagesPerMarket) {
+        result.perMarketCapReached++;
+        break;
       }
       if(result.downloadedPages>=maxNewPages){result.stoppedBecause='PAGE_BUDGET';break outer;}
       const response=await fetchHistoricalPage(window,{fetchFn,sleepFn,
