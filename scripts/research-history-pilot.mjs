@@ -20,13 +20,15 @@ const pause=ms=>new Promise(done=>setTimeout(done,ms));
 
 export function parsePilotArgs(argv) {
   const params={
-    maxMarkets:2,marketOffset:0,maxNewPages:2,maxStorageBytes:5_000_000,
+    maxMarkets:2,marketOffset:0,maxNewPages:2,
+    maxNewPagesPerMarket:0,maxStorageBytes:5_000_000,
     maxRuntimeSeconds:120,lookbackDays:3653,
     minDelayMs:300,outputDir:'research-data/history-pilot',inventoryFile:null
   };
   const mapping={
     'max-markets':'maxMarkets','market-offset':'marketOffset',
     'max-new-pages':'maxNewPages',
+    'max-new-pages-per-market':'maxNewPagesPerMarket',
     'max-storage-bytes':'maxStorageBytes',
     'max-runtime-seconds':'maxRuntimeSeconds',
     'lookback-days':'lookbackDays','min-delay-ms':'minDelayMs',
@@ -41,6 +43,8 @@ export function parsePilotArgs(argv) {
   if(!Number.isInteger(params.maxMarkets) || params.maxMarkets<1 || params.maxMarkets>100 ||
      !Number.isInteger(params.marketOffset) || params.marketOffset<0 || params.marketOffset>20_000 ||
      !Number.isInteger(params.maxNewPages) || params.maxNewPages<1 || params.maxNewPages>100 ||
+     !Number.isInteger(params.maxNewPagesPerMarket) ||
+     params.maxNewPagesPerMarket<0 || params.maxNewPagesPerMarket>100 ||
      !Number.isInteger(params.maxStorageBytes) || params.maxStorageBytes<50_000 || params.maxStorageBytes>500_000_000 ||
      !Number.isInteger(params.maxRuntimeSeconds) || params.maxRuntimeSeconds<1 || params.maxRuntimeSeconds>3600 ||
      !Number.isInteger(params.lookbackDays) || params.lookbackDays<1 || params.lookbackDays>3653 ||
@@ -101,6 +105,7 @@ export async function historyPilotMain(
   }
   const result=await backfillHistoricalPages({
     plan,outputDir:dir,maxNewPages:p.maxNewPages,
+    maxNewPagesPerMarket:p.maxNewPagesPerMarket || null,
     maxStorageBytes:p.maxStorageBytes,maxRuntimeMs:p.maxRuntimeSeconds*1000,
     minDelayMs:p.minDelayMs,fetchFn,sleepFn
   });
