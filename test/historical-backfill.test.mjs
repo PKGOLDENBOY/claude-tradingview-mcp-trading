@@ -179,12 +179,12 @@ test('bounded CLI discovers once, writes inventory, then resumes without metadat
     if(u.pathname==='/api/v3/market/instruments')return {ok:true,status:200,json:async()=>({
       code:'00000',data:[{category:'SPOT',symbol:'BTCUSDT',
         baseCoin:'BTC',quoteCoin:'USDT',status:'online',
-        launchTime:String(NOW-5*H),symbolType:'crypto'}]})};
+        launchTime:String(NOW-200*H),symbolType:'crypto'}]})};
     if(u.pathname==='/api/v3/market/tickers')return {ok:true,status:200,json:async()=>({
       code:'00000',data:[{symbol:'BTCUSDT',turnover24h:'10000000',bid1Price:'100',ask1Price:'100.01'}]})};
     return goodMock()(url,opts);
   };
-  const args=['--output-dir='+dir,'--max-markets=1','--lookback-days=1',
+  const args=['--output-dir='+dir,'--max-markets=1','--lookback-days=10',
     '--max-new-pages=1','--min-delay-ms=250'];
   const reports=[];
   const one=await historyPilotMain(args,{fetchFn,nowMs:NOW,sleepFn:async()=>{},log:r=>reports.push(r)});
