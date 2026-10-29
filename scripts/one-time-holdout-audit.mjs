@@ -25,6 +25,18 @@ const config=selected=>({
   id:selected.id,family:selected.family,params:selected.params,
   stop:selected.stop,take:selected.take,score:selected.score,
 });
+const immutableSource=report=>({
+  exchange:report.source.exchange,
+  market:report.source.market,
+  interval:report.source.interval,
+  asof:report.source.asof,
+  lookbackDays:report.source.lookbackDays,
+  datasetSha256:report.source.datasetSha256,
+  // Cache hits and public-GET request counts intentionally vary between runs.
+  assetDigests:(report.source.assets||[]).map(a=>({
+    symbol:a.symbol,datasetSha256:a.datasetSha256
+  })).sort((a,b)=>a.symbol.localeCompare(b.symbol))
+});
 const fail=reason=>{throw new Error('FROZEN_OOS_REVIEW_REFUSED_'+reason);};
 function validateReport(report,{sealed}){
   if(!isObject(report)||!isObject(report.overall)||!isObject(report.source)||
@@ -70,7 +82,7 @@ export function freezeSelection(validation){
     datasetSha256:validation.source.datasetSha256,
     foldBoundaries:validation.validation.foldBoundaries,
     assumptionsSha256:sha(validation.assumptions),
-    sourceSnapshotSha256:sha(validation.source),
+    sourceSnapshotSha256:sha(immutableSource(validation)),
     selectionReproducibilitySha256:sha(validation.overall.selectedHypothesis),
     finalHoldoutStillSealed:true,
     mode:'PUBLIC_MARKET_OFFLINE_PAPER_RESEARCH_ONLY',
@@ -84,7 +96,7 @@ export function reviewHoldout(validation,selection,holdout){
   const expected=freezeSelection(validation);
   if(JSON.stringify(selection)!==JSON.stringify(expected) ||
     holdout.source.datasetSha256!==selection.datasetSha256 ||
-    sha(holdout.source)!==selection.sourceSnapshotSha256 ||
+    sha(immutableSource(holdout))!==selection.sourceSnapshotSha256 ||
     sha(config(holdout.overall.selectedHypothesis))!==selection.selectedConfigSha256 ||
     sha(holdout.overall.selectedHypothesis)!==selection.selectionReproducibilitySha256 ||
     sha(holdout.assumptions)!==selection.assumptionsSha256 ||
