@@ -153,6 +153,27 @@ test('corrupt or edited resume page fails closed without re-download',()=>withDi
   assert.equal(calls.length,1);
 }));
 
+
+test('per-market quota never skips validation of a later cached page after downloading one new page',()=>withDir(async dir=>{
+  const p=plan(),calls=[];
+  const opts={plan:p,outputDir:dir,maxNewPages:1,maxNewPagesPerMarket:1,
+    maxStorageBytes:1_000_000,minDelayMs:0,sleepFn:async()=>{},
+    fetchFn:goodMock(calls)};
+  // First run persists the first legitimate synthetic window only.
+  const one=await backfillHistoricalPages(opts);
+  assert.equal(one.downloadedPages,1);
+  assert.equal(calls.length,1);
+  // An out-of-order cached page is corrupt and MUST be noticed, even if
+  // the new page budget and per-market cap will be exhausted by window 2.
+  const last=historyPagePath(dir,windows()[2]);
+  writeFileSync(last,'{"not":"a checksummed history page"}');
+  await assert.rejects(backfillHistoricalPages(opts),
+    /HISTORY_PAGE_(INVALID|CORRUPT|CHECKSUM_MISMATCH)/);
+  assert.equal(calls.length,2);
+  // No existing history page, including the corrupt one, was overwritten.
+  assert.equal(readFileSync(last,'utf8'),'{"not":"a checksummed history page"}');
+}));
+
 test('storage cap prevents a new page from being written',()=>withDir(async dir=>{
   writeFileSync(join(dir,'preexisting.bin'),'z'.repeat(49_500));
   const p=plan(),w=windows()[0];
