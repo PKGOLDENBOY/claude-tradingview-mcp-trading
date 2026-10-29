@@ -26,31 +26,36 @@ const safeSymbol = symbol => typeof symbol === 'string' && VALID_SYMBOL.test(sym
 /** A frozen, checksummed research plan; current ONLINE symbols are not a historic universe. */
 export function createHistoricalPlan(universe, {
   nowMs = Date.now(), lookbackDays = TEN_YEARS_DAYS,
-  maxMarkets = 2, candlesPerPage = 90
+  maxMarkets = 2, marketOffset = 0, candlesPerPage = 90
 } = {}) {
   if (universe?.exchange !== 'Bitget' || universe.market !== 'SPOT' ||
       !Array.isArray(universe.markets) || !/^[a-f0-9]{64}$/.test(universe.inventorySha256 ?? '') ||
       !integer(nowMs) || nowMs <= HOUR_MS ||
       !integer(lookbackDays) || lookbackDays < 1 || lookbackDays > TEN_YEARS_DAYS ||
       !integer(maxMarkets) || maxMarkets < 1 || maxMarkets > 100 ||
+      !integer(marketOffset) || marketOffset < 0 || marketOffset > 20_000 ||
       !integer(candlesPerPage) || candlesPerPage < 1 || candlesPerPage > 90) {
     throw new Error('INVALID_HISTORY_PLAN_INPUT');
   }
-  const markets = universe.markets.slice(0, maxMarkets).map(m => {
+  if (hash(universe.markets) !== universe.inventorySha256)
+    throw new Error('HISTORY_UNIVERSE_INVENTORY_CHECKSUM_MISMATCH');
+  const markets = universe.markets.slice(marketOffset, marketOffset + maxMarkets).map(m => {
     if (!safeSymbol(m?.symbol)) throw new Error('INVALID_HISTORY_MARKET_SYMBOL');
     const listedMs = integer(m.firstListedMs) && m.firstListedMs > 0 && m.firstListedMs <= nowMs
       ? m.firstListedMs : null;
     return {symbol:m.symbol, listedMs, firstAvailableMs:listedMs ?? nowMs-lookbackDays*DAY_MS,
       researchEligible: m.researchEligible === true};
   });
+  if (markets.length===0) throw new Error('HISTORY_MARKET_OFFSET_OUT_OF_RANGE');
   if (new Set(markets.map(m=>m.symbol)).size !== markets.length) throw new Error('DUPLICATE_HISTORY_SYMBOL');
   const plan = {
     schemaVersion:1, exchange:'Bitget', market:'SPOT',
     asof:universe.asof, anchorNowMs:nowMs, lookbackDays, candlesPerPage,
     universeSha256:universe.inventorySha256,
     inventoryMarketCount:universe.marketCount, requestedMaxMarkets:maxMarkets,
+    marketOffset,
     selectedMarketCount:markets.length,
-    selection:'CURRENT_ONLINE_SPOT_USDT_USDC_TOP_N_BY_TURNOVER;NOT_POINT_IN_TIME',
+    selection:'CURRENT_ONLINE_SPOT_USDT_USDC_OFFSET_BATCH_BY_TURNOVER;NOT_POINT_IN_TIME',
     historicalCompleteness:'UNKNOWN_UNTIL_DOWNLOADED_AND_AUDITED',
     markets
   };
@@ -63,6 +68,9 @@ export function verifyHistoricalPlan(plan) {
       !integer(plan.lookbackDays) || plan.lookbackDays < 1 || plan.lookbackDays > TEN_YEARS_DAYS ||
       !integer(plan.candlesPerPage) || plan.candlesPerPage < 1 || plan.candlesPerPage > 90 ||
       !Array.isArray(plan.markets) || plan.markets.length < 1 || plan.markets.length > 100 ||
+      !Number.isSafeInteger(plan.marketOffset) || plan.marketOffset<0 || plan.marketOffset>20_000 ||
+      !Number.isSafeInteger(plan.inventoryMarketCount) ||
+      plan.inventoryMarketCount<plan.marketOffset+plan.markets.length ||
       !Number.isSafeInteger(plan.requestedMaxMarkets) || plan.requestedMaxMarkets<1 ||
       plan.requestedMaxMarkets>100 || !Number.isSafeInteger(plan.selectedMarketCount) ||
       plan.selectedMarketCount>plan.requestedMaxMarkets ||
