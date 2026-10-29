@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {freezeSelection,reviewHoldout} from '../scripts/one-time-holdout-audit.mjs';
+import {freezeSelection,reviewHoldout,assertHoldoutPrerequisites} from '../scripts/one-time-holdout-audit.mjs';
 
 // Entirely SYNTHETIC fixture. These numbers are NOT Bitget market evidence.
 // The actual one-time real-market workflow is separately gated and never
@@ -101,4 +101,14 @@ test('two runs can differ in downloaded-versus-cached statistics, never in raw c
   assert.equal(ok.datasetSha256,digest);
   cached.source.assets[0].datasetSha256='c'.repeat(64);
   assert.throws(()=>reviewHoldout(a,frozen,cached),/CHANGED_DATA_OR_SELECTED_MODEL/);
+});
+
+test('unseal guard refuses unregistered candidate, missing digest, or changed dataset BEFORE OOS',()=>{
+  const input={candidateId:'reversion-0192',datasetSha256:digest};
+  const expected={expectedCandidate:'reversion-0192',expectedDatasetSha256:digest};
+  assert.equal(assertHoldoutPrerequisites(input,expected),true);
+  assert.throws(()=>assertHoldoutPrerequisites(input,{...expected,expectedDatasetSha256:'b'.repeat(64)}),/PRE_UNSEAL/);
+  assert.throws(()=>assertHoldoutPrerequisites({...input,candidateId:'trend-0001'},expected),/PRE_UNSEAL/);
+  assert.throws(()=>assertHoldoutPrerequisites(input,{...expected,expectedCandidate:'arbitrary'}),/PRE_UNSEAL/);
+  assert.throws(()=>assertHoldoutPrerequisites(input,{}),/PRE_UNSEAL/);
 });
