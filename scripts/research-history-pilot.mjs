@@ -107,6 +107,7 @@ export async function historyPilotMain(
   const report={...result,discoveredNewInventory:discovered,
     inventoryMarketCount:plan.inventoryMarketCount,
     chosenMarketCount:plan.selectedMarketCount,marketOffset:plan.marketOffset,
+    selectedSymbolsSample:plan.markets.slice(0,5).map(m=>m.symbol),
     freezeAsOf:plan.asof,
     caveat:'NO_WIDE_MARKET_BACKTEST_YET;NO_HISTORIC_DELISTED_UNIVERSE;NO_LIVE_TRADES'};
   log(JSON.stringify(report));
