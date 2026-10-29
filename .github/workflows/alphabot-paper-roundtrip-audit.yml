@@ -1,0 +1,26 @@
+name: AlphaBot independent forward-paper auditor tests
+on:
+  pull_request:
+    paths:
+      - 'lib/paper-roundtrip-audit.mjs'
+      - 'test/paper-roundtrip-audit.test.mjs'
+      - 'docs/ALPHABOT_FORWARD_PAPER_RECONCILIATION.md'
+      - '.github/workflows/alphabot-paper-roundtrip-audit.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-reconciliation-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Syntax
+        run: node --check lib/paper-roundtrip-audit.mjs
+      - name: No-network paper accounting tests
+        run: node --test test/paper-roundtrip-audit.test.mjs test/paper-ledger-evidence.test.mjs
