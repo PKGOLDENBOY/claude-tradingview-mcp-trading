@@ -1,44 +1,44 @@
-# AlphaBot 10-year and broad-altcoin research: Phase 1 (NOT DEPLOYED)
+# AlphaBot public spot history expansion — development status (NOT DEPLOYED)
 
-**Current status:** Research branch only. Metadata discovery, history-page planning, and offline tests. No historical backfill, expanded training, or Railway deployment has occurred.
+**29 October 2026:** This branch contains executable, resumable **public-GET-only** historical candle backfill code and deterministic offline tests. It is a **small bounded research pilot**, not ten years of data already collected and **not** full-universe training. There has been no Railway rollout or expanded backtest. No live orders are authorized.
 
-## What was implemented
+## Implemented in the research branch
 
-- research/market-discovery.js: public unauthenticated GET-only Bitget instruments and tickers discovery. Inventories all currently ONLINE SPOT USDT/USDC crypto pairs, preserving illiquid and newly listed symbols separately from the quality-screened research set.
-- research/market-universe-history.js: plan requests for up to 3,653 days of completed hourly candles, bounded to 90 bars/page to remain under Bitget's 100-history-candle limit. This plans requests; it does NOT fetch the planned history.
-- Historical-data auditing: detect missing, duplicate, invalid and out-of-window hourly timestamps without interpolation.
-- scripts/research-market-discovery.mjs: executable PUBLIC-GET-ONLY market metadata inventory pilot. Estimates historical GET page counts for up to the selected number of eligible markets, but never downloads historical candles. Creates immutable (no overwrite) JSON snapshots.
-- test/market-universe-history.test.mjs: deterministic synthetic tests; no exchange credentials, orders, authenticated requests, or production imports.
+1. Discovery: two unauthenticated GET requests obtain currently ONLINE Bitget SPOT USDT/USDC markets. The immutable inventory includes illiquid and new markets even if they fail research-quality filters.
+2. History planning: up to 3,653 days of 1H fully closed bars, using at most 90 desired candles per window and the Bitget v3 history endpoint with a conservative 100-row response limit. Historical endpoints have a <=90-day request-range rule; query bounds include adjacent boundary candles, and any excess is explicitly audited.
+3. Real-data download code: fixed public endpoint only, GET only, no API keys, authenticated methods or trading calls. Limits are 100 selected markets per pilot, 100 new pages per invocation, 500 MB maximum configured storage (default 5 MB), 60-minute maximum runtime (default two minutes), and minimum 250 ms inter-request delay.
+4. Durable restart: the first execution saves a checksummed, frozen market plan and the complete current-universe inventory. Every fetched page is immutable, separately checksummed, audited for missing/duplicated/out-of-window/invalid candles, and verified before it can be skipped on resume. Changed plan parameters fail rather than silently rewriting a previously defined history cohort.
+5. Paper research stays isolated: this branch changes neither the five-asset accelerator nor production nor the GET-only shadow trading service. No sealed 20% holdout has been read, amended or used for training.
+6. Automated offline tests: API GET allowlist; HTTP retry vs fail-closed; invalid OHLCV; boundary handling; sparse history and gaps; resume without redownload; corruption rejection; storage caps; frozen-plan/CLI validation.
 
-## Explicit limitations
+## Run a tiny real market-data pilot on a separate machine
 
-- Metadata provides CURRENT online symbols, not a complete history of delisted coins, other exchanges or 2016 market membership. Historical backtesting must avoid survivorship bias and today's liquidity rankings masquerading as past liquidity.
-- Some coins are younger than ten years, and Bitget may not provide the full requested history. Check launch dates, source limitations and actual oldest available bar for each market.
-- One 10-year continuously listed market contains roughly 87,672 hourly slots (3,653 days); that needs at least 975 requests at 90 bars/page. Hundreds of coins imply hundreds of thousands of calls, before retries.
-- Today's 24-hour ticker turnover and spread are ONLY current research-quality screens, not past executable liquidity.
-- Existing accelerator runs five markets over 180 days, with a separate 1GB Railway volume; no unvalidated modifications to that process.
-- The original 20% holdout remains SEALED. A widened dataset needs a separate, precommitted chronological evaluation scheme and independent holdout.
+    node scripts/research-history-pilot.mjs --output-dir=research-data/history-pilot --max-markets=2 --max-new-pages=2 --max-storage-bytes=5000000 --max-runtime-seconds=120 --lookback-days=3653 --min-delay-ms=300
 
-## Development still required (NOT STARTED/NOT DONE)
+This performs **two public metadata GETs on the first run** and downloads **at most two pages of historical candles** (with a max of three attempts per page on network failures or HTTP 429/5xx). Repeat the same command to resume from the frozen plan; never delete or overwrite historical evidence. As of this document, **the command is not asserted to have run against live data**.
 
-1. Resumable historical candle backfill with public GET-only endpoints, strict 90-day request-range and max-100-history-candle controls, bounded request/disk budgets, rate limit/retry, checksummed pages and metadata.
-2. Small real-data pilot verifying oldest available candles, gaps and estimated storage/API cost.
-3. Storage migration or separate history store; assess Railway 1GB capacity before attempting broad backfills.
-4. Historic delisting/point-in-time universe and liquidity datasets to reduce survivorship bias.
-5. Offline evaluation across uneven listings, fee/slippage stress, regimes, chronological folds and a newly sealed expanded-data holdout.
-6. Independent validation, code review and CI before ANY separate research deployment.
+The pilot selects the first N markets ordered by *present-day* turnover for a **small test**; the saved inventory includes all currently ONLINE USDT/USDC spot markets. This is **not** proof that all markets were backfilled, all strategies were run, or full ten-year coverage exists.
 
-## Run the inventory pilot (only when you want public metadata from Bitget)
+## Still outstanding — NOT DONE
 
-    node scripts/research-market-discovery.mjs --max-plan-markets=100
+- Run the small live-data pilot; inspect its oldest returned candle and gap/invalid/empty-page counts. Correct API pagination behavior from real evidence before expanding.
+- Confirm long-term API/data-download availability and backfill costs; Bitget may not have ten years of history for any particular coin. Do **not** claim ten-year coverage until the actual timestamps support it.
+- Choose an appropriate dedicated research history store. The existing accelerator's **1 GB** Railway volume is not sufficient to assume safe all-market, ten-year history storage.
+- Scale beyond pilot batches to all current markets, evaluate historical listings/delistings and point-in-time selection to control survivorship bias, and collect historical liquidity/quotes to evaluate spreads/slippage.
+- Implement offline strategy-research input integration, training with unchanged fees and fair chronological folds, sealed new holdout for the expanded dataset, and independent forward PAPER validation.
+- Verify the separate shadow-risk fixes (draft PR #16) in isolation before any merge or deployment; independently confirm there is no path for authenticated exchange writes.
+- Obtain passing CI, review changes, then explicitly decide whether to deploy a **separate** research-only service. Never silently merge changes into production or enable live trading.
 
-This makes exactly two public metadata GET requests and writes a new snapshot under research-data/market-universe/. No historical candles, trading, or Railway deployments. The output folder is on the machine running the command.
+## Safety and accuracy
 
-## Run the offline unit tests
+- **PAPER-only and public GET-only.** No real orders, account access, private endpoints, or exchange API credentials.
+- An exhausted selected-window plan means only those window requests are stored, **not** that every candle exists. Empty pages and gaps remain visible; they are never interpolated into fake data.
+- The inventory reflects symbols online today, **not delisted symbols or complete historical market membership**. Today's turnover is not historical tradable liquidity.
+- The 20% holdout of the original accelerator remains sealed; any expanded training must define a separate predetermined chronology and untouched holdout before fitting.
+- All-market coverage, completed 10-year downloads, profit and real-money readiness **remain unverified**.
 
-    node --test test/market-universe-history.test.mjs
+## Offline test command
 
-Official public API reference: https://www.bitget.com/docs/catalog/market/market-data
-History downloads: https://www.bitget.com/data-download
+    node --test test/market-universe-history.test.mjs test/historical-backfill.test.mjs
 
-**Safety:** PAPER-only, GET-only research metadata. No production code, shadow code, trading flags or exchange-write permissions have been changed.
+Official API documentation: https://www.bitget.com/docs/catalog/market/market-data
