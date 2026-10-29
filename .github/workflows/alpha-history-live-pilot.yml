@@ -1,0 +1,54 @@
+name: AlphaBot one-page public history pilot (no trades)
+
+on:
+  push:
+    branches:
+      - research/ten-year-market-universe-20261027
+    paths:
+      - '.github/workflows/alpha-history-live-pilot.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alphabot-live-history-pilot
+  cancel-in-progress: false
+
+jobs:
+  public-get-only-pilot:
+    name: One BTC/USDT pilot page, no exchange credentials
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CI: 'true'
+    steps:
+      - name: Checkout research branch, no secrets
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run offline safety tests FIRST
+        run: |
+          node --test test/market-universe-history.test.mjs test/historical-backfill.test.mjs
+      - name: Public GET pilot — max one symbol and one candle page
+        run: |
+          node scripts/research-history-pilot.mjs \
+            --output-dir=research-data/history-pilot \
+            --max-markets=1 \
+            --max-new-pages=1 \
+            --max-storage-bytes=1000000 \
+            --max-runtime-seconds=90 \
+            --lookback-days=14 \
+            --min-delay-ms=500
+      - name: Preserve research evidence even on API failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alphabot-public-history-pilot-evidence
+          path: research-data/history-pilot/
+          retention-days: 7
+          if-no-files-found: warn
