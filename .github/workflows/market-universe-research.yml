@@ -59,11 +59,21 @@ jobs:
             --max-runtime-seconds=90 \
             --lookback-days=14 \
             --min-delay-ms=500
+      - name: Probe oldest planned BTC historical window (not an availability guarantee)
+        run: |
+          node scripts/research-history-pilot.mjs \
+            --output-dir=research-data/history-age-probe \
+            --max-markets=1 \
+            --max-new-pages=1 \
+            --max-storage-bytes=1000000 \
+            --max-runtime-seconds=90 \
+            --lookback-days=3653 \
+            --min-delay-ms=500
       - name: Save immutable pilot evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: public-get-only-history-pilot
-          path: research-data/history-pilot/
+          path: research-data/
           retention-days: 7
           if-no-files-found: warn
