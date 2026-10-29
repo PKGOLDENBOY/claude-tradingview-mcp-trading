@@ -131,3 +131,13 @@ test('risk report must show zero violations before human review',()=>{
   assert.equal(audit.riskLimitsReviewed,false);
   assert.equal(audit.auditReadyForHumanReview,false);
 });
+
+test('tiny fractional quantity half-exit is NOT treated as fully closed',()=>{
+  const ledger=paperLedger(1);
+  ledger.positions[0].fills[0].quantity=0.00000001;
+  ledger.positions[0].fills[1].quantity=0.000000005;
+  const audit=auditForwardPaperRoundTrips(ledger);
+  assert.equal(audit.completedIndependentRoundTrips,0);
+  assert.deepEqual(audit.incompleteOpenPositionIds,['P0']);
+  assert.equal(audit.auditReadyForHumanReview,false);
+});
