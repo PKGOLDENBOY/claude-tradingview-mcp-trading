@@ -13,6 +13,7 @@
 import { fileURLToPath } from "node:url";
 import { loadShadowCheckpoint, saveShadowCheckpoint, appendShadowEvidence } from "../lib/shadow-checkpoint.mjs";
 import { entrySafety, exitThresholdReason, spreadBps } from "../lib/shadow-execution-safety.mjs";
+import { createShadowPositionEvidence, shadowEntryEvidence, shadowExitEvidence } from "../lib/shadow-auditable-events.mjs";
 
 export const SAFETY = Object.freeze({
   exchangeWrites: false,
@@ -226,6 +227,13 @@ function manageOpen(tickers) {
     // produce a loss beyond the nominal stop; never claim guaranteed fills.
     const reason=exitThresholdReason(pnl,pos.totalCost,rule) || (held>=rule.maxMin?"TIME_EXIT":null);
     if(!reason)continue;
+    // Evidence is computed BEFORE a position is deleted. Any malformed
+    // persisted v2 fill receipt fails CLOSED; older checkpoint positions
+    // remain explicitly unauditable and are never assigned fake entry IDs.
+    const fillEvidence=shadowExitEvidence(pos,{
+      strategy:strat,symbol,exitPrice:virtualFill(quote,"sell"),
+      closedMs:now,reportedNetPnlUsd:pnl,
+    });
     positions[strat].delete(symbol);
     const state=summary[strat];state.exits++;state.realizedUSD+=pnl;
     if(pnl>0){state.wins++;state.grossProfitUSD+=pnl;}
@@ -236,7 +244,7 @@ function manageOpen(tickers) {
     emit("SHADOW_EXIT",{strategy:strat,symbol,reason,simulatedPnlUSD:f(pnl,4),
       realizedReturnPct:f(pnl/pos.totalCost*100,2),spreadBps:f(spreadBps(quote)??-1,2),
       executableBid:quote.bidPr??null,quotedAsk:quote.askPr??null,lastTrade:quote.lastPr??null,
-      heldMinutes:f(held,1)});
+      heldMinutes:f(held,1),...fillEvidence});
     saveState();
   }
 }
@@ -254,9 +262,15 @@ function enter(strat,symbol,quote){
   const entryPrice=virtualFill(quote,"buy");
   if(!entryPrice)return skip("invalid-entry-price");
   const quantity=VIRTUAL_USD/entryPrice, totalCost=VIRTUAL_USD*(1+FEES);
-  positions[strat].set(symbol,{opened:Date.now(),quantity,entryPrice,totalCost});
+  const opened=Date.now();
+  const auditEvidence=createShadowPositionEvidence({
+    strategy:strat,symbol,openedMs:opened,quantity,entryPrice,feeRate:FEES,
+  });
+  const position={opened,quantity,entryPrice,totalCost,auditEvidence};
+  const fillEvidence=shadowEntryEvidence(position,{strategy:strat,symbol});
+  positions[strat].set(symbol,position);
   state.entries++;state.dailyEntries++;
-  emit("SHADOW_ENTRY",{strategy:strat,symbol,simulatedNotionalUSD:VIRTUAL_USD,entryPrice:f(entryPrice,8),spreadBps:f(spreadBps(quote),2)});
+  emit("SHADOW_ENTRY",{strategy:strat,symbol,simulatedNotionalUSD:VIRTUAL_USD,entryPrice:f(entryPrice,8),spreadBps:f(spreadBps(quote),2),...fillEvidence});
   saveState();
   return true;
 }
