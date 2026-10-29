@@ -1,0 +1,36 @@
+name: AlphaBot milestone evidence (offline only)
+on:
+  pull_request:
+    paths:
+      - 'lib/milestone-evidence-gate.mjs'
+      - 'test/milestone-evidence-gate.test.mjs'
+      - 'test/paper-ledger-evidence.test.mjs'
+      - 'scripts/check-milestone-evidence.mjs'
+      - 'reports/alphabot-milestone-incomplete-20261029.json'
+      - '.github/workflows/alphabot-milestone-evidence.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-evidence-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout untrusted research branch (read-only)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check syntax
+        run: |
+          node --check lib/milestone-evidence-gate.mjs
+          node --check scripts/check-milestone-evidence.mjs
+      - name: Run only deterministic offline regressions
+        run: node --test test/milestone-evidence-gate.test.mjs test/paper-ledger-evidence.test.mjs
+      - name: Confirm snapshot is NOT incorrectly called complete
+        run: |
+          node scripts/check-milestone-evidence.mjs reports/alphabot-milestone-incomplete-20261029.json
+          node --input-type=module -e "import fs from 'node:fs'; import {inspectMilestoneEvidence} from './lib/milestone-evidence-gate.mjs'; const r=inspectMilestoneEvidence(JSON.parse(fs.readFileSync('reports/alphabot-milestone-incomplete-20261029.json','utf8'))); if(r.structuralEvidencePresent || r.notificationAuthorized || r.profitabilityDemonstrated) process.exit(1);"
