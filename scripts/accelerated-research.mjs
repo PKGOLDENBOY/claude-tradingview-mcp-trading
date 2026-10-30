@@ -12,12 +12,13 @@
 import { mkdirSync, writeFileSync, renameSync, appendFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { INTERVAL_MS,prepareSeries,chronologicalSplits,sealedHoldout } from '../lib/accelerator-core.mjs';
-import { trainMLCandidates,evaluateMLHoldout } from '../lib/accelerator-ml.mjs';
+import { INTERVAL_MS,prepareSeries,chronologicalSplits } from '../lib/accelerator-core.mjs';
+import { enforceResearchHoldoutLock, reviewResearchCandidate, FAILED_OOS_CANDIDATES } from '../lib/accelerator-oos-quarantine.mjs';
+import { trainMLCandidates } from '../lib/accelerator-ml.mjs';
 import { loadHistoryForSymbols, CORE_SYMBOLS } from '../lib/accelerator-data.mjs';
 import { runResearch, suggestedWorkers } from '../lib/accelerator-runner.mjs';
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const opts={days:180,workers:suggestedWorkers(),cacheDir:'research-data/cache',
     output:'research-data/reports/latest.json',holdout:false,asofMs:Math.floor(Date.now()/INTERVAL_MS)*INTERVAL_MS};
   for(const arg of argv) {
@@ -36,8 +37,8 @@ function parseArgs(argv) {
     !Number.isSafeInteger(opts.workers)||opts.workers<1||opts.workers>8 ||
     !Number.isSafeInteger(opts.asofMs)||opts.asofMs%INTERVAL_MS!==0)
     throw new Error('INVALID_CLI_ARGUMENTS');
-  if(opts.holdout && process.env.ALPHABOT_UNSEAL_HOLDOUT !== 'I_ACKNOWLEDGE_ONE_TIME_RESEARCH_REVIEW')
-    throw new Error('HOLDOUT_SEALED: Explicitly set ALPHABOT_UNSEAL_HOLDOUT=I_ACKNOWLEDGE_ONE_TIME_RESEARCH_REVIEW');
+  // A manually set environment variable must never reopen the consumed historical holdout.
+  enforceResearchHoldoutLock(opts.holdout);
   return opts;
 }
 
@@ -57,19 +58,18 @@ export async function researchMain(argv=process.argv.slice(2)){
     [symbol,prepareSeries(bars)]));
   const splits=chronologicalSplits(downloaded.data.BTCUSDT.length);
   const machineLearning=trainMLCandidates(prepared,splits);
-  const best=[analysis.validation.selected,machineLearning.selected].filter(Boolean)
+  const best=[analysis.validation.selected,machineLearning.selected]
+    .filter(c=>c && !FAILED_OOS_CANDIDATES[c.id])
     .sort((a,b)=>b.score-a.score||a.id.localeCompare(b.id))[0]??null;
-  let finalHoldout=null;
-  if(args.holdout&&best){
-    finalHoldout=best.family==='trained-logistic'?
-      evaluateMLHoldout(best,prepared,splits):{
-        result:sealedHoldout(best,prepared,splits),holdoutSelectionUsed:false};
-  }
+  // No historical holdout calculation is permitted in this research branch.
+  const finalHoldout=null;
   const report={...analysis,
     machineLearning,
     overall:{selectedHypothesis:best,
       evaluatedConfigurations:analysis.scope.candidateConfigurations+machineLearning.training.configurations,
-      holdoutStatus:!args.holdout?'SEALED':best?'ONE_VALIDATION_SELECTED_MODEL_REVIEWED':'NO_ELIGIBLE_CANDIDATE',
+      holdoutStatus:'SEALED_PREVIOUS_HISTORICAL_HOLDOUT_CONSUMED',
+      candidateReview:reviewResearchCandidate(best),
+      priorIndependentOosFailures:FAILED_OOS_CANDIDATES,
       finalHoldout,
       conclusion:best?'PROMISING_RESEARCH_HYPOTHESIS_NOT_PROVEN_PROFITABLE':'NO_VALIDATED_EDGE',
       selectionNeverUsedHoldout:true},
@@ -105,6 +105,7 @@ export async function researchMain(argv=process.argv.slice(2)){
     candidatesPerSecond:report.timings.candidatesPerSecond,
     eligible:report.validation.qualifiedCandidateCount,
     selected:report.overall.selectedHypothesis?.id??null,
+    selectedPromotionStatus:report.overall.candidateReview.status,
     selectedValidation:best ? {
       simulatedPnlUSD:best.validation.pnlUSD,
       completedSimulatedTrades:best.validation.trades,
