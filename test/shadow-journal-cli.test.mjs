@@ -29,10 +29,13 @@ function saved(dir){
   const file=join(dir,'events.ndjson');
   const checkpoint=join(dir,'checkpoint.json');
   writeFileSync(file,[entry,exit].map(x=>JSON.stringify(x)).join('\n')+'\n');
+  const strategies=['scalp','swing','breakout','momentum','longterm','sniper'];
   saveShadowCheckpoint(checkpoint,{
     startedAt:start,endsAt:start+10000,cycles:2,
-    positions:{scalp:[]},
-    summary:{scalp:{entries:1,exits:1,realizedUSD:.799}},
+    positions:Object.fromEntries(strategies.map(s=>[s,[]])),
+    summary:Object.fromEntries(strategies.map(s=>[s,s==='scalp'
+      ? {entries:1,exits:1,realizedUSD:.799}
+      : {entries:0,exits:0,realizedUSD:0}])),
   });
   return {file,checkpoint};
 }
@@ -67,6 +70,50 @@ test('corrupt JSON and symlink journal are rejected without recovery or deletion
   assert.throws(()=>auditShadowJournalFile(linked),/UNSAFE_OR_TOO_LARGE/);
   assert.equal(readFileSync(file,'utf8'),'{broken');
 }));
+
+test('matching counts can still conceal an unrelated open position ID; reject it',()=>withDir(dir=>{
+  const {file,checkpoint}=saved(dir);
+  // One open V2 entry and one checkpoint position. Counts agree, but the
+  // checkpoint entry quantity is different from the actual journal receipt.
+  const entryOnly={...entry,quantity:.5,feeUsd:.05};
+  writeFileSync(file,JSON.stringify(entryOnly)+'\n');
+  const state=JSON.parse(readFileSync(checkpoint,'utf8'));
+  state.positions.scalp=[['BTCUSDT',structuredClone(pos)]];
+  state.summary.scalp={entries:1,exits:0,realizedUSD:0};
+  writeFileSync(checkpoint,JSON.stringify(state)+'\n');
+  const report=auditShadowJournalFile(file,checkpoint);
+  assert.equal(report.checkpointCountersMatch,true);
+  assert.equal(report.checkpointV2OpenPositionsMatch,false);
+  assert.equal(report.checkpointJournalCrossCheckPassed,false);
+  assert.ok(report.checkpointMismatches.some(x=>
+    x.type==='OPEN_POSITION_MISSING_OR_MISMATCHED_ENTRY'));
+}));
+
+test('counters and matched fills cannot hide incorrect accumulated realized PnL',()=>withDir(dir=>{
+  const {file,checkpoint}=saved(dir);
+  const state=JSON.parse(readFileSync(checkpoint,'utf8'));
+  state.summary.scalp.realizedUSD=500;
+  writeFileSync(checkpoint,JSON.stringify(state)+'\n');
+  const report=auditShadowJournalFile(file,checkpoint);
+  assert.equal(report.checkpointCountersMatch,true);
+  assert.equal(report.checkpointV2OpenPositionsMatch,true);
+  assert.equal(report.checkpointRealizedPnlMatchesV2Journal,false);
+  assert.equal(report.checkpointJournalCrossCheckPassed,false);
+  assert.ok(report.checkpointMismatches.some(x=>
+    x.type==='CHECKPOINT_PNL_MISMATCH'));
+}));
+
+test('all-v2 export with incomplete checkpoint strategy inventory fails closed',()=>withDir(dir=>{
+  const {file,checkpoint}=saved(dir);
+  const state=JSON.parse(readFileSync(checkpoint,'utf8'));
+  delete state.summary.sniper;
+  delete state.positions.sniper;
+  writeFileSync(checkpoint,JSON.stringify(state)+'\n');
+  const report=auditShadowJournalFile(file,checkpoint);
+  assert.equal(report.checkpointCountersMatch,false);
+  assert.equal(report.checkpointJournalCrossCheckPassed,false);
+}));
+
 test('audit without checkpoint never asserts persistent history completeness',()=>withDir(dir=>{
   const {file}=saved(dir);
   const audit=auditShadowJournalFile(file);
