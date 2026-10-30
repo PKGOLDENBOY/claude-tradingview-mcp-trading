@@ -48,8 +48,12 @@ export function auditShadowJournalFile(path,checkpointPath=null){
     const comparison=compareShadowCheckpointJournal(checkpoint,events,audit);
     Object.assign(report,comparison);
     if(!comparison.checkpointJournalCrossCheckPassed){
+      // Preserve existing explicit COUNT_MISMATCH semantics for callers,
+      // while separately identifying matching-count fill/PnL mismatches.
       report.structuralIntegrityIssues.push({
-        type:'CHECKPOINT_JOURNAL_INCOMPLETE_OR_UNVERIFIED',
+        type:comparison.checkpointCountersMatch
+          ?'CHECKPOINT_JOURNAL_INCOMPLETE_OR_UNVERIFIED'
+          :'CHECKPOINT_JOURNAL_COUNT_MISMATCH',
         positionId:null
       });
       report.structurallyReconciledClosedProxies=false;
