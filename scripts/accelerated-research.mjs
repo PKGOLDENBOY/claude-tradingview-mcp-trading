@@ -93,6 +93,7 @@ export async function researchMain(argv=process.argv.slice(2)){
     generatedAt:report.generatedAt,asof:report.source.asof,
     datasetSha256:report.source.datasetSha256,selected:best?.id??null,
     qualifiedRules:report.validation.qualifiedCandidateCount,
+    quarantinedPreviouslyEligibleCandidates:report.validation.quarantinedPreviouslyEligibleCandidates,
     qualifiedML:report.machineLearning.qualifiedCount,
     holdout:report.overall.holdoutStatus,safety:'NO_ORDERS',
   })+'\n',{encoding:'utf8',mode:0o600});
@@ -104,6 +105,7 @@ export async function researchMain(argv=process.argv.slice(2)){
     workers:report.timings.workers,evaluationWallMs:report.timings.evaluationWallMs,
     candidatesPerSecond:report.timings.candidatesPerSecond,
     eligible:report.validation.qualifiedCandidateCount,
+    quarantinedPreviouslyEligibleCandidates:report.validation.quarantinedPreviouslyEligibleCandidates,
     selected:report.overall.selectedHypothesis?.id??null,
     selectedPromotionStatus:report.overall.candidateReview.status,
     selectedValidation:best ? {
@@ -112,7 +114,7 @@ export async function researchMain(argv=process.argv.slice(2)){
       profitFactor:best.validation.profitFactor,
       positiveFolds:best.validation.positiveFolds,
       maxFoldDrawdownUSD:best.validation.maxFoldDrawdownUSD,
-      note:'RETROSPECTIVE VALIDATION ONLY; SEALED HOLDOUT AND FORWARD PAPER RESULTS NOT AVAILABLE',
+      note:'RETROSPECTIVE VALIDATION ONLY; PREVIOUS HISTORICAL OOS CONSUMED AND FAILED FOR REVERSION-0192; FORWARD PAPER NOT AVAILABLE',
     } : null,
     qualifiedML:report.machineLearning.qualifiedCount,
     holdoutStatus:report.overall.holdoutStatus,excludedSymbols:downloaded.excludedSymbols,
