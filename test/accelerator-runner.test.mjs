@@ -9,8 +9,8 @@ test('worker and single-thread validation are deterministic and holdout sealed b
   const b=await runResearch(data,{workers:2,candidateLimit:18});
   assert.equal(a.scope.candidateConfigurations,18);
   assert.equal(a.scope.candidateSegmentSimulations,18*3*2*3);
-  assert.equal(a.holdout.status,'SEALED');
-  assert.equal(b.holdout.status,'SEALED');
+  assert.equal(a.holdout.status,'SEALED_PREVIOUS_HISTORICAL_HOLDOUT_CONSUMED');
+  assert.equal(b.holdout.status,'SEALED_PREVIOUS_HISTORICAL_HOLDOUT_CONSUMED');
   assert.deepEqual(a.validation,b.validation);
   assert.deepEqual(a.scope,b.scope);
   assert.equal(a.safety.realOrders,false);
