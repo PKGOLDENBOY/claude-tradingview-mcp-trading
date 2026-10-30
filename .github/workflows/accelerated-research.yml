@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - research/parallel-accelerator-20261025
+      - research/quarantine-failed-oos-candidate-20261030
     paths:
       - "lib/accelerator-*.mjs"
       - "scripts/accelerat*.mjs"
@@ -47,8 +48,9 @@ jobs:
           node --check lib/accelerator-data.mjs
           node --check lib/accelerator-runner.mjs
           node --check lib/accelerator-ml.mjs
+          node --check lib/accelerator-oos-quarantine.mjs
       - name: Unit and risk tests - offline
-        run: node --test test/accelerator-core.test.mjs test/accelerator-data.test.mjs test/accelerator-runner.test.mjs test/accelerator-ml.test.mjs
+        run: node --test test/accelerator-core.test.mjs test/accelerator-data.test.mjs test/accelerator-runner.test.mjs test/accelerator-ml.test.mjs test/accelerator-oos-quarantine.test.mjs
       - name: Synthetic engine throughput benchmark - NOT trading evidence
         run: node scripts/accelerator-benchmark.mjs
       - name: Restore checksum-verified historical candle cache
