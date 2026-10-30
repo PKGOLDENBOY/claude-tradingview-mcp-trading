@@ -1,0 +1,54 @@
+name: AlphaBot fail-closed paper ledger integrity checks
+
+on:
+  push:
+    branches:
+      - fix/paper-ledger-corruption-fail-closed-20261030
+    paths:
+      - "bot.js"
+      - "lib/state-ledger-integrity.mjs"
+      - "test/state-ledger-integrity.test.mjs"
+      - ".github/workflows/paper-state-integrity.yml"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alphabot-paper-integrity-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  offline-integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Syntax and actual production I/O fail-closed regression tests
+        run: |
+          node --check bot.js
+          node --check lib/state-ledger-integrity.mjs
+          node --test test/state-ledger-integrity.test.mjs test/recovery.test.mjs test/paper-ledger-evidence.test.mjs test/paper-ledger-telemetry.test.mjs
+      - name: Exchange write-lock source gate
+        run: |
+          node --input-type=module <<'EOF'
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          const src=readFileSync('bot.js','utf8');
+          assert(src.includes('PAPER_TRADING === "false"'));
+          assert(src.includes('LIVE_TRADING_ENABLED === "true"'));
+          assert(src.includes('LIVE_TRADING_APPROVED === "true"'));
+          assert(src.includes('parseExistingTradingState(readFileSync(sourceFile))'));
+          assert(src.includes('parseExistingTradingState(readFileSync(acct().logFile, "utf8"))'));
+          console.log('PAPER_ONLY_AND_PRESERVE_LEDGER_GATES_PRESENT');
+          EOF
