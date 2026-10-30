@@ -4,6 +4,7 @@ on:
     paths:
       - 'lib/shadow-auditable-events.mjs'
       - 'lib/shadow-journal-reconcile.mjs'
+      - 'lib/shadow-checkpoint-audit.mjs'
       - 'scripts/audit-shadow-journal.mjs'
       - 'scripts/market-shadow-test.mjs'
       - 'test/shadow-auditable-events.test.mjs'
@@ -29,6 +30,7 @@ jobs:
         run: |
           node --check lib/shadow-auditable-events.mjs
           node --check lib/shadow-journal-reconcile.mjs
+          node --check lib/shadow-checkpoint-audit.mjs
           node --check scripts/market-shadow-test.mjs
           node --check scripts/audit-shadow-journal.mjs
       - name: Offline record/counter/legacy/crash regressions (never orders)
