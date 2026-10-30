@@ -47,6 +47,18 @@ The utility only reads local exported files. It rejects symlinks, oversized file
 
 **Absolutely do not transform these shadow signal-proxy fills into genuine production forward-PAPER trades.** These strategy proxies run on public market data and their executions are only approximations; they do not have exchange-authenticated fills, actual market impact, full account equity marks, or risk-limit verification.
 
+## Additional checkpoint reconciliation (30 October 2026, draft only)
+
+The first offline verifier compared only the journal entry/exit **counts** to checkpoint totals. Identical counts are insufficient: a journal's outstanding v2 entry could refer to **a different position or quantity** from the checkpoint, and cumulative reported P&L might be altered while all counts still agree.
+
+[New offline comparator](../lib/shadow-checkpoint-audit.mjs) now requires:
+- Every **open v2 position** in the checkpoint must match the originally journaled entry's persistent UUID, strategy, symbol, timestamp, quantity, execution price, fee rate, and fee amount; **no exit** for that ID can already exist.
+- Every unmatched v2 journal entry must correspond to exactly one still-open checkpoint position. Orphaned openings, duplicated open symbols, closed IDs reported as open, and unknown/missing strategy records fail closed.
+- When the entire exported journal is **v2-only**, every strategy's checkpoint cumulative `realizedUSD` is independently checked against the sum of paired, fee-adjusted exit receipts. A legacy event or old open position prevents this all-v2 accounting certification; **no invented historical baseline** is used.
+- Exported checkpoint counter comparison, open-position identity comparison, and net accounting comparison are reported **separately** to expose the precise source of an inconsistency. A passing test is still **not** proof of a continuous journal or genuine production PAPER profitability.
+
+Regression tests deliberately alter quantities and reported P&L **without changing entry/exit counts** and prove that the new gate detects them. No effect on the running shadow service and no deployment is requested.
+
 ## Verification and rollout restrictions
 
 ```sh
