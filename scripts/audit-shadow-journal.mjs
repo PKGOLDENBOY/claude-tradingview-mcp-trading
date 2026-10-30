@@ -10,6 +10,7 @@ import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {reconcileShadowEventJournal} from '../lib/shadow-journal-reconcile.mjs';
 import {loadShadowCheckpoint} from '../lib/shadow-checkpoint.mjs';
+import {compareShadowCheckpointJournal} from '../lib/shadow-checkpoint-audit.mjs';
 
 const MAX_JOURNAL_BYTES=32*1024*1024;
 export function auditShadowJournalFile(path,checkpointPath=null){
@@ -44,25 +45,13 @@ export function auditShadowJournalFile(path,checkpointPath=null){
       throw new Error('SHADOW_AUDIT_CHECKPOINT_PATH_INVALID');
     const checkpoint=loadShadowCheckpoint(checkpointPath);
     if(!checkpoint)throw new Error('SHADOW_AUDIT_CHECKPOINT_MISSING');
-    for(const strategy of Object.keys(checkpoint.summary||{})){
-      const summary=checkpoint.summary[strategy];
-      const expectedEntries=summary?.entries,expectedExits=summary?.exits;
-      const entries=events.filter(e=>e?.tag==='SHADOW_ENTRY'&&e.strategy===strategy).length;
-      const exits=events.filter(e=>e?.tag==='SHADOW_EXIT'&&e.strategy===strategy).length;
-      const open=checkpoint.positions?.[strategy];
-      if(!Number.isSafeInteger(expectedEntries)||!Number.isSafeInteger(expectedExits)||
-        !Array.isArray(open)||expectedEntries!==entries||expectedExits!==exits||
-        expectedEntries-expectedExits!==open.length){
-        report.checkpointMismatches.push({
-          strategy,journalEntries:entries,journalExits:exits,
-          checkpointEntries:expectedEntries??null,checkpointExits:expectedExits??null,
-          checkpointOpenPositionCount:Array.isArray(open)?open.length:null
-        });
-      }
-    }
-    report.checkpointCountersMatch=report.checkpointMismatches.length===0;
-    if(!report.checkpointCountersMatch){
-      report.structuralIntegrityIssues.push({type:'CHECKPOINT_JOURNAL_COUNT_MISMATCH',positionId:null});
+    const comparison=compareShadowCheckpointJournal(checkpoint,events,audit);
+    Object.assign(report,comparison);
+    if(!comparison.checkpointJournalCrossCheckPassed){
+      report.structuralIntegrityIssues.push({
+        type:'CHECKPOINT_JOURNAL_INCOMPLETE_OR_UNVERIFIED',
+        positionId:null
+      });
       report.structurallyReconciledClosedProxies=false;
       report.locallyPairedV2JournalNoLegacy=false;
     }
