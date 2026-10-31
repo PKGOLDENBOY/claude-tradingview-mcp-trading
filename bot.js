@@ -19,7 +19,7 @@ import crypto from "crypto";
 import { execSync } from "child_process";
 import WebSocket from "ws";
 import { summarizePaperLedgerForLog } from "./lib/paper-ledger-telemetry.mjs";
-import { parseExistingTradingState, assertPaperEventHistoryPreserved } from "./lib/state-ledger-integrity.mjs";
+import { parseExistingTradingState, assertTradingStateObject, assertPaperEventHistoryPreserved } from "./lib/state-ledger-integrity.mjs";
 import { formatTradeSizeSummary } from "./lib/trade-size-report.mjs";
 import { startBitgetHeartbeat } from "./lib/bitget-ws-heartbeat.mjs";
 import { fetchMarketCandles } from "./lib/market-data.mjs";
@@ -634,6 +634,8 @@ function loadLog() {
 }
 
 function saveLog(log) {
+  // A malformed in-memory position or trade must never get persisted.
+  assertTradingStateObject(log);
   // A direct save is not allowed to silently bootstrap an absent configured ledger.
   if (process.env.STATE_FILE && !existsSync(acct().logFile)) {
     throw new Error("Refusing to create missing configured state ledger: CONFIGURED_STATE_LEDGER_MISSING");
