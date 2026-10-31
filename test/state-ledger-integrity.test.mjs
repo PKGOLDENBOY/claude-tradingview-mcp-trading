@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync,readFileSync,writeFileSync,existsSync,readdirSync,renameSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {parseExistingTradingState,assertPaperEventHistoryPreserved} from '../lib/state-ledger-integrity.mjs';
+import {parseExistingTradingState,assertTradingStateObject,assertPaperEventHistoryPreserved} from '../lib/state-ledger-integrity.mjs';
 
 const botSource=readFileSync(new URL('../bot.js',import.meta.url),'utf8');
 const begin=botSource.indexOf('function loadLog() {');
@@ -18,7 +18,7 @@ function stateFunctions(path,live=false,configuredEnv={}) {
     readFileSync,writeFileSync,renameSync,existsSync,
     acct:()=>({logFile:path,portfolioValue:1000}),
     sanitizeLog:value=>value,
-    parseExistingTradingState,assertPaperEventHistoryPreserved,
+    parseExistingTradingState,assertTradingStateObject,assertPaperEventHistoryPreserved,
     EXCHANGE_WRITES_ALLOWED:live,
     STATE_DIR:join(path,'..'),
     console,
@@ -64,6 +64,18 @@ test('paper-event continuity rejects deleted, rewritten or duplicated persisted 
   assert.throws(()=>assertPaperEventHistoryPreserved(old,{trades:[event,{...event,price:99}]}),/PAPER_TRADE_HISTORY_LOSS_OR_MUTATION/);
   assert.doesNotThrow(()=>assertPaperEventHistoryPreserved(old,{trades:[event,event,{...event,orderId:'PAPER-456'}]}));
   assert.doesNotThrow(()=>assertPaperEventHistoryPreserved({trades:[]},{trades:[]}));
+});
+test('bad in-memory position and trade records cannot overwrite a valid persisted ledger',()=>{
+  const state={trades:[],portfolioValue:1000,dayStartDate:new Date().toISOString().slice(0,10)};
+  withStateFile(JSON.stringify(state),({path,dir})=>{
+    const f=stateFunctions(path,false,{STATE_FILE:path});
+    const before=readFileSync(path);
+    for(const malformed of [{...state,positions:{BTCUSDT:null}},{...state,trades:[null]}]) {
+      assert.throws(()=>f.saveLog(malformed),/STATE_LEDGER_INVALID_(POSITION_RECORD|TRADE_RECORD)/);
+    }
+    assert.deepEqual(readFileSync(path),before);
+    assert.deepEqual(readdirSync(dir),['safety-check-log.json']);
+  });
 });
 test('actual saveLog rejects stale writers deleting prior PAPER history (no file modification)',()=>{
   const first={timestamp:'2026-10-30T02:00:00.000Z',type:'entry',paperTrading:true,
