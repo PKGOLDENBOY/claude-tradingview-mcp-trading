@@ -597,6 +597,12 @@ function loadLog() {
   const fresh = () => ({ trades: [], portfolioValue: acct().portfolioValue, dayStartValue: acct().portfolioValue, dayStartDate: new Date().toISOString().slice(0, 10), _needsPortfolioSync: true });
   let sourceFile = acct().logFile;
   if (!existsSync(sourceFile)) {
+    // An explicitly configured persisted volume path must NEVER be initialized
+    // implicitly: a detached/missing volume could look like a fresh account.
+    if (process.env.STATE_FILE) {
+      throw new Error("Trading locked: CONFIGURED_STATE_LEDGER_MISSING at " + sourceFile +
+        "; restore the original volume or perform separately reviewed initialization");
+    }
     // One-time migration: older builds wrote state to a relative path in the (ephemeral) app
     // dir instead of the /data volume. If the volume copy is missing but a legacy file exists,
     // adopt it so open positions aren't lost during the switch to persistent storage.
@@ -628,6 +634,10 @@ function loadLog() {
 }
 
 function saveLog(log) {
+  // A direct save is not allowed to silently bootstrap an absent configured ledger.
+  if (process.env.STATE_FILE && !existsSync(acct().logFile)) {
+    throw new Error("Refusing to create missing configured state ledger: CONFIGURED_STATE_LEDGER_MISSING");
+  }
   // Preserve any durable halt written by a concurrent/failed order operation.
   if (existsSync(acct().logFile)) {
     try {
