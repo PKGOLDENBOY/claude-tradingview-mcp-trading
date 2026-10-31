@@ -1,0 +1,220 @@
+{
+  "schemaVersion": 1,
+  "reviewedAtUtc": "2026-10-31T21:13:24Z",
+  "status": "INCOMPLETE",
+  "profitabilityDemonstrated": false,
+  "fixes": [
+    {
+      "category": "order",
+      "isolatedBranch": true,
+      "branch": "fix/alphabot-safety-audit-20261020",
+      "testsPassed": true,
+      "testUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/actions/runs/39383171928",
+      "diffUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/4",
+      "defectAndResolution": "Partial SELL quantity ignored, ambiguous fill statuses, TP cancellations and duplicates fixed with fail-closed mocked order-adapter tests."
+    },
+    {
+      "category": "accounting",
+      "isolatedBranch": true,
+      "branch": "fix/risk-and-data-hardening-20261019",
+      "testsPassed": true,
+      "testUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/actions/runs/39828985476",
+      "diffUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/2",
+      "defectAndResolution": "Two-sided paper fee and cash/equity double-count accounting bugs corrected and verified; separate PR #10 also fixes sniper PAPER fee/CSV mode. No independent production ledger reconciliation yet."
+    },
+    {
+      "category": "risk",
+      "isolatedBranch": true,
+      "branch": "fix/shadow-spread-cooldown-20261024",
+      "testsPassed": true,
+      "testUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/actions/runs/40864405350",
+      "diffUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/16",
+      "defectAndResolution": "Wide/missing spreads, executable stops and post-stop re-entry cooldown have isolated passing tests; draft PR #16 requires replay before deployment."
+    }
+  ],
+  "strategyEvaluations": [
+    {
+      "strategy": "scalp",
+      "evaluated": true,
+      "reportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/blob/research/shadow-strategy-evaluation-20261029/reports/alphabot-shadow-strategy-evaluation-20261029.md",
+      "afterCosts": true,
+      "finding": "21 closed shadow signal-proxy positions; simulated cost-adjusted realized P&L -7.6831 USD; observed losing sample, not independently reconciled."
+    },
+    {
+      "strategy": "momentum",
+      "evaluated": true,
+      "reportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/blob/research/shadow-strategy-evaluation-20261029/reports/alphabot-shadow-strategy-evaluation-20261029.md",
+      "afterCosts": true,
+      "finding": "21 closed shadow signal-proxy positions; simulated cost-adjusted realized P&L -75.3685 USD; observed losing sample, not independently reconciled."
+    },
+    {
+      "strategy": "swing",
+      "evaluated": true,
+      "reportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/blob/research/shadow-strategy-evaluation-20261029/reports/alphabot-shadow-strategy-evaluation-20261029.md",
+      "afterCosts": true,
+      "finding": "Two shadow signal-proxy swing positions remain open; mark-to-market -3.0940 USD; zero completed exits so realized performance remains unknown."
+    }
+  ],
+  "research": {
+    "chronologicalFolds": true,
+    "trainingOnlyFeatures": true,
+    "dataQualityAudited": true,
+    "bothSideCosts": true,
+    "selectionFrozenBeforeOos": true,
+    "holdoutUsedOnceOnly": true,
+    "noHoldoutRetuning": true,
+    "foldsAndQualityReportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/blob/research/parallel-accelerator-20261025/docs/ALPHABOT_ACCELERATOR.md",
+    "fixedRule": {
+      "trained": true,
+      "validated": true,
+      "untouchedOosCompleted": true,
+      "trainReportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/17",
+      "validationReportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/17",
+      "oosReportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/blob/research/completion-evidence-gate-20261029-v1/reports/alphabot-reversion0192-failed-one-time-oos-20261029.md",
+      "note": "Exactly one validation-selected fixed-rule candidate reversion-0192 received the one-time untouched OOS; remaining candidates were not ranked on the consumed holdout."
+    },
+    "ml": {
+      "trained": true,
+      "validated": true,
+      "untouchedOosCompleted": false,
+      "trainReportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/17",
+      "validationReportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/17",
+      "note": "All 96 ML configurations failed eligibility on chronological validation, so no ML configuration was OOS selected; do not try rejected ML candidates on consumed holdout."
+    },
+    "frozenSingleRuleOos": {
+      "candidate": "reversion-0192",
+      "runId": 40917479432,
+      "asof": "2026-10-29T16:00:00.000Z",
+      "datasetSha256": "fcebee6b382df53f3d3fd55fda858e9002dd41789703cf9ff72de655d41d0138",
+      "oneTimeHoldoutConsumed": true,
+      "validationSimulatedTrades": 24,
+      "validationSimulatedPnlUSD": 37.4203,
+      "oosSimulatedTrades": 25,
+      "oosSimulatedPnlUSD": -38.2268,
+      "oosSimulatedProfitFactor": 0.3913,
+      "oosSimulatedWinRatePct": 36,
+      "oosRealizedOnlyDrawdownUSD": 47.8619,
+      "result": "FAILED_UNSEEN_OOS_REJECT_CANDIDATE",
+      "archiveEvidenceUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/actions/runs/40917479432/artifacts/12916368158",
+      "testReportUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/blob/research/completion-evidence-gate-20261029-v1/reports/alphabot-reversion0192-failed-one-time-oos-20261029.md",
+      "profitabilityDemonstrated": false
+    },
+    "quarantinedCandidate": "reversion-0192",
+    "quarantineCiUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/actions/runs/41242699791",
+    "recentValidationResult": {
+      "status": "NO_ELIGIBLE_RESEARCH_CANDIDATES_IN_TESTED_SAMPLE",
+      "eligibleFixedRules": 0,
+      "eligibleML": 0,
+      "selectedCandidate": null,
+      "marketData": "Bitget public SPOT five symbols / 180 days / hourly; 516 configurations",
+      "profitabilityDemonstrated": false
+    }
+  },
+  "safety": {
+    "paperTrading": true,
+    "liveTradingEnabled": false,
+    "exchangeWritesLocked": true,
+    "actualValuesVerified": false,
+    "note": "Railway runtime paper/writes-locked logs observed, but connected OAuth supplies variable NAMES ONLY, not the actual values. This section does not independently verify effective flags."
+  },
+  "decision": {
+    "type": "forward-paper",
+    "paper": {
+      "basis": "forward-paper",
+      "independentClosedRoundTrips": 0,
+      "positionIdsReconciled": false,
+      "rawFillsChecked": false,
+      "feesAndSlippageIncluded": false,
+      "portfolioEquityCurveAvailable": false,
+      "independentAuditPassed": false,
+      "netRealizedPnlUsd": null,
+      "winRatePct": null,
+      "profitFactor": null,
+      "maxPortfolioDrawdownPct": null,
+      "riskLimitViolations": null,
+      "safetyLimitsReviewed": false
+    },
+    "observedRailwayLedgerNote": "Read-only Railway production PAPER_LEDGER_EVIDENCE at 2026-10-31 20:28:19 UTC: recordedExitEvents=0, auditableFeeAdjustedExitEvents=0, independentCompletedRoundTrips=null, all100PaperTradesVerified=false, liveMoneyReady=false. No genuine 100-trade proof."
+  },
+  "finalReport": {
+    "published": true,
+    "limitationsPublished": true,
+    "url": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/blob/research/completion-evidence-gate-20261029-v1/reports/alphabot-final-readiness-evidence-20261031.md",
+    "status": "DATED_NO_GO_AUDIT_NOT_MILESTONE_COMPLETION"
+  },
+  "limitations": [
+    "Historical backtest exits cannot substitute for forward paper fills.",
+    "No conclusive independently reviewed no-validated-edge decision for expanded strategy search.",
+    "No independently verified account-level equity curve, max portfolio drawdown or risk breach audit.",
+    "Environment flag values were not readable through the current OAuth connector.",
+    "Shadow scalp/momentum/swing observations are evaluated but use only simulated signal proxies; swing has no realized exits; PR #21 holds separately frozen evidence.",
+    "Known order/accounting/risk fixes now have an evidence matrix on isolated PR #19, but this is not an exhaustive end-to-end execution/account review.",
+    "One preregistered rule candidate reversion-0192 FAILED the consumed one-time 20% historical OOS: simulated -38.2268 USD across 25 trades, PF 0.3913. No holdout retuning is permitted.",
+    "All 96 ML configurations failed initial validation eligibility; none were promoted into or probed on the consumed OOS.",
+    "As of 31 October production PAPER telemetry still shows zero auditable exits and null completed independent paper round trips.",
+    "Shadow proxy observations are negative and cannot count toward the 100 genuine forward PAPER requirement.",
+    "The independent accelerator's old misleading candidate selection was patched, with isolated deployment successful at 21:16 UTC; the next scheduled run's runtime output has not yet been checked and the production bot is unchanged.",
+    "PR #27 stricter paper-ledger safeguards are not merged into main or deployed and must be validated with preserved production volume and restart rehearsals."
+  ],
+  "additionalEngineeringEvidence": [
+    {
+      "scope": "research-only quarantine",
+      "branch": "research/quarantine-failed-oos-candidate-20261030",
+      "prUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/26",
+      "ciUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/actions/runs/41242699791",
+      "offlineTestsPassed": 19,
+      "isolatedDockerBuildPassed": true,
+      "mergedIntoResearchBranchOnly": true,
+      "mainBotChanged": false,
+      "statement": "Prior OOS failure quarantined, one-time historical holdout locked. Zero eligible validation candidates on 31 October isolated research CI.",
+      "researchDeploymentConfirmed": {
+        "service": "alphabot-accelerated-research",
+        "deploymentId": "ea1626a4-ab9a-4cf2-8f48-fb20ca76f9ad",
+        "commit": "53109e534fb1a8d0cea1f8ddb54200d4c3f8791d",
+        "status": "SUCCESS",
+        "builtAtUtc": "2026-10-31T21:16:14.268Z",
+        "runtimeCandidateSelectionAfterRolloutVerified": false,
+        "productionTradingBotChanged": false
+      }
+    },
+    {
+      "scope": "paper ledger continuity",
+      "branch": "fix/paper-ledger-corruption-fail-closed-20261030",
+      "prUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/pull/27",
+      "ciUrl": "https://github.com/PKGOLDENBOY/claude-tradingview-mcp-trading/actions/runs/41242611659",
+      "fullRegressionTestsPassed": 112,
+      "dedicatedIntegrityTestsPassed": 27,
+      "mergedIntoMain": false,
+      "deployed": false,
+      "statement": "Existing corrupt/missing configured state fails closed; open positions and historical paper events cannot be silently dropped or rewritten by stale saves."
+    }
+  ],
+  "latestShadowProxy": {
+    "observedAtUtc": "2026-10-31T21:13:24Z",
+    "provenance": "PUBLIC_MARKET_READ_ONLY_SHADOW_NOT_PRODUCTION_PAPER",
+    "strategyRealizedPnlUSD": {
+      "scalp": -9.4575,
+      "momentum": -83.6636,
+      "swing": -12.436,
+      "breakout": -4.7626,
+      "sniper": -54.5062,
+      "longterm": 0
+    },
+    "closedSimulatedExits": {
+      "scalp": 27,
+      "momentum": 27,
+      "swing": 2,
+      "breakout": 4,
+      "sniper": 2,
+      "longterm": 0
+    },
+    "openPositions": {
+      "swing": 2,
+      "breakout": 1,
+      "longterm": 1
+    },
+    "liveTradingAuthorized": false,
+    "independentPaperPositionsReconciled": 0,
+    "note": "Cumulative read-only signal proxy counters are not original fill receipts or verified forward PAPER."
+  }
+}
