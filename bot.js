@@ -19,6 +19,7 @@ import crypto from "crypto";
 import { execSync } from "child_process";
 import WebSocket from "ws";
 import { summarizePaperLedgerForLog } from "./lib/paper-ledger-telemetry.mjs";
+import { parseExistingTradingState, assertTradingStateObject, assertPaperEventHistoryPreserved } from "./lib/state-ledger-integrity.mjs";
 import { formatTradeSizeSummary } from "./lib/trade-size-report.mjs";
 import { startBitgetHeartbeat } from "./lib/bitget-ws-heartbeat.mjs";
 import { fetchMarketCandles } from "./lib/market-data.mjs";
@@ -596,6 +597,12 @@ function loadLog() {
   const fresh = () => ({ trades: [], portfolioValue: acct().portfolioValue, dayStartValue: acct().portfolioValue, dayStartDate: new Date().toISOString().slice(0, 10), _needsPortfolioSync: true });
   let sourceFile = acct().logFile;
   if (!existsSync(sourceFile)) {
+    // An explicitly configured persisted volume path must NEVER be initialized
+    // implicitly: a detached/missing volume could look like a fresh account.
+    if (process.env.STATE_FILE) {
+      throw new Error("Trading locked: CONFIGURED_STATE_LEDGER_MISSING at " + sourceFile +
+        "; restore the original volume or perform separately reviewed initialization");
+    }
     // One-time migration: older builds wrote state to a relative path in the (ephemeral) app
     // dir instead of the /data volume. If the volume copy is missing but a legacy file exists,
     // adopt it so open positions aren't lost during the switch to persistent storage.
@@ -607,11 +614,9 @@ function loadLog() {
       return fresh();
     }
   }
-  let raw;
   try {
-    raw = readFileSync(sourceFile);
-    if (raw[0] === 0xEF && raw[1] === 0xBB && raw[2] === 0xBF) raw = raw.slice(3);
-    const log = sanitizeLog(JSON.parse(raw.toString("utf8")));
+    // Existing evidence is immutable on failure; no silent fresh ledger on bad JSON.
+    const log = sanitizeLog(parseExistingTradingState(readFileSync(sourceFile)));
     const today = new Date().toISOString().slice(0, 10);
     if (!log.portfolioValue) log.portfolioValue = acct().portfolioValue;
     if (log.dayStartDate !== today) {
@@ -622,19 +627,26 @@ function loadLog() {
     if (!log.dayStartValue) log.dayStartValue = log.portfolioValue;
     return log;
   } catch (e) {
-    if (EXCHANGE_WRITES_ALLOWED) throw new Error("Trading locked: corrupt state ledger: " + e.message);
-    // Only an isolated paper ledger can be reset on corruption.
-    console.error(`⚠️ loadLog: JSON parse failed (${e.message}) — backing up corrupted file and starting fresh`);
-    try { renameSync(sourceFile, sourceFile + ".bak." + Date.now()); } catch {}
-    return fresh();
+    // PAPER must be as strict as LIVE: a reset would misstate capital, open positions
+    // and completed trades, so preserve the original bytes and block further actions.
+    throw new Error("Trading locked: unreadable/corrupt state ledger preserved at " + sourceFile + ": " + e.message);
   }
 }
 
 function saveLog(log) {
+  // A malformed in-memory position or trade must never get persisted.
+  assertTradingStateObject(log);
+  // A direct save is not allowed to silently bootstrap an absent configured ledger.
+  if (process.env.STATE_FILE && !existsSync(acct().logFile)) {
+    throw new Error("Refusing to create missing configured state ledger: CONFIGURED_STATE_LEDGER_MISSING");
+  }
   // Preserve any durable halt written by a concurrent/failed order operation.
   if (existsSync(acct().logFile)) {
     try {
-      const persisted = JSON.parse(readFileSync(acct().logFile, "utf8"));
+      const persisted = parseExistingTradingState(readFileSync(acct().logFile, "utf8"));
+      // A concurrent writer may have appended paper fills after our load.
+      // Never silently clobber those immutable historical events.
+      assertPaperEventHistoryPreserved(persisted,log);
       if (persisted._tradingHaltReason && !log._tradingHaltReason)
         log._tradingHaltReason = persisted._tradingHaltReason;
       if (Array.isArray(persisted.unconfirmedOrders) && persisted.unconfirmedOrders.length) {
@@ -646,8 +658,8 @@ function saveLog(log) {
         log.unconfirmedOrders = current;
       }
     } catch (err) {
-      if (EXCHANGE_WRITES_ALLOWED)
-        throw new Error("Refusing to overwrite corrupt safety ledger: " + err.message);
+      // Never overwrite bad PAPER state either; preserve crash/recovery evidence.
+      throw new Error("Refusing to overwrite unreadable/corrupt safety ledger: " + err.message);
     }
   }
   const tmp = acct().logFile + ".tmp";
