@@ -6,6 +6,7 @@ on:
       - research/parallel-accelerator-20261025
       - research/quarantine-failed-oos-candidate-20261030
     paths:
+      - "Dockerfile.accelerator"
       - "lib/accelerator-*.mjs"
       - "scripts/accelerat*.mjs"
       - "test/accelerator-*.test.mjs"
@@ -51,6 +52,8 @@ jobs:
           node --check lib/accelerator-oos-quarantine.mjs
       - name: Unit and risk tests - offline
         run: node --test test/accelerator-core.test.mjs test/accelerator-data.test.mjs test/accelerator-runner.test.mjs test/accelerator-ml.test.mjs test/accelerator-oos-quarantine.test.mjs
+      - name: Check isolated Docker image contains all dependencies and passes tests
+        run: docker build --file Dockerfile.accelerator --tag alphabot-accelerator-safety:ci .
       - name: Synthetic engine throughput benchmark - NOT trading evidence
         run: node scripts/accelerator-benchmark.mjs
       - name: Restore checksum-verified historical candle cache
