@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync,readFileSync,writeFileSync,existsSync,readdirSync,renameSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {parseExistingTradingState} from '../lib/state-ledger-integrity.mjs';
+import {parseExistingTradingState,assertPaperEventHistoryPreserved} from '../lib/state-ledger-integrity.mjs';
 
 const botSource=readFileSync(new URL('../bot.js',import.meta.url),'utf8');
 const begin=botSource.indexOf('function loadLog() {');
@@ -18,7 +18,7 @@ function stateFunctions(path,live=false,configuredEnv={}) {
     readFileSync,writeFileSync,renameSync,existsSync,
     acct:()=>({logFile:path,portfolioValue:1000}),
     sanitizeLog:value=>value,
-    parseExistingTradingState,
+    parseExistingTradingState,assertPaperEventHistoryPreserved,
     EXCHANGE_WRITES_ALLOWED:live,
     STATE_DIR:join(path,'..'),
     console,
@@ -48,6 +48,43 @@ test('parse existing state accepts a BOM but refuses missing/invalid trade histo
   assert.throws(()=>parseExistingTradingState(null),/STATE_LEDGER_INVALID_BYTES/);
 });
 
+test('parse refuses invalid open position records without sanitizing them away',()=>{
+  for(const invalid of [null,[],10,'bad']) {
+    const payload={trades:[],positions:{BTCUSDT:invalid}};
+    assert.throws(()=>parseExistingTradingState(JSON.stringify(payload)),/STATE_LEDGER_INVALID_POSITION_RECORD/);
+  }
+  assert.throws(()=>parseExistingTradingState(JSON.stringify({trades:[],swingPositions:[]})),/STATE_LEDGER_INVALID_POSITION_STORE/);
+  assert.throws(()=>parseExistingTradingState(JSON.stringify({trades:[null]})),/STATE_LEDGER_INVALID_TRADE_RECORD/);
+});
+test('paper-event continuity rejects deleted, rewritten or duplicated persisted fills',()=>{
+  const event={timestamp:'2026-10-30T01:00:00Z',type:'entry',symbol:'BTCUSDT',
+    orderId:'PAPER-123',paperTrading:true,orderPlaced:true,price:100,tradeSize:10};
+  const old={trades:[event,event]};
+  assert.throws(()=>assertPaperEventHistoryPreserved(old,{trades:[event]}),/PAPER_TRADE_HISTORY_LOSS_OR_MUTATION/);
+  assert.throws(()=>assertPaperEventHistoryPreserved(old,{trades:[event,{...event,price:99}]}),/PAPER_TRADE_HISTORY_LOSS_OR_MUTATION/);
+  assert.doesNotThrow(()=>assertPaperEventHistoryPreserved(old,{trades:[event,event,{...event,orderId:'PAPER-456'}]}));
+  assert.doesNotThrow(()=>assertPaperEventHistoryPreserved({trades:[]},{trades:[]}));
+});
+test('actual saveLog rejects stale writers deleting prior PAPER history (no file modification)',()=>{
+  const first={timestamp:'2026-10-30T02:00:00.000Z',type:'entry',paperTrading:true,
+    orderPlaced:true,symbol:'BTCUSDT',orderId:'PAPER-1',price:100};
+  const second={timestamp:'2026-10-30T03:00:00.000Z',type:'exit',paperTrading:true,
+    orderPlaced:true,symbol:'BTCUSDT',orderId:'PAPER-2',price:105};
+  const state={trades:[first,second],portfolioValue:1000,dayStartDate:new Date().toISOString().slice(0,10)};
+  withStateFile(JSON.stringify(state),({path,dir})=>{
+    const f=stateFunctions(path,false,{STATE_FILE:path});
+    const before=readFileSync(path);
+    assert.throws(()=>f.saveLog({...state,trades:[first]}),/PAPER_TRADE_HISTORY_LOSS_OR_MUTATION/);
+    assert.throws(()=>f.saveLog({...state,trades:[first,{...second,price:106}]}),/PAPER_TRADE_HISTORY_LOSS_OR_MUTATION/);
+    assert.deepEqual(readFileSync(path),before);
+    assert.deepEqual(readdirSync(dir),['safety-check-log.json']);
+    const fresh=f.loadLog();
+    fresh.trades.push({timestamp:'2026-10-30T04:00:00.000Z',type:'entry',
+      paperTrading:true,orderPlaced:true,symbol:'ETHUSDT',orderId:'PAPER-3'});
+    f.saveLog(fresh);
+    assert.equal(parseExistingTradingState(readFileSync(path)).trades.length,3);
+  });
+});
 for(const mode of ['PAPER','LIVE']) {
   test(mode+': corrupt existing ledger blocks reads AND writes without deleting or rotating bytes',()=>{
     withStateFile('{"trades":[{"type":"entry"}],',({path,dir})=>{
