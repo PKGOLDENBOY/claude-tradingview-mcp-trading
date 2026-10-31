@@ -153,7 +153,7 @@
     "All 96 ML configurations failed initial validation eligibility; none were promoted into or probed on the consumed OOS.",
     "As of 31 October production PAPER telemetry still shows zero auditable exits and null completed independent paper round trips.",
     "Shadow proxy observations are negative and cannot count toward the 100 genuine forward PAPER requirement.",
-    "The running independent accelerator previously suggested a failed OOS hypothesis until the isolated research branch update; only a verified new service deployment can confirm corrected runtime reporting.",
+    "The independent accelerator's old misleading candidate selection was patched, with isolated deployment successful at 21:16 UTC; the next scheduled run's runtime output has not yet been checked and the production bot is unchanged.",
     "PR #27 stricter paper-ledger safeguards are not merged into main or deployed and must be validated with preserved production volume and restart rehearsals."
   ],
   "additionalEngineeringEvidence": [
@@ -166,7 +166,16 @@
       "isolatedDockerBuildPassed": true,
       "mergedIntoResearchBranchOnly": true,
       "mainBotChanged": false,
-      "statement": "Prior OOS failure quarantined, one-time historical holdout locked. Zero eligible validation candidates on 31 October isolated research CI."
+      "statement": "Prior OOS failure quarantined, one-time historical holdout locked. Zero eligible validation candidates on 31 October isolated research CI.",
+      "researchDeploymentConfirmed": {
+        "service": "alphabot-accelerated-research",
+        "deploymentId": "ea1626a4-ab9a-4cf2-8f48-fb20ca76f9ad",
+        "commit": "53109e534fb1a8d0cea1f8ddb54200d4c3f8791d",
+        "status": "SUCCESS",
+        "builtAtUtc": "2026-10-31T21:16:14.268Z",
+        "runtimeCandidateSelectionAfterRolloutVerified": false,
+        "productionTradingBotChanged": false
+      }
     },
     {
       "scope": "paper ledger continuity",
