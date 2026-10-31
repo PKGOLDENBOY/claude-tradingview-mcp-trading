@@ -19,7 +19,7 @@ import crypto from "crypto";
 import { execSync } from "child_process";
 import WebSocket from "ws";
 import { summarizePaperLedgerForLog } from "./lib/paper-ledger-telemetry.mjs";
-import { parseExistingTradingState } from "./lib/state-ledger-integrity.mjs";
+import { parseExistingTradingState, assertPaperEventHistoryPreserved } from "./lib/state-ledger-integrity.mjs";
 import { formatTradeSizeSummary } from "./lib/trade-size-report.mjs";
 import { startBitgetHeartbeat } from "./lib/bitget-ws-heartbeat.mjs";
 import { fetchMarketCandles } from "./lib/market-data.mjs";
@@ -642,6 +642,9 @@ function saveLog(log) {
   if (existsSync(acct().logFile)) {
     try {
       const persisted = parseExistingTradingState(readFileSync(acct().logFile, "utf8"));
+      // A concurrent writer may have appended paper fills after our load.
+      // Never silently clobber those immutable historical events.
+      assertPaperEventHistoryPreserved(persisted,log);
       if (persisted._tradingHaltReason && !log._tradingHaltReason)
         log._tradingHaltReason = persisted._tradingHaltReason;
       if (Array.isArray(persisted.unconfirmedOrders) && persisted.unconfirmedOrders.length) {
