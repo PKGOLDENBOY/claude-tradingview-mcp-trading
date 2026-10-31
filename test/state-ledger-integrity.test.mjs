@@ -13,7 +13,7 @@ const stateSource=botSource.slice(begin,end);
 
 // Execute the real application state functions in a controlled sandbox without
 // importing the server, exchange clients, API credentials, or network capabilities.
-function stateFunctions(path,live=false) {
+function stateFunctions(path,live=false,configuredEnv={}) {
   const env={
     readFileSync,writeFileSync,renameSync,existsSync,
     acct:()=>({logFile:path,portfolioValue:1000}),
@@ -22,6 +22,7 @@ function stateFunctions(path,live=false) {
     EXCHANGE_WRITES_ALLOWED:live,
     STATE_DIR:join(path,'..'),
     console,
+    process:{env:configuredEnv},
   };
   return new Function(...Object.keys(env),stateSource+'\nreturn {loadLog,saveLog};')
     (...Object.values(env));
@@ -58,6 +59,17 @@ for(const mode of ['PAPER','LIVE']) {
       assert.deepEqual(readdirSync(dir),['safety-check-log.json']);
     });
   });
+  test(mode+': missing explicitly configured persistent state refuses implicit reset or save',()=>{
+    const dir=mkdtempSync(join(tmpdir(),'alphabot-missing-state-'));
+    const path=join(dir,'persisted-state.json');
+    try {
+      const f=stateFunctions(path,mode==='LIVE',{STATE_FILE:path});
+      assert.throws(()=>f.loadLog(),/CONFIGURED_STATE_LEDGER_MISSING/);
+      assert.throws(()=>f.saveLog({trades:[]}),/CONFIGURED_STATE_LEDGER_MISSING/);
+      assert.equal(existsSync(path),false);
+      assert.deepEqual(readdirSync(dir),[]);
+    } finally {rmSync(dir,{recursive:true,force:true});}
+  });
   test(mode+': invalid existing ledger shape never gets reset',()=>{
     withStateFile('{"portfolioValue":1000}',({path,dir})=>{
       const f=stateFunctions(path,mode==='LIVE');
@@ -73,7 +85,7 @@ test('valid existing state reads and updates atomically while preserving halted 
     dayStartValue:1000,_tradingHaltReason:'UNCONFIRMED_SELL',
     unconfirmedOrders:[{symbol:'BTCUSDT',reason:'unknown fill'}]};
   withStateFile(JSON.stringify(state),({path,dir})=>{
-    const f=stateFunctions(path);
+    const f=stateFunctions(path,false,{STATE_FILE:path});
     const loaded=f.loadLog();
     assert.equal(loaded._tradingHaltReason,'UNCONFIRMED_SELL');
     loaded._tradingHaltReason=undefined;
