@@ -21,4 +21,5 @@ jobs:
         with:
           node-version: '22'
       - run: node --check lib/readiness-diagnostic.mjs
-      - run: node --test test/accelerator-readiness.test.mjs
+      - run: node --check lib/forward-paper-evidence.mjs
+      - run: node --test test/accelerator-readiness.test.mjs test/accelerator-forward-evidence.test.mjs
