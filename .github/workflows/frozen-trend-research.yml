@@ -1,0 +1,54 @@
+name: Frozen trend/pullback research - no orders
+on:
+  push:
+    branches:
+      - research/frozen-trend-pullback-v1-20261108
+    paths:
+      - "lib/trend-pullback-hypothesis.mjs"
+      - "scripts/predeclared-trend-eval.mjs"
+      - "test/accelerator-trend-pullback.test.mjs"
+      - "test/accelerator-predeclared-cli.test.mjs"
+      - ".github/workflows/frozen-trend-research.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: alphabot-frozen-trend-research-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  test-and-evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+      ALPHABOT_UNSEAL_HOLDOUT: "SEALED"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Static syntax checks
+        run: |
+          node --check lib/trend-pullback-hypothesis.mjs
+          node --check scripts/predeclared-trend-eval.mjs
+      - name: Offline hypothesis and CLI tests
+        run: node --test test/accelerator-trend-pullback.test.mjs test/accelerator-predeclared-cli.test.mjs
+      - name: Restore old public candle cache (never alter existing history)
+        uses: actions/cache/restore@v4
+        with:
+          path: research-data/cache
+          key: bitget-v3-public-1h-${{ github.run_id }}
+          restore-keys: |
+            bitget-v3-public-1h-
+      - name: Evaluate frozen strategy on 180 days of public historical candles (validation only)
+        run: node scripts/predeclared-trend-eval.mjs --days=180
+      - name: Upload evidence - never trade
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alphabot-trend-pullback-validation-${{ github.run_id }}
+          path: research-data/reports/trend-pullback-v1.json
+          if-no-files-found: warn
+          retention-days: 45
