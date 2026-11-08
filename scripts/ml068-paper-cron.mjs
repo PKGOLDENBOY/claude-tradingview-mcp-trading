@@ -94,8 +94,10 @@ export async function runPaperCycle({nowMs=Date.now(),historyLoader=loadHistoryF
   let ledger=inspectForwardLedger(store,{manifestSha256:artifact.manifestSha256});
   let state=replayPaperEvidence(ledger.records,{manifestSha256:artifact.manifestSha256});
   let ordinal=0;
+  // Never timestamp paper fills earlier than the quote snapshot used to model them.
+  let observationNowMs=nowMs;
   const append=(type,fields)=>{
-    const at=stamp(nowMs);
+    const at=stamp(observationNowMs);
     const e={type,mode:FORWARD_MODE,manifestSha256:artifact.manifestSha256,
       candidateId:artifact.candidateId,at,eventId:makeEventId(type,{run:at,ordinal:ordinal++,...fields}),...fields};
     const tail=appendForwardRecord(store,e,ledger);
@@ -135,6 +137,7 @@ export async function runPaperCycle({nowMs=Date.now(),historyLoader=loadHistoryF
     append('ERROR',{step:'quotes_stale_or_missing'});
     throw new Error('FORWARD_QUOTE_SNAPSHOT_INVALID');
   }
+  observationNowMs=Math.max(observationNowMs,tickers.at);
   const quoteAgeMs=Math.max(0,Date.now()-tickers.at);
   if(quoteAgeMs>PAPER_LIMITS.maxQuoteAgeMs){
     append('ERROR',{step:'quotes_expired',quoteAgeMs});
@@ -144,7 +147,7 @@ export async function runPaperCycle({nowMs=Date.now(),historyLoader=loadHistoryF
   for(const [symbol,entry] of state.positions){
     checkPaperEntryPosition(entry);
     const q=tickers.quotes.get(symbol);
-    const hours=(nowMs-Date.parse(entry.at))/INTERVAL_MS;
+    const hours=(observationNowMs-Date.parse(entry.at))/INTERVAL_MS;
     const stop=q.bidUSD<=entry.entryReferenceUSD*(1-artifact.candidate.stop);
     const take=q.bidUSD>=entry.entryReferenceUSD*(1+artifact.candidate.take);
     const reason=stop?'STOP':take?'TAKE_PROFIT':hours>=artifact.assumptions.maxHoldBars?'TIME_EXIT':null;
@@ -166,7 +169,7 @@ export async function runPaperCycle({nowMs=Date.now(),historyLoader=loadHistoryF
   if(!recordMissingHistory){
     for(const symbol of CORE_SYMBOLS){
       let signal;
-      try{signal=scoreFrozenML(artifact,history.data[symbol],{symbol,observedAt:stamp(nowMs)});}
+      try{signal=scoreFrozenML(artifact,history.data[symbol],{symbol,observedAt:stamp(observationNowMs)});}
       catch(err){append('ERROR',{symbol,step:'frozen_model_signal',message:String(err.message).slice(0,140)});continue;}
       const barTime=Date.parse(signal.barCloseAt),lastBar=state.lastEvaluatedCandleBySymbol.get(symbol)||0;
       if(barTime<=lastBar||barTime<=Date.parse(artifact.activationNotBefore))continue;
@@ -180,7 +183,7 @@ export async function runPaperCycle({nowMs=Date.now(),historyLoader=loadHistoryF
       const currentEquity=realizedEquity(state)+[...state.positions].reduce((sum,[s,p])=>
         sum+paperPositionMarkedPnl(p,tickers.quotes.get(s),artifact),0);
       const allowed=sizeFrozenPaper({equityUSD:currentEquity,
-        dayStartEquityUSD:currentDayStartEquity(ledger.records,nowMs),
+        dayStartEquityUSD:currentDayStartEquity(ledger.records,observationNowMs),
         peakEquityUSD:Math.max(currentEquity,peakRealizedEquity(ledger.records)),
         openNotionalUSD:[...state.positions.values()].reduce((sum,p)=>sum+p.notionalUSD,0),
         openPositions:state.positions.size,hasSymbolPosition:state.positions.has(symbol),
