@@ -1,0 +1,45 @@
+name: Freeze ML-068 prospectively - public research only
+on:
+  push:
+    branches:
+      - research/ml068-frozen-prospective-20261108
+    paths:
+      - scripts/freeze-ml068-model.mjs
+      - test/accelerator-ml068-freeze.test.mjs
+      - .github/workflows/ml068-model-freeze.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  freeze-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+      ALPHABOT_UNSEAL_HOLDOUT: "SEALED"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --check scripts/freeze-ml068-model.mjs
+      - run: node --test test/accelerator-ml068-freeze.test.mjs test/accelerator-ml.test.mjs
+      - name: Restore immutable historical public candle cache when available
+        uses: actions/cache/restore@v4
+        with:
+          path: research-data/cache
+          key: bitget-v3-public-1h-${{ github.run_id }}
+          restore-keys: |
+            bitget-v3-public-1h-
+      - name: Freeze model using 180 days ending at locked 2026-11-08 20:00 UTC
+        run: node scripts/freeze-ml068-model.mjs
+      - name: Preserve frozen model artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alphabot-ml068-frozen-model-${{ github.run_id }}
+          path: research-data/reports/frozen-ml068-proposed.json
+          if-no-files-found: warn
+          retention-days: 90
