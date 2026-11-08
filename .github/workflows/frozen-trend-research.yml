@@ -5,8 +5,10 @@ on:
       - research/frozen-trend-pullback-v1-20261108
     paths:
       - "lib/trend-pullback-hypothesis.mjs"
+      - "lib/trend-paper-risk.mjs"
       - "scripts/predeclared-trend-eval.mjs"
       - "test/accelerator-trend-pullback.test.mjs"
+      - "test/accelerator-trend-paper-risk.test.mjs"
       - "test/accelerator-predeclared-cli.test.mjs"
       - ".github/workflows/frozen-trend-research.yml"
   workflow_dispatch:
@@ -32,9 +34,10 @@ jobs:
       - name: Static syntax checks
         run: |
           node --check lib/trend-pullback-hypothesis.mjs
+          node --check lib/trend-paper-risk.mjs
           node --check scripts/predeclared-trend-eval.mjs
       - name: Offline hypothesis and CLI tests
-        run: node --test test/accelerator-trend-pullback.test.mjs test/accelerator-predeclared-cli.test.mjs
+        run: node --test test/accelerator-trend-pullback.test.mjs test/accelerator-predeclared-cli.test.mjs test/accelerator-trend-paper-risk.test.mjs
       - name: Restore old public candle cache (never alter existing history)
         uses: actions/cache/restore@v4
         with:
