@@ -5,6 +5,7 @@ on:
       - research/ml068-frozen-prospective-20261108
     paths:
       - "lib/frozen-ml-forward-*.mjs"
+      - "Dockerfile.ml068-forward"
       - "models/frozen-ml068-20261108.json"
       - "scripts/ml068-paper-cron.mjs"
       - "test/accelerator-ml068-forward-paper.test.mjs"
@@ -33,3 +34,5 @@ jobs:
           node --check scripts/ml068-paper-cron.mjs
       - name: Read-only synthetic prospective trade tests; no external market calls
         run: node --test test/accelerator-ml068-forward-paper.test.mjs test/accelerator-ml068-freeze.test.mjs
+      - name: Build production-isolated public-GET-only PAPER image (never deploy)
+        run: docker build --file Dockerfile.ml068-forward --tag alphabot-frozen-paper-safety:ci .
