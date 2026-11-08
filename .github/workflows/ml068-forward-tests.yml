@@ -1,0 +1,38 @@
+name: Frozen ML-068 prospective paper safety (offline)
+on:
+  push:
+    branches:
+      - research/ml068-frozen-prospective-20261108
+    paths:
+      - "lib/frozen-ml-forward-*.mjs"
+      - "Dockerfile.ml068-forward"
+      - "models/frozen-ml068-20261108.json"
+      - "scripts/ml068-paper-cron.mjs"
+      - "test/accelerator-ml068-forward-paper.test.mjs"
+      - ".github/workflows/ml068-forward-tests.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  no-order-simulation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_TRADING_APPROVED: "false"
+      ALPHABOT_UNSEAL_HOLDOUT: "SEALED"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Syntax validation
+        run: |
+          node --check lib/frozen-ml-forward-ledger.mjs
+          node --check lib/frozen-ml-forward-strategy.mjs
+          node --check scripts/ml068-paper-cron.mjs
+      - name: Read-only synthetic prospective trade tests; no external market calls
+        run: node --test test/accelerator-ml068-forward-paper.test.mjs test/accelerator-ml068-freeze.test.mjs
+      - name: Build production-isolated public-GET-only PAPER image (never deploy)
+        run: docker build --file Dockerfile.ml068-forward --tag alphabot-frozen-paper-safety:ci .
