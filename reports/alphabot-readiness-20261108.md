@@ -22,4 +22,6 @@
 
 `lib/readiness-diagnostic.mjs` is **read-only** and refuses to authorize live orders regardless of its observations. The accompanying unit tests confirm current observed telemetry is **NO-GO**, and that 100 simulated exits cannot be substituted for 100 genuinely reconciled forward paper round-trips.
 
+**Prepared but not deployed:** `lib/forward-paper-evidence.mjs` now audits user-supplied frozen-model candidate IDs, training dataset/model fingerprints, after-freeze observation timestamps, duplicate/open/partial positions and fee/slippage-adjusted completed round trips. It deliberately distinguishes internally matched records from independently reconciled receipts, counts **zero** verified trades without separate evidence, and **does not collect live trades**. The next step is to freeze/train an immutable model and start contemporaneous independent data capture; no forward monitoring service has been started here.
+
 **Do not** enable real funds, merge PR #27 without ledger backup/recovery, overwrite volume records, promote `ml-068` to production, or announce all five conditions met. **Completion requires new time-dependent evidence, not another retrospective backtest.**
