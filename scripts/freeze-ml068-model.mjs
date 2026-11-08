@@ -41,7 +41,7 @@ export async function freezeMain(){
   const series=Object.fromEntries(Object.entries(histories.data).map(([s,b])=>[s,prepareSeries(b)]));
   const n=series.BTCUSDT.length;
   const trainRange={start:110,end:n-FREEZE.trainingTailEmbargoBars};
-  const samples=trainingSamples(series,trainRange,candidate.params,DEFAULT_ASSUMPTIONS);
+  const samples=trainingSamples(series,trainRange,candidate.params.horizon,DEFAULT_ASSUMPTIONS);
   const model=fitLogistic(samples,candidate.params);
   const codeHashes={
     ml:sha(readFileSync(new URL('../lib/accelerator-ml.mjs',import.meta.url))),
