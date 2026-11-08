@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "mode": "PUBLIC_MARKET_RESEARCH_NO_ORDERS",
+  "candidateId": "ml-068",
+  "candidate": {
+    "id": "ml-068",
+    "family": "trained-logistic",
+    "params": {
+      "horizon": 12,
+      "learningRate": 0.003,
+      "l2": 0.001,
+      "epochs": 24,
+      "threshold": 0.51
+    },
+    "stop": 0.04,
+    "take": 0.08
+  },
+  "market": "BITGET_PUBLIC_SPOT_1H",
+  "frozenAsOf": "2026-11-08T20:00:00.000Z",
+  "activationNotBefore": "2026-11-09T00:00:00.000Z",
+  "lookbackDays": 180,
+  "universe": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "LINKUSDT",
+    "ADAUSDT"
+  ],
+  "trainingLastLabelExcludedAtOrAfter": "2026-11-07T20:00:00.000Z",
+  "trainingRange": {
+    "start": 110,
+    "end": 4296
+  },
+  "trainingDatasetSha256": "21ca7752351dff157318241a182a4712a6e0e993946552314434ae45e2cf06b8",
+  "trainingAssetChecksums": [
+    {
+      "symbol": "ADAUSDT",
+      "datasetSha256": "3ba4aa45991f2a6d90c72ed447b7476c29a1ebb3594ed6eb87f3a08d9603685c"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "datasetSha256": "49ced5a5b8023613cf87406912d7e81954883aa2baa15be147958907ce66eb00"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "datasetSha256": "d91f845debfb53630d5cfe3f0b1907b97d2c66ced4b8c126e022dac41d1d6c12"
+    },
+    {
+      "symbol": "LINKUSDT",
+      "datasetSha256": "d4a9738db1d3055546ac964c68e748b7c03896ed78fd93a264c7308ecdf478bf"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "datasetSha256": "7dcb9201a33f4e2d8dfbe0c02891709eeeeb11b1605ef1ae2c962d07ffcb6c4c"
+    }
+  ],
+  "codeHashes": {
+    "ml": "9fe5aa2d8022e56e3492665fe7c6ba5323c4479e1b38bed08a1d93a50cf1fdd8",
+    "core": "68adb7054d8271e55f29869e158111ba0e0d650b641ebe45798abde135ddd41f",
+    "freeze": "300746f8793d402447c4dbf105d52af2d48cfc57c5e9b26dcfff871874f9598f"
+  },
+  "assumptions": {
+    "feePerSide": 0.001,
+    "adverseSlippagePerSide": 0.001,
+    "assumedHalfSpreadPerSide": 0.0005,
+    "notionalUSD": 100,
+    "initialCapitalUSD": 1000,
+    "minQuoteTurnoverPerBarUSD": 30000,
+    "maxHoldBars": 72,
+    "stopCooldownBars": 6
+  },
+  "model": {
+    "weights": [
+      -0.06860962189013323,
+      -0.045084985518895414,
+      -0.0285826892483059,
+      0.3191858865621852,
+      -0.12192351142131422,
+      0.02893414501377739,
+      0.013068646036053094,
+      0.27487455872650207,
+      -0.04787842490567458
+    ],
+    "intercept": -1.1245792737605982,
+    "scaler": {
+      "mean": [
+        -0.000008936353669266967,
+        -0.000053741082697379265,
+        -0.0001900837777386348,
+        -0.00039036478459184666,
+        -0.002804346086520394,
+        0.008510833553596359,
+        -0.23471853990657932,
+        0.005455332910013206,
+        -0.00040019602903111786
+      ],
+      "std": [
+        0.0064318080148651246,
+        0.01516400395080243,
+        0.03069674935137802,
+        0.016663913634299657,
+        0.2371786991469042,
+        0.006773313067055437,
+        0.7711138403388931,
+        0.0034070590333222855,
+        0.028939575069124323
+      ]
+    },
+    "trainedExamples": 20870,
+    "positiveRate": 0.27594633445136557,
+    "featureNames": [
+      "logReturn1",
+      "logReturn6",
+      "logReturn24",
+      "emaSpread10_50",
+      "rsi14Centered",
+      "barRangePct",
+      "logVolumeRatio20",
+      "realizedVol12",
+      "ema80Distance"
+    ],
+    "trainingEndExclusive": 4296,
+    "horizon": 12,
+    "learningRate": 0.003,
+    "l2": 0.001,
+    "epochs": 24
+  },
+  "modelSha256": "96aabf2d6fec52f3e2066d0afe44ac23cbfb4fa691333560301f1405bfe1177c",
+  "historicalSelectionCaveat": "Historical validation selected this ID; freeze once and assess ONLY observations captured after activation.",
+  "independentOosPassed": false,
+  "forwardPaperTradesVerified": 0,
+  "liveMoneyReady": false,
+  "manifestSha256": "75f4945e7e48553309afd91135dffd4d7a92130e0c25b066d8c47e71767736e1"
+}
