@@ -172,12 +172,24 @@ async function publicGet(path,params={}) {
   if(j.code!=="00000" || !Array.isArray(j.data))throw new Error("BitGet GET response invalid "+path);
   return j.data;
 }
+/** Newly-listed symbols naturally have fewer closed candles. Treat this as a
+ * no-signal warmup, never as an API or simulation error. */
+export function requireMatureCandleHistory(closed,granularity,symbol) {
+  if(!Array.isArray(closed)) throw new Error("SHADOW_CANDLES_INVALID");
+  if(closed.length<22) {
+    const err=new Error("Not enough CLOSED "+granularity+" bars for "+symbol);
+    err.code="SHADOW_HISTORY_NOT_READY";
+    err.closedBars=closed.length;
+    throw err;
+  }
+  return closed;
+}
 async function candles(symbol,granularity) {
   const key=symbol+":"+granularity,old=cache.get(key),now=Date.now();
   if(old && now-old.at<candleTtlMs[granularity])return old.bars;
   const rows=await publicGet("/api/v2/spot/market/candles",{symbol,granularity,limit:120});
   const closed=parseClosedCandles(rows,granularity,now);
-  if(closed.length<22)throw new Error("Not enough CLOSED "+granularity+" bars for "+symbol);
+  requireMatureCandleHistory(closed,granularity,symbol);
   cache.set(key,{at:now,bars:closed});
   return closed;
 }
@@ -271,10 +283,17 @@ async function cycle(){
   const needGran={"15min":new Set([...CORE,...movers]),"1h":new Set(CORE),
     "4h":new Set(CORE),"1day":new Set(CORE),"1week":new Set(CORE)};
   const cached={};
+  const notReady=[];
   for(const gran of Object.keys(needGran)){
     for(const symbol of needGran[gran]){
       try {cached[symbol]??={};cached[symbol][gran]=await candles(symbol,gran);}
-      catch(err){errors++;emit("SHADOW_MARKET_WARNING",{step:"candles",symbol,gran,error:String(err.message).slice(0,120)});}
+      catch(err){
+        if(err?.code==="SHADOW_HISTORY_NOT_READY") {
+          notReady.push({symbol,gran,closedBars:err.closedBars});
+          continue; // no stale/partial candle signal for immature markets
+        }
+        errors++;emit("SHADOW_MARKET_WARNING",{step:"candles",symbol,gran,error:String(err.message).slice(0,120)});
+      }
     }
   }
   for(const symbol of symbols){
@@ -293,9 +312,11 @@ async function cycle(){
     }
   }
   const progress=(Date.now()-STARTED)/DURATION_MS;
+  if(notReady.length) emit("SHADOW_HISTORY_WARMUP",{skipped:notReady.length,markets:notReady});
   saveState();
   emit("SHADOW_CYCLE",{cycle:cycles,progressPct:f(progress*100,1),durationSec:f((Date.now()-start)/1000,2),
     trackedSymbols:symbols,marketQuotes:tickers.size,knownListings:knownListingsCount,newListings:[...listings],errors,
+    historyNotReadyCount:notReady.length,
     stats:snapshot(tickers)});
 }
 async function main(){

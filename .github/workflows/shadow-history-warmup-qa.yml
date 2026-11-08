@@ -1,0 +1,24 @@
+name: Shadow new-listing history guard (read-only review)
+on:
+  push:
+    branches:
+      - fix/shadow-history-warmup-20261108
+  pull_request:
+    branches:
+      - fix/continuous-readonly-shadow-20261023
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PAPER_TRADING: 'true'
+      LIVE_TRADING_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check scripts/market-shadow-test.mjs
+      - run: node --test test/market-shadow.test.mjs test/shadow-history-warmup.test.mjs test/shadow-checkpoint.test.mjs
