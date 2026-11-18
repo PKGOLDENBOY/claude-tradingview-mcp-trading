@@ -18,7 +18,10 @@ import {FORWARD_MODE,inspectForwardLedger,appendForwardRecord,
 const MODEL_URL=new URL('../models/frozen-ml068-20261108.json',import.meta.url);
 const STORE='/forward-data/ml068-prospective.ndjson';
 const LOCK='/forward-data/ml068-prospective.lock';
-const CACHE='/forward-data/closed-1h-candle-cache';
+// Preserve the original checksum-verified cache as evidence. Rebuild from public
+// closed candles in a separate directory after the exchange revised a BTC bar.
+// Never rewrite the frozen model, ledger, or prior research data.
+const CACHE='/forward-data/closed-1h-candle-cache-rebuild-20261118';
 const sha=v=>createHash('sha256').update(v).digest('hex');
 const round=n=>Math.round(n*1e6)/1e6;
 const stamp=now=>new Date(now).toISOString();
